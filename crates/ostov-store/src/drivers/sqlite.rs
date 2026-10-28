@@ -19,6 +19,11 @@ impl Dialect for SqliteDialect {
     fn id_column(&self) -> &'static str {
         "INTEGER PRIMARY KEY"
     }
+
+    // SQLite пишет одной транзакцией за раз, построчной блокировки у него нет.
+    fn lock_rows(&self) -> &'static str {
+        ""
+    }
 }
 
 /// База режима «один компьютер»: файл SQLite рядом с приложением.

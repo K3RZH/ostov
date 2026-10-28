@@ -42,6 +42,11 @@ pub trait Dialect {
     /// Описание колонки `id` с автоувеличением, для `CREATE TABLE`.
     fn id_column(&self) -> &'static str;
 
+    /// Хвост `SELECT`, блокирующий прочитанные строки до конца транзакции.
+    fn lock_rows(&self) -> &'static str {
+        " FOR UPDATE"
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ostov_store::{DecimalError, StoreError};
+use ostov_store::{Decimal, DecimalError, StoreError};
 
 #[derive(Debug)]
 pub enum CoreError {
@@ -14,6 +14,12 @@ pub enum CoreError {
         table: String,
         id: i64,
     },
+    /// Проведение увело бы остаток в минус.
+    NegativeBalance {
+        register: String,
+        resource: String,
+        balance: Decimal,
+    },
     Invalid(String),
 }
 
@@ -25,6 +31,14 @@ impl fmt::Display for CoreError {
             Self::VersionConflict { table, id } => write!(
                 f,
                 "запись {id} в {table} уже изменил другой пользователь: откройте её заново"
+            ),
+            Self::NegativeBalance {
+                register,
+                resource,
+                balance,
+            } => write!(
+                f,
+                "не хватает остатка: {resource} в {register} стал бы {balance}"
             ),
             Self::Invalid(msg) => write!(f, "{msg}"),
         }
