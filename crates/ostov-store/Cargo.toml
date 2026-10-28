@@ -10,8 +10,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+postgres = { version = "0.19.14", optional = true }
 rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
 
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
+postgres = ["dep:postgres"]

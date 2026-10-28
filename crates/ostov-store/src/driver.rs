@@ -17,7 +17,7 @@ pub type Row = Vec<Value>;
 #[derive(Debug)]
 pub enum StoreError {
     Database(String),
-    /// В колонке оказался float — в учётных данных его быть не должно.
+    /// Тип колонки или параметра, которого нет в `Value` (например float).
     UnsupportedType(String),
 }
 
@@ -25,7 +25,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "ошибка базы данных: {msg}"),
-            Self::UnsupportedType(column) => write!(f, "неподдерживаемый тип в колонке {column}"),
+            Self::UnsupportedType(what) => write!(f, "неподдерживаемый тип: {what}"),
         }
     }
 }

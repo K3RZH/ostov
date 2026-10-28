@@ -4,8 +4,7 @@
 
 pub mod decimal;
 pub mod driver;
-#[cfg(feature = "sqlite")]
-pub mod sqlite;
+pub mod drivers;
 
 pub use decimal::{Decimal, DecimalError, MAX_SCALE};
 pub use driver::{Dialect, Driver, Row, StoreError, Value};
