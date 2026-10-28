@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+/.idea/
+/.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Локальные секреты и базы
+.env
+*.db
+*.sqlite
