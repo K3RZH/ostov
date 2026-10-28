@@ -13,6 +13,10 @@ impl Dialect for PostgresDialect {
     fn placeholder(&self, n: usize) -> String {
         format!("${n}")
     }
+
+    fn id_column(&self) -> &'static str {
+        "BIGSERIAL PRIMARY KEY"
+    }
 }
 
 /// База режима «сервер в локальной сети».

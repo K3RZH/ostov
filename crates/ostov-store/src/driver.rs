@@ -39,6 +39,9 @@ pub trait Dialect {
     /// Параметр с номером `n`, начиная с 1.
     fn placeholder(&self, n: usize) -> String;
 
+    /// Описание колонки `id` с автоувеличением, для `CREATE TABLE`.
+    fn id_column(&self) -> &'static str;
+
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }

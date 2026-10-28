@@ -15,6 +15,10 @@ impl Dialect for SqliteDialect {
     fn placeholder(&self, n: usize) -> String {
         format!("?{n}")
     }
+
+    fn id_column(&self) -> &'static str {
+        "INTEGER PRIMARY KEY"
+    }
 }
 
 /// База режима «один компьютер»: файл SQLite рядом с приложением.
