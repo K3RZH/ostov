@@ -1,0 +1,95 @@
+import { Theme, Shape } from "theme.slint";
+import { Button, ButtonKind } from "components/button.slint";
+import { TextField } from "components/text-field.slint";
+import { Checkbox, Radio, Switch } from "components/choice.slint";
+
+// Витрина компонентов: смотреть вид и состояния, переключать тему и скругление.
+export component ShowcaseWindow inherits Window {
+    title: "Ostov: витрина компонентов";
+    preferred-width: 880px;
+    preferred-height: 760px;
+    default-font-family: "Open Sans";
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+        alignment: start;
+
+        Text {
+            text: "Кнопки";
+            font-size: Theme.font-title;
+            font-weight: 700;
+            color: Theme.text;
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            alignment: start;
+            Button { text: "Светлая"; clicked => { Theme.dark = false; } }
+            Button { text: "Тёмная"; clicked => { Theme.dark = true; } }
+            Rectangle { width: Theme.space-24; }
+            Button { text: "Строгое"; clicked => { Shape.control-radius = 4px; } }
+            Button { text: "Обычное"; clicked => { Shape.control-radius = 6px; } }
+            Button { text: "Мягкое"; clicked => { Shape.control-radius = 8px; } }
+            Button { text: "Капсула"; clicked => { Shape.control-radius = 18px; } }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            alignment: start;
+            Button { text: "Провести"; kind: ButtonKind.primary; }
+            Button { text: "Записать"; kind: ButtonKind.secondary; }
+            Button { text: "Закрыть"; kind: ButtonKind.text; }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            alignment: start;
+            Button { text: "Провести"; kind: ButtonKind.primary; enabled: false; }
+            Button { text: "Записать"; kind: ButtonKind.secondary; enabled: false; }
+            Button { text: "Закрыть"; kind: ButtonKind.text; enabled: false; }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            alignment: start;
+            Button { text: "Малая"; control-height: Theme.control-sm; }
+            Button { text: "Средняя"; }
+            Button { text: "Крупная"; control-height: Theme.control-lg; }
+        }
+        Text {
+            text: "Поля ввода";
+            font-size: Theme.font-title;
+            font-weight: 700;
+            color: Theme.text;
+        }
+
+        GridLayout {
+            spacing: Theme.space-16;
+            Row {
+                TextField { label: "Наименование"; placeholder: "Введите значение"; }
+                TextField { label: "Наименование"; text: "Мука пшеничная в/с"; }
+                TextField { label: "Количество"; text: "25,000"; unit: "кг"; numeric: true; }
+                TextField { label: "Номер"; text: "17"; read-only: true; }
+            }
+            Row {
+                TextField { label: "Недоступно"; text: "Значение"; enabled: false; }
+                TextField { label: "Ошибка"; text: "-5,00"; error: "Сумма не может быть отрицательной"; }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-24;
+            alignment: start;
+            Checkbox { text: "Включено"; checked: true; }
+            Checkbox { text: "Выключено"; }
+            Checkbox { text: "Частично"; indeterminate: true; }
+            Checkbox { text: "Недоступно"; enabled: false; checked: true; }
+            Radio { text: "Выбрано"; selected: true; }
+            Radio { text: "Не выбрано"; }
+            Switch { text: "Вкл."; on: true; }
+            Switch { text: "Выкл."; }
+        }
+    }
+}

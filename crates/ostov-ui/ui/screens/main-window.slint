@@ -1,0 +1,373 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "../components/icon.slint";
+import { IconButton } from "../components/icon-button.slint";
+
+// Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
+export struct NavRow {
+    id: int,
+    title: string,
+    icon: string,
+    level: int,
+    is-group: bool,
+    expanded: bool,
+    selected: bool,
+    favorite: bool,
+}
+
+export struct TabItem { title: string, icon: string, modified: bool }
+
+component NavRowView inherits Rectangle {
+    in property <NavRow> entry;
+    in property <bool> collapsed;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Shape.control-radius;
+    background: root.entry.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-8 + (root.collapsed ? 0px : root.entry.level * 16px);
+        padding-right: Theme.space-8;
+        spacing: Theme.space-8;
+        alignment: root.collapsed ? center : start;
+
+        if !root.collapsed : VerticalLayout {
+            alignment: center;
+            if root.entry.is-group : Icon {
+                name: root.entry.expanded ? "chevron-down" : "chevron-right";
+                tint: Theme.text-muted;
+                width: 16px;
+                height: 16px;
+            }
+            if !root.entry.is-group : Rectangle { width: 16px; height: 16px; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.entry.icon;
+                tint: root.entry.is-group ? Theme.text-muted : Theme.accent-text;
+            }
+        }
+        if !root.collapsed : Text {
+            text: root.entry.title;
+            font-size: Theme.font-body;
+            font-weight: root.entry.is-group || root.entry.selected ? 600 : 400;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if !root.collapsed && root.entry.favorite : VerticalLayout {
+            alignment: center;
+            Icon { name: "star-filled"; tint: Theme.accent-text; width: 16px; height: 16px; }
+        }
+    }
+}
+
+component TabView inherits Rectangle {
+    in property <TabItem> tab;
+    in property <bool> active;
+    callback selected();
+    callback closed();
+
+    height: 40px;
+    min-width: content.preferred-width;
+    background: root.active ? Theme.bg : transparent;
+
+    if root.active : Rectangle {
+        y: 0px;
+        height: 2px;
+        background: Theme.accent;
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.selected(); }
+    }
+
+    content := HorizontalLayout {
+        padding-left: Theme.space-12;
+        padding-right: Theme.space-8;
+        spacing: Theme.space-8;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.tab.icon;
+                tint: root.active ? Theme.accent-text : Theme.text-muted;
+            }
+        }
+        Text {
+            text: root.tab.title;
+            font-size: Theme.font-body;
+            font-weight: root.active ? 600 : 400;
+            color: root.active ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+        }
+        if root.tab.modified : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: "close";
+                control-size: 24px;
+                clicked => { root.closed(); }
+            }
+        }
+    }
+}
+
+component Separator inherits Rectangle {
+    width: 1px;
+    height: 20px;
+    background: Theme.border;
+}
+
+// Главное окно: шапка, навигация, вкладки, содержимое, строка состояния.
+// Сейчас заглушка: данные примерные, содержимое вкладок появится вместе с ядром.
+export component MainWindow inherits Window {
+    in property <string> base-name: "Кафе-2026";
+    in property <string> database-name: "Кафе-2026.sqlite";
+    in property <string> mode-text: "Режим: локально";
+    in property <string> user-text: "Артём (кладовщик)";
+    in property <string> status-message: "Готово";
+    in property <string> app-version: "v0.1.0";
+    in property <[NavRow]> nav;
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    in-out property <bool> nav-collapsed;
+    in-out property <string> search;
+    callback nav-clicked(int);
+    callback tab-selected(int);
+    callback tab-closed(int);
+
+    title: "Ostov — " + root.base-name;
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    min-width: 1000px;
+    min-height: 600px;
+    default-font-family: "Open Sans";
+    background: Theme.bg;
+
+    VerticalLayout {
+        // Шапка
+        Rectangle {
+            height: 48px;
+            background: Theme.surface;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-12;
+                padding-right: Theme.space-12;
+                spacing: Theme.space-12;
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../../assets/logo.png");
+                        image-fit: contain;
+                        width: 65px;
+                        height: 40px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text { text: "Ostov"; font-size: Theme.font-subtitle; font-weight: 600; color: Theme.text; }
+                }
+                VerticalLayout { alignment: center; Separator { } }
+                VerticalLayout {
+                    alignment: center;
+                    Text { text: root.base-name; font-size: Theme.font-body; color: Theme.text-muted; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Rectangle {
+                    width: 400px;
+                    horizontal-stretch: 0;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            height: 32px;
+                            border-radius: Shape.control-radius;
+                            background: Theme.surface-alt;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            HorizontalLayout {
+                                padding-left: Theme.space-8;
+                                padding-right: Theme.space-8;
+                                spacing: Theme.space-8;
+                                VerticalLayout { alignment: center; Icon { name: "search"; tint: Theme.text-muted; width: 16px; height: 16px; } }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    TextInput {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        single-line: true;
+                                        vertical-alignment: center;
+                                        font-size: Theme.font-body;
+                                        color: Theme.text;
+                                        text <=> root.search;
+                                    }
+                                    if root.search == "" : Text {
+                                        x: 0px;
+                                        width: parent.width;
+                                        text: "Поиск по системе";
+                                        font-size: Theme.font-body;
+                                        color: Theme.text-muted;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: left;
+                                    }
+                                }
+                                VerticalLayout { alignment: center; Text { text: "Ctrl+K"; font-size: Theme.font-caption; color: Theme.text-muted; } }
+                            }
+                        }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                VerticalLayout { alignment: center; IconButton { icon: "plus"; } }
+                VerticalLayout { alignment: center; IconButton { icon: "bell"; } }
+                VerticalLayout { alignment: center; IconButton { icon: "help"; } }
+                VerticalLayout { alignment: center; IconButton { icon: "settings"; } }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: Theme.accent-soft;
+                        Text { text: "АК"; font-size: Theme.font-caption; font-weight: 600; color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            // Навигация
+            Rectangle {
+                width: root.nav-collapsed ? 56px : 280px;
+                background: Theme.bg;
+                animate width { duration: 150ms; easing: ease-out; }
+                Rectangle {
+                    x: parent.width - 1px;
+                    width: 1px;
+                    background: Theme.border;
+                }
+                VerticalLayout {
+                    padding: Theme.space-8;
+                    spacing: Theme.space-4;
+                    HorizontalLayout {
+                        height: 32px;
+                        padding-left: Theme.space-8;
+                        alignment: root.nav-collapsed ? center : space-between;
+                        if !root.nav-collapsed : Text {
+                            text: "НАВИГАЦИЯ";
+                            font-size: Theme.font-caption;
+                            font-weight: 600;
+                            color: Theme.text-muted;
+                            vertical-alignment: center;
+                        }
+                        IconButton {
+                            icon: root.nav-collapsed ? "chevrons-right" : "chevrons-left";
+                            control-size: 28px;
+                            clicked => { root.nav-collapsed = !root.nav-collapsed; }
+                        }
+                    }
+                    Flickable {
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+                            for item in root.nav : NavRowView {
+                                entry: item;
+                                collapsed: root.nav-collapsed;
+                                clicked => { root.nav-clicked(item.id); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                // Вкладки
+                Rectangle {
+                    height: 40px;
+                    background: Theme.surface-alt;
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    HorizontalLayout {
+                        padding-left: Theme.space-8;
+                        alignment: start;
+                        for tab[i] in root.tabs : TabView {
+                            tab: tab;
+                            active: i == root.active-tab;
+                            selected => { root.tab-selected(i); }
+                            closed => { root.tab-closed(i); }
+                        }
+                    }
+                }
+                // Содержимое вкладки
+                Rectangle {
+                    background: Theme.bg;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: Theme.space-8;
+                        Text {
+                            text: root.tabs.length > 0 ? root.tabs[root.active-tab].title : "Нет открытых вкладок";
+                            font-size: Theme.font-title;
+                            font-weight: 700;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Содержимое появится после подключения ядра";
+                            font-size: Theme.font-body;
+                            color: Theme.text-muted;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Строка состояния
+        Rectangle {
+            height: 24px;
+            background: Theme.surface-alt;
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                padding-left: Theme.space-12;
+                padding-right: Theme.space-12;
+                spacing: Theme.space-12;
+                VerticalLayout { alignment: center; Icon { name: "database"; tint: Theme.text-muted; width: 14px; height: 14px; } }
+                VerticalLayout { alignment: center; Text { text: root.database-name; font-size: Theme.font-caption; color: Theme.text-muted; } }
+                VerticalLayout { alignment: center; Separator { height: 14px; } }
+                VerticalLayout { alignment: center; Text { text: root.mode-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
+                Rectangle { horizontal-stretch: 1; }
+                VerticalLayout { alignment: center; Icon { name: "success"; tint: Theme.accent-text; width: 14px; height: 14px; } }
+                VerticalLayout { alignment: center; Text { text: root.status-message; font-size: Theme.font-caption; color: Theme.text; } }
+                Rectangle { horizontal-stretch: 1; }
+                VerticalLayout { alignment: center; Icon { name: "user"; tint: Theme.text-muted; width: 14px; height: 14px; } }
+                VerticalLayout { alignment: center; Text { text: root.user-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
+                VerticalLayout { alignment: center; Separator { height: 14px; } }
+                VerticalLayout { alignment: center; Text { text: root.app-version; font-size: Theme.font-caption; color: Theme.text-muted; } }
+            }
+        }
+    }
+}

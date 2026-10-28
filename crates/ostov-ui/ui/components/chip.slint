@@ -1,0 +1,31 @@
+import { Theme } from "../theme.slint";
+
+export enum ChipKind { neutral, posted, draft, error }
+
+// Чип статуса: «Проведён», «Черновик», «Ошибка», нейтральная метка.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <ChipKind> kind: ChipKind.neutral;
+
+    height: 20px;
+    min-width: label.preferred-width + 16px;
+    max-width: label.preferred-width + 16px;
+    border-radius: 4px;
+    background: root.kind == ChipKind.posted ? (Theme.dark ? #24392A : #E5F3E6)
+        : root.kind == ChipKind.draft ? (Theme.dark ? #403018 : #FFF3D6)
+        : root.kind == ChipKind.error ? Theme.danger-soft
+        : Theme.surface-alt;
+
+    label := Text {
+        x: 8px;
+        height: 20px;
+        text: root.text;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        vertical-alignment: center;
+        color: root.kind == ChipKind.posted ? (Theme.dark ? #7FD18B : #276B2B)
+            : root.kind == ChipKind.draft ? (Theme.dark ? #F2C46B : #8A5A00)
+            : root.kind == ChipKind.error ? Theme.danger
+            : Theme.text-muted;
+    }
+}

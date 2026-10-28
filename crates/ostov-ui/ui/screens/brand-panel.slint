@@ -1,0 +1,43 @@
+import { Theme } from "../theme.slint";
+
+// Левая панель окон первого запуска: логотип, название, сведения о конфигурации.
+export component BrandPanel inherits Rectangle {
+    in property <string> config-name;
+    in property <string> config-info;
+
+    min-width: 480px;
+    max-width: 480px;
+    background: Theme.surface-alt;
+
+    VerticalLayout {
+        alignment: center;
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+
+        Image {
+            source: @image-url("../../assets/logo.png");
+            image-fit: contain;
+            height: 222px;
+        }
+        Text {
+            text: "Ostov";
+            font-size: Theme.font-display;
+            font-weight: 700;
+            color: Theme.text;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.config-name;
+            font-size: Theme.font-subtitle;
+            font-weight: 600;
+            color: Theme.text;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.config-info;
+            font-size: Theme.font-caption;
+            color: Theme.text-muted;
+            horizontal-alignment: center;
+        }
+    }
+}

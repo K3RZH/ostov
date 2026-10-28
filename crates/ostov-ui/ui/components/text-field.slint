@@ -1,0 +1,92 @@
+import { Theme, Shape } from "../theme.slint";
+
+// Поле ввода по макету «Поля ввода»: подпись над полем, высота 36, фокус рамкой 2 px,
+// ошибка красной рамкой со значком слева (текст ошибки покажет подсказка, она позже).
+export component TextField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in property <string> unit;
+    in property <string> error;
+    in property <bool> numeric;
+    in property <bool> password;
+    in property <bool> read-only;
+    in property <bool> enabled: true;
+    in-out property <string> text;
+    callback edited(string);
+
+    private property <bool> has-error: root.error != "";
+    private property <bool> focused: input.has-focus && root.enabled;
+
+    spacing: Theme.space-4;
+
+    if root.label != "" : Text {
+        text: root.label;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: root.enabled ? Theme.text : Theme.disabled-text;
+    }
+
+    Rectangle {
+        height: Theme.control-md;
+        border-radius: Shape.control-radius;
+        border-width: root.focused || root.has-error ? 2px : 1px;
+        border-color: !root.enabled ? transparent
+            : root.has-error ? Theme.danger
+            : root.focused ? Theme.focus
+            : root.read-only ? Theme.border
+            : Theme.border-strong;
+        background: !root.enabled ? Theme.disabled-bg
+            : root.read-only ? Theme.surface-alt
+            : Theme.surface;
+
+        HorizontalLayout {
+            padding-left: Theme.space-12;
+            padding-right: Theme.space-12;
+            spacing: Theme.space-8;
+
+            if root.has-error : Image {
+                source: @image-url("../../assets/icons/error.svg");
+                colorize: Theme.danger;
+                width: 16px;
+                height: 16px;
+                y: (parent.height - self.height) / 2;
+            }
+
+            Rectangle {
+                input := TextInput {
+                    x: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    single-line: true;
+                    input-type: root.password ? InputType.password : InputType.text;
+                    vertical-alignment: center;
+                    horizontal-alignment: root.numeric ? right : left;
+                    font-size: Theme.font-body;
+                    color: root.enabled ? Theme.text : Theme.disabled-text;
+                    enabled: root.enabled;
+                    read-only: root.read-only;
+                    text <=> root.text;
+                    edited => { root.edited(self.text); }
+                }
+
+                if root.text == "" && root.placeholder != "" : Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.placeholder;
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    horizontal-alignment: root.numeric ? right : left;
+                    overflow: elide;
+                }
+            }
+
+            if root.unit != "" : Text {
+                text: root.unit;
+                font-size: Theme.font-body;
+                color: root.enabled ? Theme.text-muted : Theme.disabled-text;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

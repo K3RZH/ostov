@@ -1,0 +1,54 @@
+// Шрифт встроен в программу (Apache-2.0, текст лицензии: assets/fonts/LICENSE-OpenSans.txt).
+import "../assets/fonts/OpenSans-Regular.ttf";
+import "../assets/fonts/OpenSans-Semibold.ttf";
+import "../assets/fonts/OpenSans-Bold.ttf";
+
+// Токены дизайн-системы Ostov (Figma: Ostov-UI.figcraft, «Дизайн-система»).
+// Цвета, радиусы и размеры берутся только отсюда, в компонентах значений не пишем.
+
+export global Theme {
+    in-out property <bool> dark: false;
+
+    out property <color> bg: root.dark ? #1F1512 : #FAF6EE;
+    out property <color> surface: root.dark ? #2A1D19 : #FFFFFF;
+    out property <color> surface-alt: root.dark ? #342620 : #F3ECDD;
+    out property <color> border: root.dark ? #4A362B : #E3D6BD;
+    out property <color> border-strong: root.dark ? #8C7A68 : #8F8275;
+    out property <color> text: root.dark ? #F6EBD9 : #2E1E1A;
+    out property <color> text-muted: root.dark ? #BBA992 : #6B5A4F;
+    out property <color> accent: #EDA953;
+    out property <color> accent-hover: root.dark ? #F2BB7C : #E39A3A;
+    out property <color> accent-pressed: root.dark ? #F7C98E : #D68A2B;
+    out property <color> on-accent: #2E1E1A;
+    out property <color> accent-text: root.dark ? #F2BB7C : #8A4F0B;
+    out property <color> accent-soft: root.dark ? #4A3320 : #FBE3BC;
+    out property <color> focus: root.dark ? #F2BB7C : #8A4F0B;
+    out property <color> danger: root.dark ? #FF8A80 : #B3261E;
+    out property <color> danger-soft: root.dark ? #4A2523 : #FCE8E6;
+    out property <color> disabled-text: root.dark ? #7C6D60 : #9C8F82;
+    out property <color> disabled-bg: root.dark ? #342620 : #EFE8DA;
+
+    // Размеры: сетка 4 px, высоты контролов 28 / 36 / 44.
+    out property <length> space-4: 4px;
+    out property <length> space-8: 8px;
+    out property <length> space-12: 12px;
+    out property <length> space-16: 16px;
+    out property <length> space-24: 24px;
+    out property <length> control-sm: 28px;
+    out property <length> control-md: 36px;
+    out property <length> control-lg: 44px;
+
+    out property <length> font-caption: 12px;
+    out property <length> font-body: 14px;
+    out property <length> font-subtitle: 16px;
+    out property <length> font-title: 20px;
+    out property <length> font-display: 28px;
+}
+
+// Скругление: настройка пользователя (4 / 6 / 8 px / капсула), по умолчанию 6.
+export global Shape {
+    in-out property <length> control-radius: 6px;
+    out property <length> focus-radius: root.control-radius + 4px;
+    // Карточки и окна: на 2 px больше, чем у контролов (макет: 8 при обычном скруглении).
+    out property <length> surface-radius: root.control-radius + 2px;
+}

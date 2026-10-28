@@ -1,0 +1,50 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+
+// Значок-кнопка: покой без фона, при наведении фон `surface-alt`, при нажатии `border`.
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <length> control-size: Theme.control-md;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: root.control-size;
+    height: root.control-size;
+    border-radius: Shape.control-radius;
+    background: !root.enabled ? transparent
+        : touch.pressed ? Theme.border
+        : touch.has-hover ? Theme.surface-alt
+        : transparent;
+
+    Icon {
+        name: root.icon;
+        tint: !root.enabled ? Theme.disabled-text : touch.has-hover || touch.pressed ? Theme.text : Theme.text-muted;
+    }
+
+    if scope.has-focus && root.enabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Shape.focus-radius;
+        border-width: 2px;
+        border-color: Theme.focus;
+    }
+
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}

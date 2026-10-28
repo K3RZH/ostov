@@ -1,0 +1,52 @@
+import { Theme } from "../theme.slint";
+
+// Все значки интерфейса: имя файла из assets/icons без .svg. Список сгенерирован, новые значки добавлять сюда.
+export global Icons {
+    pure public function source(name: string) -> image {
+        if name == "bar-chart" { return @image-url("../../assets/icons/bar-chart.svg"); }
+        if name == "bell" { return @image-url("../../assets/icons/bell.svg"); }
+        if name == "box" { return @image-url("../../assets/icons/box.svg"); }
+        if name == "calendar" { return @image-url("../../assets/icons/calendar.svg"); }
+        if name == "check" { return @image-url("../../assets/icons/check.svg"); }
+        if name == "chevron-down" { return @image-url("../../assets/icons/chevron-down.svg"); }
+        if name == "chevron-right" { return @image-url("../../assets/icons/chevron-right.svg"); }
+        if name == "chevrons-left" { return @image-url("../../assets/icons/chevrons-left.svg"); }
+        if name == "chevrons-right" { return @image-url("../../assets/icons/chevrons-right.svg"); }
+        if name == "close" { return @image-url("../../assets/icons/close.svg"); }
+        if name == "database" { return @image-url("../../assets/icons/database.svg"); }
+        if name == "document" { return @image-url("../../assets/icons/document.svg"); }
+        if name == "error" { return @image-url("../../assets/icons/error.svg"); }
+        if name == "folder" { return @image-url("../../assets/icons/folder.svg"); }
+        if name == "help" { return @image-url("../../assets/icons/help.svg"); }
+        if name == "home" { return @image-url("../../assets/icons/home.svg"); }
+        if name == "inventory" { return @image-url("../../assets/icons/inventory.svg"); }
+        if name == "list" { return @image-url("../../assets/icons/list.svg"); }
+        if name == "lock" { return @image-url("../../assets/icons/lock.svg"); }
+        if name == "minus" { return @image-url("../../assets/icons/minus.svg"); }
+        if name == "pin" { return @image-url("../../assets/icons/pin.svg"); }
+        if name == "plus" { return @image-url("../../assets/icons/plus.svg"); }
+        if name == "recipe" { return @image-url("../../assets/icons/recipe.svg"); }
+        if name == "search" { return @image-url("../../assets/icons/search.svg"); }
+        if name == "settings" { return @image-url("../../assets/icons/settings.svg"); }
+        if name == "star" { return @image-url("../../assets/icons/star.svg"); }
+        if name == "star-filled" { return @image-url("../../assets/icons/star-filled.svg"); }
+        if name == "stock-in" { return @image-url("../../assets/icons/stock-in.svg"); }
+        if name == "stock-out" { return @image-url("../../assets/icons/stock-out.svg"); }
+        if name == "success" { return @image-url("../../assets/icons/success.svg"); }
+        if name == "transfer" { return @image-url("../../assets/icons/transfer.svg"); }
+        if name == "user" { return @image-url("../../assets/icons/user.svg"); }
+        if name == "users" { return @image-url("../../assets/icons/users.svg"); }
+        if name == "warehouse" { return @image-url("../../assets/icons/warehouse.svg"); }
+        return @image-url("../../assets/icons/document.svg");
+    }
+}
+
+// Значок: имя и цвет (токеном темы).
+export component Icon inherits Image {
+    in property <string> name;
+    in property <color> tint: Theme.text;
+    source: Icons.source(root.name);
+    colorize: root.tint;
+    width: 20px;
+    height: 20px;
+}
