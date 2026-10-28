@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = ["crates/ostov-ui"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"

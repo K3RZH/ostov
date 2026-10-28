@@ -1,0 +1,169 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { Checkbox } from "../components/choice.slint";
+import { BrandPanel } from "brand-panel.slint";
+
+// Окно входа: на сервер, в локальную базу с пользователями, пароль зашифрованной базы.
+// Различаются свойствами: заголовок, источник, нужен ли логин, текст кнопки, ошибка.
+export component LoginWindow inherits Window {
+    in property <string> heading: "Вход на сервер";
+    in property <string> source-name: "kafe-srv.local:7443";
+    in property <string> source-detail: "Соединение защищено (TLS)";
+    // Сервер: замок, локальная база: значок базы.
+    in property <bool> is-server: true;
+    in property <string> change-text: "Сменить";
+    in property <bool> show-login: true;
+    in property <string> hint;
+    in property <string> remember-text: "Запомнить сервер";
+    in property <string> button-text: "Войти";
+    in property <string> error;
+    in property <string> config-name: "Управление складом";
+    in property <string> config-info: "Конфигурация · версия 1.2.0";
+    in-out property <string> login;
+    in-out property <string> password;
+    in-out property <bool> remember: true;
+    callback submit();
+    callback change-source();
+    callback back();
+
+    title: "Ostov — " + root.heading;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: 960px;
+    min-height: 600px;
+    default-font-family: "Open Sans";
+    background: Theme.bg;
+
+    HorizontalLayout {
+        BrandPanel {
+            config-name: root.config-name;
+            config-info: root.config-info;
+        }
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding-left: Theme.space-24;
+                padding-right: Theme.space-24;
+                VerticalLayout {
+                    min-width: 360px;
+                    max-width: 520px;
+                    spacing: Theme.space-16;
+
+                    Text {
+                        text: root.heading;
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    Rectangle {
+                        height: 52px;
+                        border-radius: Shape.surface-radius;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        background: Theme.surface;
+                        HorizontalLayout {
+                            padding-left: Theme.space-12;
+                            padding-right: Theme.space-8;
+                            spacing: Theme.space-12;
+                            VerticalLayout {
+                                alignment: center;
+                                Image {
+                                    source: root.is-server ? @image-url("../../assets/icons/lock.svg") : @image-url("../../assets/icons/database.svg");
+                                    colorize: Theme.text;
+                                    width: 20px;
+                                    height: 20px;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.source-name;
+                                    font-size: Theme.font-body;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Text {
+                                    text: root.source-detail;
+                                    font-size: Theme.font-caption;
+                                    color: Theme.text-muted;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Button {
+                                    text: root.change-text;
+                                    kind: ButtonKind.text;
+                                    clicked => { root.change-source(); }
+                                }
+                            }
+                        }
+                    }
+                    if root.hint != "" : Text {
+                        text: root.hint;
+                        font-size: Theme.font-caption;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                    if root.show-login : TextField {
+                        label: "Логин";
+                        text <=> root.login;
+                    }
+                    TextField {
+                        label: "Пароль";
+                        password: true;
+                        text <=> root.password;
+                        error: root.error == "" ? "" : "!";
+                    }
+                    if root.error != "" : Rectangle {
+                        height: banner.preferred-height;
+                        border-radius: Shape.control-radius;
+                        border-width: 1px;
+                        border-color: Theme.danger;
+                        background: Theme.danger-soft;
+                        banner := HorizontalLayout {
+                            padding: Theme.space-12;
+                            spacing: Theme.space-8;
+                            VerticalLayout {
+                                alignment: center;
+                                Image {
+                                    source: @image-url("../../assets/icons/error.svg");
+                                    colorize: Theme.danger;
+                                    width: 16px;
+                                    height: 16px;
+                                }
+                            }
+                            Text {
+                                text: root.error;
+                                font-size: Theme.font-body;
+                                color: Theme.danger;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    if root.remember-text != "" : Checkbox {
+                        text: root.remember-text;
+                        checked <=> root.remember;
+                    }
+                    Button {
+                        text: root.button-text;
+                        kind: ButtonKind.primary;
+                        control-height: Theme.control-lg;
+                        enabled: root.error == "";
+                        clicked => { root.submit(); }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Назад к выбору режима";
+                            kind: ButtonKind.text;
+                            clicked => { root.back(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

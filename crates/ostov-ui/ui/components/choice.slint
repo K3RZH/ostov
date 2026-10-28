@@ -1,0 +1,203 @@
+import { Theme } from "../theme.slint";
+
+// Флажок, радио и переключатель по макету «Поля ввода».
+// Высота строки 20, значок слева, подпись справа с зазором 8.
+
+component FocusRing inherits Rectangle {
+    in property <length> radius: 4px;
+    in property <length> inner-width: 16px;
+    in property <length> inner-height: 16px;
+    x: -3px;
+    y: -3px;
+    width: root.inner-width + 6px;
+    height: root.inner-height + 6px;
+    border-radius: root.radius + 3px;
+    border-width: 2px;
+    border-color: Theme.focus;
+}
+
+component ChoiceLabel inherits Text {
+    in property <bool> enabled: true;
+    x: 24px;
+    height: 20px;
+    font-size: Theme.font-body;
+    color: root.enabled ? Theme.text : Theme.disabled-text;
+    vertical-alignment: center;
+}
+
+export component Checkbox inherits Rectangle {
+    in property <string> text;
+    in property <bool> indeterminate;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled(bool);
+
+    private property <bool> marked: root.checked || root.indeterminate;
+
+    height: 20px;
+    min-width: 24px + label.preferred-width;
+
+    box := Rectangle {
+        x: 0px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border-width: root.marked && root.enabled ? 0px : 1px;
+        border-color: root.enabled ? (touch.has-hover ? Theme.text-muted : Theme.border-strong) : Theme.border;
+        background: !root.enabled ? Theme.disabled-bg
+            : root.marked ? (touch.has-hover ? Theme.accent-hover : Theme.accent)
+            : Theme.surface;
+
+        if root.marked : Image {
+            source: root.indeterminate && !root.checked ? @image-url("../../assets/icons/minus.svg") : @image-url("../../assets/icons/check.svg");
+            colorize: root.enabled ? Theme.on-accent : Theme.disabled-text;
+            width: 14px;
+            height: 14px;
+        }
+
+        if scope.has-focus && root.enabled : FocusRing { }
+    }
+
+    label := ChoiceLabel {
+        text: root.text;
+        enabled: root.enabled;
+    }
+
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " ") {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+}
+
+export component Radio inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 20px;
+    min-width: 24px + label.preferred-width;
+
+    ring := Rectangle {
+        x: 0px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        border-width: root.selected && root.enabled ? 1.5px : 1px;
+        border-color: !root.enabled ? Theme.border
+            : root.selected ? Theme.accent-text
+            : touch.has-hover ? Theme.text-muted : Theme.border-strong;
+        background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+        if root.selected : Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: root.enabled ? Theme.accent-text : Theme.disabled-text;
+        }
+
+        if scope.has-focus && root.enabled : FocusRing { radius: 8px; }
+    }
+
+    label := ChoiceLabel {
+        text: root.text;
+        enabled: root.enabled;
+    }
+
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " ") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Switch inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in-out property <bool> on;
+    callback toggled(bool);
+
+    height: 20px;
+    min-width: 40px + label.preferred-width;
+
+    track := Rectangle {
+        x: 0px;
+        y: 1px;
+        width: 32px;
+        height: 18px;
+        border-radius: 9px;
+        background: !root.enabled ? Theme.disabled-bg
+            : root.on ? (touch.has-hover ? Theme.accent-hover : Theme.accent)
+            : (touch.has-hover ? Theme.text-muted : Theme.border-strong);
+
+        Rectangle {
+            x: root.on ? parent.width - self.width - 2px : 2px;
+            y: 2px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: !root.enabled ? Theme.disabled-text : root.on ? Theme.on-accent : Theme.surface;
+            animate x { duration: 120ms; easing: ease-out; }
+        }
+
+        if scope.has-focus && root.enabled : FocusRing { radius: 9px; inner-width: 32px; inner-height: 18px; }
+    }
+
+    label := ChoiceLabel {
+        x: 40px;
+        text: root.text;
+        enabled: root.enabled;
+    }
+
+    scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " ") {
+                root.on = !root.on;
+                root.toggled(root.on);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}

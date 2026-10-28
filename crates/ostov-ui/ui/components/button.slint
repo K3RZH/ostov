@@ -1,0 +1,69 @@
+import { Theme, Shape } from "../theme.slint";
+
+export enum ButtonKind { primary, secondary, text }
+
+// Кнопка по макету «Кнопки»: основная (амбер), вторичная (контур), текстовая (как ссылка).
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <ButtonKind> kind: ButtonKind.secondary;
+    in property <length> control-height: Theme.control-md;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    private property <bool> pressed: touch.pressed && root.enabled;
+    private property <bool> hovered: touch.has-hover && root.enabled;
+
+    height: root.control-height;
+    min-width: label.preferred-width + 2 * Theme.space-16;
+    border-radius: Shape.control-radius;
+    border-width: root.kind == ButtonKind.secondary ? 1px : 0px;
+    border-color: !root.enabled ? Theme.border : Theme.border-strong;
+    background: !root.enabled
+        ? (root.kind == ButtonKind.text ? transparent : Theme.disabled-bg)
+        : root.kind == ButtonKind.primary
+            ? (root.pressed ? Theme.accent-pressed : root.hovered ? Theme.accent-hover : Theme.accent)
+            : root.kind == ButtonKind.secondary
+                ? (root.pressed ? Theme.border : root.hovered ? Theme.surface-alt : Theme.surface)
+                : transparent;
+
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        color: !root.enabled ? Theme.disabled-text
+            : root.kind == ButtonKind.primary ? Theme.on-accent
+            : root.kind == ButtonKind.text ? (root.pressed ? Theme.text : root.hovered ? Theme.accent-text : Theme.accent-text)
+            : Theme.text;
+    }
+
+    // Кольцо фокуса клавиатуры.
+    if focus-scope.has-focus && root.enabled : Rectangle {
+        x: -3px;
+        y: -3px;
+        width: parent.width + 6px;
+        height: parent.height + 6px;
+        border-radius: Shape.focus-radius;
+        border-width: 2px;
+        border-color: Theme.focus;
+    }
+
+    focus-scope := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => {
+                root.clicked();
+            }
+        }
+    }
+}
