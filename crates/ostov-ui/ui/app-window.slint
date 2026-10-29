@@ -27,6 +27,8 @@ export component AppWindow inherits Window {
     in-out property <string> new-address;
     in-out property <string> new-admin-login;
     in-out property <string> new-admin-password;
+    in-out property <string> new-password;
+    in-out property <string> new-password-repeat;
     in-out property <bool> new-protect-password;
     in-out property <bool> new-protect-users;
     callback create-confirmed();
@@ -82,7 +84,7 @@ export component AppWindow inherits Window {
     preferred-width: 1200px;
     preferred-height: 760px;
     min-width: root.page == 2 ? 1000px : 960px;
-    min-height: 600px;
+    min-height: root.page == 0 ? 720px : 600px;
     default-font-family: "Open Sans";
     background: Theme.bg;
 
@@ -128,11 +130,17 @@ export component AppWindow inherits Window {
         address <=> root.new-address;
         admin-login <=> root.new-admin-login;
         admin-password <=> root.new-admin-password;
+        password <=> root.new-password;
+        password-repeat <=> root.new-password-repeat;
         protect-password <=> root.new-protect-password;
         protect-users <=> root.new-protect-users;
         confirmed => { root.create-confirmed(); }
         choose-folder => { root.choose-folder(); }
-        cancelled => { root.creating = false; }
+        cancelled => {
+            root.creating = false;
+            root.new-password = "";
+            root.new-password-repeat = "";
+        }
     }
 
     if root.adding && root.page == 0 : AddDialog {

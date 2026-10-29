@@ -80,6 +80,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_recent(ModelRc::new(VecModel::default()));
             save(&window, dark, &path)
         }
+        "create-password" => {
+            let window = app_window(0)?;
+            window.set_creating(true);
+            window.set_new_name("Кафе-2026".into());
+            window.set_new_protect_password(true);
+            window.set_new_password("secret".into());
+            window.set_new_password_repeat("secre".into());
+            save(&window, dark, &path)
+        }
         "create-local" | "create-server" => {
             let window = app_window(0)?;
             window.set_creating(true);

@@ -61,14 +61,19 @@ export component CreateDialog inherits Rectangle {
     in-out property <string> address;
     in-out property <string> admin-login;
     in-out property <string> admin-password;
+    in-out property <string> password;
+    in-out property <string> password-repeat;
     in-out property <bool> protect-password;
     in-out property <bool> protect-users;
     callback confirmed();
     callback cancelled();
     callback choose-folder();
 
+    private property <bool> mismatch: root.password-repeat != "" && root.password != root.password-repeat;
     private property <bool> valid: root.db-name != ""
-        && (root.server ? root.address != "" && root.admin-login != "" : root.folder != "");
+        && (root.server
+            ? root.address != "" && root.admin-login != ""
+            : root.folder != "" && (!root.protect-password || (root.password != "" && root.password == root.password-repeat)));
 
     background: Theme.scrim;
 
@@ -150,6 +155,22 @@ export component CreateDialog inherits Rectangle {
                 }
                 Checkbox { text: "Защитить паролем"; checked <=> root.protect-password; }
                 Checkbox { text: "Включить пользователей"; checked <=> root.protect-users; }
+                if root.protect-password : TextField {
+                    label: "Пароль базы";
+                    password: true;
+                    text <=> root.password;
+                }
+                if root.protect-password : TextField {
+                    label: "Повторите пароль";
+                    password: true;
+                    text <=> root.password-repeat;
+                    error: root.mismatch ? "!" : "";
+                }
+                if root.protect-password && root.mismatch : Text {
+                    text: "Пароли не совпадают.";
+                    font-size: Theme.font-caption;
+                    color: Theme.danger;
+                }
                 Text {
                     text: "Пароль шифрует файл базы: без него открыть её нельзя. Пользователей можно включить позже.";
                     font-size: Theme.font-caption;

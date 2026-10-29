@@ -305,6 +305,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
             app.set_new_address("".into());
             app.set_new_admin_login("".into());
             app.set_new_admin_password("".into());
+            // Пароль базы здесь не храним: файл создаст ядро, ему и передадим.
+            app.set_new_password("".into());
+            app.set_new_password_repeat("".into());
             app.set_new_protect_password(false);
             app.set_new_protect_users(false);
             app.set_creating(false);
