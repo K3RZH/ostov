@@ -61,6 +61,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_base_name("Кафе-2026".into());
             save(&window, dark, &path)
         }
+        "users" | "user-dialog" => {
+            let window = app_window(2)?;
+            let mut shell = ostov_ui::shell::Shell::demo();
+            shell.click(16);
+            shell.click(17);
+            ostov_ui::app::refresh(&window, &shell);
+            ostov_ui::app::refresh_users(&window, &ostov_ui::users::Directory::demo());
+            window.set_roles(ModelRc::new(VecModel::from(
+                ostov_ui::users::ROLES
+                    .iter()
+                    .map(|role| (*role).into())
+                    .collect::<Vec<slint::SharedString>>(),
+            )));
+            window.set_adding_user(screen == "user-dialog");
+            window.set_nu_role(1);
+            save(&window, dark, &path)
+        }
         "settings" => {
             let window = app_window(2)?;
             window.set_settings_open(true);

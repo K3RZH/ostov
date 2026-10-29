@@ -1,6 +1,7 @@
 import { Theme, Shape } from "../theme.slint";
 import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
+import { UsersView, UserRow } from "users-view.slint";
 
 // Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
 export struct NavRow {
@@ -14,7 +15,7 @@ export struct NavRow {
     favorite: bool,
 }
 
-export struct TabItem { title: string, icon: string, modified: bool }
+export struct TabItem { title: string, icon: string, modified: bool, view: string }
 
 component NavRowView inherits Rectangle {
     in property <NavRow> entry;
@@ -152,6 +153,11 @@ export component MainPage inherits Rectangle {
     callback tab-selected(int);
     callback tab-closed(int);
     callback settings-clicked();
+    // Вкладка «Пользователи и роли»
+    in property <[UserRow]> users;
+    in property <string> user-message;
+    callback user-add-clicked();
+    callback user-toggle(int);
 
     background: Theme.bg;
 
@@ -315,7 +321,13 @@ export component MainPage inherits Rectangle {
                     }
                 }
                 // Содержимое вкладки
-                Rectangle {
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "users" : UsersView {
+                    users: root.users;
+                    message: root.user-message;
+                    add-clicked => { root.user-add-clicked(); }
+                    toggle(i) => { root.user-toggle(i); }
+                }
+                if root.tabs.length == 0 || root.tabs[root.active-tab].view != "users" : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {
                         alignment: center;

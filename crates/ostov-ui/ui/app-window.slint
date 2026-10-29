@@ -5,6 +5,8 @@ import { MainPage, NavRow, TabItem } from "screens/main-page.slint";
 import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
+import { UserDialog } from "screens/user-dialog.slint";
+import { UserRow } from "screens/users-view.slint";
 
 // Единственное окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная).
 // Раньше было три окна, которые прятали и показывали по очереди: на GNOME/Wayland после этого
@@ -44,6 +46,17 @@ export component AppWindow inherits Window {
     callback add-confirmed();
     callback choose-file();
 
+    // Окно «Новый пользователь».
+    in-out property <bool> adding-user;
+    in property <[string]> roles;
+    in property <string> user-error;
+    in-out property <string> nu-login;
+    in-out property <string> nu-name;
+    in-out property <int> nu-role;
+    in-out property <string> nu-password;
+    in-out property <string> nu-repeat;
+    callback user-add-confirmed();
+
     // Настройки интерфейса: выбранные значения хранит Rust (src/settings.rs).
     in-out property <bool> settings-open;
     in-out property <bool> dark-theme;
@@ -80,6 +93,9 @@ export component AppWindow inherits Window {
     in property <[NavRow]> nav <=> main-page.nav;
     in property <[TabItem]> tabs <=> main-page.tabs;
     in property <int> active-tab <=> main-page.active-tab;
+    in property <[UserRow]> users <=> main-page.users;
+    in property <string> user-message <=> main-page.user-message;
+    callback user-toggle <=> main-page.user-toggle;
     callback nav-clicked <=> main-page.nav-clicked;
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
@@ -123,6 +139,7 @@ export component AppWindow inherits Window {
         height: root.height;
         visible: root.page == 2;
         settings-clicked => { root.settings-open = true; }
+        user-add-clicked => { root.adding-user = true; }
     }
 
     if root.creating && root.page == 0 : CreateDialog {
@@ -176,5 +193,25 @@ export component AppWindow inherits Window {
         theme-chosen(dark) => { root.theme-chosen(dark); }
         radius-chosen(mode) => { root.radius-chosen(mode); }
         closed => { root.settings-open = false; }
+    }
+
+    if root.adding-user : UserDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        roles: root.roles;
+        error: root.user-error;
+        login <=> root.nu-login;
+        user-name <=> root.nu-name;
+        role <=> root.nu-role;
+        password <=> root.nu-password;
+        repeat <=> root.nu-repeat;
+        confirmed => { root.user-add-confirmed(); }
+        cancelled => {
+            root.adding-user = false;
+            root.nu-password = "";
+            root.nu-repeat = "";
+        }
     }
 }

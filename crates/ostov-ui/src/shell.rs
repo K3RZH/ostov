@@ -11,6 +11,8 @@ pub struct NavNode {
     /// Ссылка на основной узел: избранное открывает ту же вкладку, что и основной пункт.
     pub link: Option<usize>,
     pub favorite: bool,
+    /// Какой экран показывать во вкладке (пусто: заглушка «появится после ядра»).
+    pub view: &'static str,
 }
 
 /// Строка дерева для показа.
@@ -32,6 +34,7 @@ pub struct Tab {
     pub title: &'static str,
     pub icon: &'static str,
     pub node: usize,
+    pub view: &'static str,
 }
 
 pub struct Shell {
@@ -49,6 +52,7 @@ fn node(title: &'static str, icon: &'static str, parent: Option<usize>, is_group
         is_group,
         link: None,
         favorite: false,
+        view: "",
     }
 }
 
@@ -86,6 +90,7 @@ impl Shell {
             node("Администрирование", "settings", None, true),       // 16
             node("Пользователи и роли", "users", Some(16), false),   // 17
         ];
+        nodes[17].view = "users";
         for (title, icon, target) in [
             ("Поступления товаров", "stock-in", 3),
             ("Остатки и обороты", "bar-chart", 15),
@@ -190,6 +195,7 @@ impl Shell {
             title: node.title,
             icon: node.icon,
             node: id,
+            view: node.view,
         });
         self.active = self.tabs.len() - 1;
     }

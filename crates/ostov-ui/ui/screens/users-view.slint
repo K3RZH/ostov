@@ -1,0 +1,143 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
+
+export struct UserRow { login: string, name: string, role: string, active: bool }
+
+component Header inherits Text {
+    font-size: Theme.font-caption;
+    font-weight: 600;
+    color: Theme.text-muted;
+    vertical-alignment: center;
+}
+
+// Вкладка «Пользователи и роли»: список, добавление, отключение. Роли задаёт конфигурация.
+// Простые строки вместо таблицы ErpGrid: когда она будет, список переедет на неё.
+export component UsersView inherits Rectangle {
+    in property <[UserRow]> users;
+    in property <string> message;
+    callback add-clicked();
+    callback toggle(int);
+
+    background: Theme.bg;
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: "Пользователи и роли";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            Button {
+                text: "Добавить пользователя";
+                kind: ButtonKind.primary;
+                clicked => { root.add-clicked(); }
+            }
+        }
+
+        if root.message != "" : Rectangle {
+            height: banner.preferred-height;
+            border-radius: Shape.control-radius;
+            border-width: 1px;
+            border-color: Theme.danger;
+            background: Theme.danger-soft;
+            banner := HorizontalLayout {
+                padding: Theme.space-12;
+                Text {
+                    text: root.message;
+                    font-size: Theme.font-body;
+                    color: Theme.danger;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Шапка таблицы
+        Rectangle {
+            height: 36px;
+            background: Theme.surface-alt;
+            border-radius: Shape.control-radius;
+            HorizontalLayout {
+                padding-left: Theme.space-12;
+                padding-right: Theme.space-12;
+                spacing: Theme.space-12;
+                Header { text: "Логин"; width: 160px; }
+                Header { text: "Имя"; horizontal-stretch: 1; }
+                Header { text: "Роль"; width: 160px; }
+                Header { text: "Статус"; width: 100px; }
+                Rectangle { width: 110px; }
+            }
+        }
+
+        Flickable {
+            VerticalLayout {
+                alignment: start;
+                for u[i] in root.users : Rectangle {
+                    height: 44px;
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    HorizontalLayout {
+                        padding-left: Theme.space-12;
+                        padding-right: Theme.space-12;
+                        spacing: Theme.space-12;
+                        Text {
+                            text: u.login;
+                            width: 160px;
+                            font-size: Theme.font-body;
+                            font-weight: 600;
+                            color: u.active ? Theme.text : Theme.disabled-text;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: u.name;
+                            horizontal-stretch: 1;
+                            font-size: Theme.font-body;
+                            color: u.active ? Theme.text : Theme.disabled-text;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        VerticalLayout {
+                            width: 160px;
+                            alignment: center;
+                            HorizontalLayout { alignment: start; Chip { text: u.role; } }
+                        }
+                        VerticalLayout {
+                            width: 100px;
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: start;
+                                Chip {
+                                    text: u.active ? "Активен" : "Отключён";
+                                    kind: u.active ? ChipKind.posted : ChipKind.draft;
+                                }
+                            }
+                        }
+                        VerticalLayout {
+                            width: 110px;
+                            alignment: center;
+                            HorizontalLayout {
+                                alignment: end;
+                                Button {
+                                    text: u.active ? "Отключить" : "Включить";
+                                    kind: ButtonKind.text;
+                                    clicked => { root.toggle(i); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,32 +1,6 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
-
-component Segment inherits Rectangle {
-    in property <string> text;
-    in property <bool> selected;
-    callback chosen();
-
-    horizontal-stretch: 1;
-    height: Theme.control-md;
-    border-radius: Shape.control-radius;
-    border-width: root.selected ? 2px : 1px;
-    border-color: root.selected ? Theme.accent-text : Theme.border-strong;
-    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : Theme.surface;
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.chosen(); }
-    }
-
-    Text {
-        text: root.text;
-        font-size: Theme.font-body;
-        font-weight: root.selected ? 600 : 400;
-        color: Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
+import { Segment } from "../components/segment.slint";
 
 // Базовые настройки интерфейса: тема и скругление. Применяются сразу, сохраняет Rust.
 export component SettingsDialog inherits Rectangle {

@@ -9,7 +9,8 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 use crate::login::{delay_secs, verify};
 use crate::settings::Settings;
 use crate::shell::Shell;
-use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme};
+use crate::users::{Directory, ROLES};
+use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
@@ -186,11 +187,27 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
             title: tab.title.into(),
             icon: tab.icon.into(),
             modified: false,
+            view: tab.view.into(),
         })
         .collect();
     window.set_nav(ModelRc::new(VecModel::from(rows)));
     window.set_tabs(ModelRc::new(VecModel::from(tabs)));
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
+}
+
+/// Переносит список пользователей в окно.
+pub fn refresh_users(window: &AppWindow, directory: &Directory) {
+    let rows: Vec<UserRow> = directory
+        .users()
+        .iter()
+        .map(|user| UserRow {
+            login: user.login.as_str().into(),
+            name: user.name.as_str().into(),
+            role: user.role.as_str().into(),
+            active: user.active,
+        })
+        .collect();
+    window.set_users(ModelRc::new(VecModel::from(rows)));
 }
 
 /// Показывает страницу и подгоняет размер окна: главная больше, чем выбор базы и вход.
@@ -322,6 +339,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
+    let directory = Rc::new(RefCell::new(Directory::demo()));
+    refresh_users(&app, &directory.borrow());
+    app.set_roles(ModelRc::new(VecModel::from(
+        ROLES
+            .iter()
+            .map(|role| (*role).into())
+            .collect::<Vec<slint::SharedString>>(),
+    )));
     let session = Rc::new(RefCell::new(Session::default()));
     // Таймер задержки после неудачных попыток входа (должен жить, пока идёт отсчёт).
     let lock_timer = Rc::new(slint::Timer::default());
@@ -540,6 +565,48 @@ pub fn run() -> Result<(), slint::PlatformError> {
             app.set_add_address("".into());
             app.set_add_name("".into());
             app.set_adding(false);
+        }
+    });
+
+    app.on_user_toggle({
+        let app = app.as_weak();
+        let directory = directory.clone();
+        move |row| {
+            let Some(app) = app.upgrade() else { return };
+            let result = index(row).map_or(Ok(()), |i| directory.borrow_mut().toggle(i));
+            app.set_user_message(result.err().unwrap_or_default().into());
+            refresh_users(&app, &directory.borrow());
+        }
+    });
+
+    app.on_user_add_confirmed({
+        let app = app.as_weak();
+        let directory = directory.clone();
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            let role = index(app.get_nu_role())
+                .and_then(|i| ROLES.get(i).copied())
+                .unwrap_or(ROLES[1]);
+            let result = directory.borrow_mut().add(
+                app.get_nu_login().as_str(),
+                app.get_nu_name().as_str(),
+                role,
+            );
+            match result {
+                Err(message) => app.set_user_error(message.into()),
+                Ok(()) => {
+                    refresh_users(&app, &directory.borrow());
+                    app.set_user_message("".into());
+                    app.set_user_error("".into());
+                    app.set_nu_login("".into());
+                    app.set_nu_name("".into());
+                    app.set_nu_role(1);
+                    // Пароль пользователя здесь не храним: его задаст ядро (хэш Argon2id).
+                    app.set_nu_password("".into());
+                    app.set_nu_repeat("".into());
+                    app.set_adding_user(false);
+                }
+            }
         }
     });
 

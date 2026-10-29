@@ -9,6 +9,7 @@ pub mod app;
 pub mod login;
 pub mod settings;
 pub mod shell;
+pub mod users;
 
 /// Имя крейта (проверка, что каркас собран).
 pub const NAME: &str = env!("CARGO_PKG_NAME");
