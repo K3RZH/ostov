@@ -16,7 +16,13 @@ pub type Fields = BTreeMap<String, FieldValue>;
 pub enum FieldKind {
     Int,
     Text,
-    Decimal { scale: u8 },
+    Decimal {
+        scale: u8,
+    },
+    /// Дата `ГГГГ-ММ-ДД`; хранится текстом, такая строка сортируется как дата.
+    Date,
+    /// Ссылка на элемент справочника или документ: хранится id, цель — в `FieldDef::target`.
+    Ref,
 }
 
 impl fmt::Display for FieldKind {
@@ -25,6 +31,8 @@ impl fmt::Display for FieldKind {
             Self::Int => write!(f, "целое число"),
             Self::Text => write!(f, "строка"),
             Self::Decimal { scale } => write!(f, "число с {scale} знаками после запятой"),
+            Self::Date => write!(f, "дата ГГГГ-ММ-ДД"),
+            Self::Ref => write!(f, "ссылка"),
         }
     }
 }
@@ -33,6 +41,8 @@ impl fmt::Display for FieldKind {
 pub struct FieldDef {
     pub name: String,
     pub kind: FieldKind,
+    /// Для ссылки: на какой справочник или документ.
+    pub target: Option<String>,
 }
 
 impl FieldDef {
@@ -40,6 +50,15 @@ impl FieldDef {
         Self {
             name: name.to_owned(),
             kind,
+            target: None,
+        }
+    }
+
+    pub fn reference(name: &str, target: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            kind: FieldKind::Ref,
+            target: Some(target.to_owned()),
         }
     }
 }
@@ -50,6 +69,8 @@ pub enum FieldValue {
     Int(i64),
     Text(String),
     Decimal(Decimal),
+    Date(String),
+    Ref(i64),
 }
 
 // Имена таблиц и колонок — только ASCII в нижнем регистре (ADR-025), кириллица живёт в метаданных.
@@ -97,8 +118,8 @@ pub(crate) fn column_defs(d: &dyn Dialect, fields: &[FieldDef]) -> Vec<String> {
         .iter()
         .map(|f| {
             let ty = match f.kind {
-                FieldKind::Int | FieldKind::Decimal { .. } => "BIGINT",
-                FieldKind::Text => "TEXT",
+                FieldKind::Int | FieldKind::Decimal { .. } | FieldKind::Ref => "BIGINT",
+                FieldKind::Text | FieldKind::Date => "TEXT",
             };
             format!("{} {ty}", d.quote_ident(&f.name))
         })
@@ -138,6 +159,8 @@ pub(crate) fn to_value(def: &FieldDef, value: &FieldValue) -> Result<Value, Core
         (FieldKind::Decimal { scale }, FieldValue::Decimal(v)) => {
             Value::Int(to_scale(def, *v, scale)?.units())
         }
+        (FieldKind::Ref, FieldValue::Ref(id)) => Value::Int(*id),
+        (FieldKind::Date, FieldValue::Date(d)) if is_date(d) => Value::Text(d.clone()),
         _ => {
             return Err(CoreError::Invalid(format!(
                 "поле {}: ожидается {}",
@@ -167,6 +190,8 @@ pub(crate) fn from_value(def: &FieldDef, value: Value) -> Result<FieldValue, Cor
         (FieldKind::Decimal { scale }, Value::Int(units)) => {
             FieldValue::Decimal(Decimal::new(units, scale)?)
         }
+        (FieldKind::Ref, Value::Int(id)) => FieldValue::Ref(id),
+        (FieldKind::Date, Value::Text(d)) => FieldValue::Date(d),
         _ => {
             return Err(CoreError::Invalid(format!(
                 "в базе в поле {} не {}",
@@ -174,6 +199,30 @@ pub(crate) fn from_value(def: &FieldDef, value: Value) -> Result<FieldValue, Cor
             )));
         }
     })
+}
+
+/// `ГГГГ-ММ-ДД` с настоящими месяцем и днём, с учётом високосных лет.
+pub(crate) fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r).and_then(|p| p.parse::<u32>().ok());
+    let (Some(year), Some(month), Some(day)) = (num(0..4), num(5..7), num(8..10)) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    s.bytes()
+        .enumerate()
+        .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+        && (1..=days).contains(&day)
 }
 
 pub(crate) fn read_fields(
@@ -220,5 +269,30 @@ pub(crate) fn returned_id(rows: &[Vec<Value>]) -> Result<i64, CoreError> {
     match rows.first().and_then(|row| row.first()) {
         Some(Value::Int(id)) => Ok(*id),
         _ => Err(CoreError::Invalid("база не вернула id новой записи".into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_date;
+
+    #[test]
+    fn dates() {
+        for ok in ["2026-10-30", "2024-02-29", "2000-02-29", "1999-12-31"] {
+            assert!(is_date(ok), "{ok}");
+        }
+        for bad in [
+            "2026-1-30",
+            "2026-13-01",
+            "2026-02-29",
+            "1900-02-29",
+            "2026-04-31",
+            "2026-10-00",
+            "30.10.2026",
+            "2026-10-3a",
+            "+026-10-30",
+        ] {
+            assert!(!is_date(bad), "{bad}");
+        }
     }
 }
