@@ -4,6 +4,8 @@
 mod cursor;
 mod milestones;
 
+use std::collections::HashMap;
+
 use ostov_store::{Driver, Value};
 
 use crate::object::{FieldDef, FieldKind, Fields, read_fields};
@@ -71,6 +73,10 @@ pub struct ListPage {
     pub total: Option<u64>,
 }
 
+/// Чем показывать ссылки: таблица справочника → её поле-название (обычно `name`).
+/// По нему ссылочные колонки сортируются и ищутся по названию, а не по id.
+pub type TitleColumns = HashMap<String, String>;
+
 /// Окно строк: первое (`after = None`) или следующее за ключом из прошлой страницы.
 pub fn list(
     db: &mut dyn Driver,
@@ -79,7 +85,19 @@ pub fn list(
     after: Option<&str>,
     size: usize,
 ) -> Result<ListPage, CoreError> {
-    let plan = Plan::new(source, query)?;
+    list_titled(db, source, query, after, size, &TitleColumns::new())
+}
+
+/// То же, что `list`, но ссылки сортируются и ищутся по названиям из `titles`.
+pub fn list_titled(
+    db: &mut dyn Driver,
+    source: &dyn ListSource,
+    query: &ListQuery,
+    after: Option<&str>,
+    size: usize,
+    titles: &TitleColumns,
+) -> Result<ListPage, CoreError> {
+    let plan = Plan::new(source, query, titles)?;
     let after = after.map(Cursor::decode).transpose()?;
     let total = match after {
         None => Some(plan.count(db)?),
@@ -101,10 +119,17 @@ struct Plan {
     order: Option<usize>,
     descending: bool,
     search: Option<String>,
+    /// Если строка поиска — число, ищем ещё и по целым полям (номер документа).
+    search_number: Option<i64>,
+    titles: TitleColumns,
 }
 
 impl Plan {
-    fn new(source: &dyn ListSource, query: &ListQuery) -> Result<Self, CoreError> {
+    fn new(
+        source: &dyn ListSource,
+        query: &ListQuery,
+        titles: &TitleColumns,
+    ) -> Result<Self, CoreError> {
         let fields = source.list_fields();
         let order = match &query.order {
             None => None,
@@ -115,23 +140,19 @@ impl Plan {
                 ))
             })?),
         };
-        let search = query
+        let raw = query
             .search
             .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(like_pattern);
-        if search.is_some() && !fields.iter().any(|f| f.kind == FieldKind::Text) {
-            return Err(CoreError::Invalid(format!(
-                "в {} нет текстовых полей для поиска",
-                source.table()
-            )));
-        }
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         Ok(Self {
             table: source.table().to_owned(),
             fields,
             order,
             descending: query.descending,
-            search,
+            search: raw.map(like_pattern),
+            search_number: raw.and_then(|s| s.parse().ok()),
+            titles: titles.clone(),
         })
     }
 
@@ -172,6 +193,10 @@ impl Plan {
             let id = d.quote_ident("id");
             let mut cols = vec![id.clone()];
             cols.extend(self.fields.iter().map(|f| d.quote_ident(&f.name)));
+            // Значение сортировки — последней колонкой: из него строится ключ страницы.
+            if let Some(i) = self.order {
+                cols.push(self.sort_expr(d, i));
+            }
 
             let mut filters: Vec<String> = self.search_sql(d, &mut params).into_iter().collect();
             if let Some(after) = after {
@@ -207,12 +232,11 @@ impl Plan {
                     self.table
                 )));
             };
-            let values: Vec<Value> = values.collect();
+            let mut values: Vec<Value> = values.collect();
+            let sort_value = self.order.map(|_| values.pop().unwrap_or(Value::Null));
             last = Some(Cursor {
                 id,
-                value: self
-                    .order
-                    .map(|i| values.get(i).cloned().unwrap_or(Value::Null)),
+                value: sort_value,
             });
             rows.push(ListRow {
                 id,
@@ -228,7 +252,7 @@ impl Plan {
         match self.order {
             None => format!("{id} {dir}"),
             Some(i) => {
-                let col = d.quote_ident(&self.fields[i].name);
+                let col = self.sort_expr(d, i);
                 format!("({col} IS NULL), {col} {dir}, {id} {dir}")
             }
         }
@@ -251,14 +275,14 @@ impl Plan {
         Ok(match (self.order, &after.value) {
             (None, None) => format!("{id} {cmp} {}", param(Value::Int(after.id))),
             (Some(i), Some(Value::Null)) => {
-                let col = d.quote_ident(&self.fields[i].name);
+                let col = self.sort_expr(d, i);
                 format!(
                     "({col} IS NULL AND {id} {cmp} {})",
                     param(Value::Int(after.id))
                 )
             }
             (Some(i), Some(value)) => {
-                let col = d.quote_ident(&self.fields[i].name);
+                let col = self.sort_expr(d, i);
                 let a = param(value.clone());
                 let b = param(value.clone());
                 let c = param(Value::Int(after.id));
@@ -272,21 +296,72 @@ impl Plan {
         })
     }
 
+    /// Название, на которое указывает ссылка: таблица справочника и её поле-название.
+    fn title_of(&self, i: usize) -> Option<(&str, &str)> {
+        let field = self.fields.get(i)?;
+        if field.kind != FieldKind::Ref {
+            return None;
+        }
+        let target = field.target.as_deref()?;
+        let column = self.titles.get(target)?;
+        Some((target, column))
+    }
+
+    /// Чем сортировать поле: у ссылки — названием элемента, у остальных — самим полем.
+    pub(crate) fn sort_expr(&self, d: &dyn ostov_store::Dialect, i: usize) -> String {
+        let name = self.fields.get(i).map_or("id", |f| f.name.as_str());
+        let own = format!("{}.{}", d.quote_ident(&self.table), d.quote_ident(name));
+        match self.title_of(i) {
+            Some((target, column)) => format!(
+                "(SELECT {} FROM {} WHERE {}.{} = {own})",
+                d.quote_ident(column),
+                d.quote_ident(target),
+                d.quote_ident(target),
+                d.quote_ident("id"),
+            ),
+            None => own,
+        }
+    }
+
+    /// Поиск: подстрока в тексте, дате и названиях ссылок; число — ещё и по целым полям
+    /// (номер документа). Если искать негде, ничего не находится.
     fn search_sql(&self, d: &dyn ostov_store::Dialect, params: &mut Vec<Value>) -> Option<String> {
         let pattern = self.search.as_ref()?;
-        let parts: Vec<String> = self
-            .fields
-            .iter()
-            .filter(|f| f.kind == FieldKind::Text)
-            .map(|f| {
-                params.push(Value::Text(pattern.clone()));
-                format!(
-                    "{} LIKE {} ESCAPE '\\'",
-                    d.quote_ident(&f.name),
-                    d.placeholder(params.len())
-                )
-            })
-            .collect();
+        let mut parts = Vec::new();
+        for (i, f) in self.fields.iter().enumerate() {
+            let col = format!("{}.{}", d.quote_ident(&self.table), d.quote_ident(&f.name));
+            match f.kind {
+                FieldKind::Text | FieldKind::Date => {
+                    params.push(Value::Text(pattern.clone()));
+                    parts.push(format!(
+                        "{col} LIKE {} ESCAPE '\\'",
+                        d.placeholder(params.len())
+                    ));
+                }
+                FieldKind::Ref => {
+                    if let Some((target, column)) = self.title_of(i) {
+                        params.push(Value::Text(pattern.clone()));
+                        parts.push(format!(
+                            "{col} IN (SELECT {} FROM {} WHERE {} LIKE {} ESCAPE '\\')",
+                            d.quote_ident("id"),
+                            d.quote_ident(target),
+                            d.quote_ident(column),
+                            d.placeholder(params.len()),
+                        ));
+                    }
+                }
+                FieldKind::Int => {
+                    if let Some(n) = self.search_number {
+                        params.push(Value::Int(n));
+                        parts.push(format!("{col} = {}", d.placeholder(params.len())));
+                    }
+                }
+                FieldKind::Decimal { .. } => {}
+            }
+        }
+        if parts.is_empty() {
+            return Some("(1 = 0)".to_owned());
+        }
         Some(format!("({})", parts.join(" OR ")))
     }
 }

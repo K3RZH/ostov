@@ -22,10 +22,10 @@ use ostov_store::{Driver, Value};
 pub use config::{Config, DocumentConfig, warehouse};
 use convert::{error, fields_from_api, fields_to_api, invalid};
 
-use crate::list::{MILESTONE_STEP, Milestones};
+use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
     Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction,
-    insert_and_post, list, posting,
+    insert_and_post, posting,
 };
 
 pub struct LocalEngine {
@@ -33,6 +33,8 @@ pub struct LocalEngine {
     config: Config,
     /// Вехи по токену списка; сбрасываются при любой записи.
     milestones: Mutex<HashMap<String, Milestones>>,
+    /// Справочник → его поле-название: по нему ссылки сортируются и ищутся.
+    titles: TitleColumns,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
 }
@@ -44,8 +46,17 @@ enum Object<'a> {
 
 impl LocalEngine {
     pub fn new(db: Box<dyn Driver + Send>, config: Config) -> Self {
+        let titles = config
+            .catalogs
+            .iter()
+            .filter_map(|(table, c)| {
+                let field = c.fields().iter().find(|f| f.kind == FieldKind::Text)?;
+                Some((table.clone(), field.name.clone()))
+            })
+            .collect();
         Self {
             db: Mutex::new(db),
+            titles,
             config,
             milestones: Mutex::new(HashMap::new()),
             _lock: None,
@@ -233,12 +244,13 @@ impl Engine for LocalEngine {
             search: q.search.clone(),
         };
         let mut db = self.db()?;
-        let page = list(
+        let page = list_titled(
             &mut **db,
             source,
             &query,
             q.after_key.as_deref(),
             window(q.size),
+            &self.titles,
         )
         .map_err(error)?;
         self.page(&mut **db, source, token(&q.object, &query), page)
@@ -251,7 +263,8 @@ impl Engine for LocalEngine {
         let mut cache = self.milestones.lock().map_err(|_| broken())?;
         if !cache.contains_key(token) {
             let built =
-                Milestones::build(&mut **db, source, &query, MILESTONE_STEP).map_err(error)?;
+                Milestones::build_titled(&mut **db, source, &query, MILESTONE_STEP, &self.titles)
+                    .map_err(error)?;
             cache.insert(token.to_owned(), built);
         }
         let marks = cache.get(token).ok_or_else(broken)?;

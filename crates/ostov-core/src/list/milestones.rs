@@ -1,7 +1,7 @@
 use ostov_store::{Driver, Value};
 
 use super::cursor::Cursor;
-use super::{ListPage, ListQuery, ListSource, Plan};
+use super::{ListPage, ListQuery, ListSource, Plan, TitleColumns};
 use crate::CoreError;
 
 /// Шаг вех по умолчанию: ключ каждой 1000-й строки (проба 26.10).
@@ -14,6 +14,7 @@ pub const MILESTONE_STEP: u64 = 1000;
 pub struct Milestones {
     table: String,
     query: ListQuery,
+    titles: TitleColumns,
     step: u64,
     keys: Vec<Cursor>,
     total: u64,
@@ -26,16 +27,27 @@ impl Milestones {
         query: &ListQuery,
         step: u64,
     ) -> Result<Self, CoreError> {
+        Self::build_titled(db, source, query, step, &TitleColumns::new())
+    }
+
+    /// Вехи, где ссылки сортируются по названиям из `titles` (как в `list_titled`).
+    pub fn build_titled(
+        db: &mut dyn Driver,
+        source: &dyn ListSource,
+        query: &ListQuery,
+        step: u64,
+        titles: &TitleColumns,
+    ) -> Result<Self, CoreError> {
         if step == 0 {
             return Err(CoreError::Invalid("шаг вех должен быть больше нуля".into()));
         }
-        let plan = Plan::new(source, query)?;
+        let plan = Plan::new(source, query, titles)?;
         let mut params = Vec::new();
         let sql = {
             let d = db.dialect();
             let mut cols = vec![d.quote_ident("id")];
             if let Some(i) = plan.order {
-                cols.push(d.quote_ident(&plan.fields[i].name));
+                cols.push(plan.sort_expr(d, i));
             }
             let mut sql = format!(
                 "SELECT {} FROM {}",
@@ -73,6 +85,7 @@ impl Milestones {
         Ok(Self {
             table: plan.table,
             query: query.clone(),
+            titles: titles.clone(),
             step,
             keys,
             total,
@@ -106,7 +119,7 @@ impl Milestones {
                 total: Some(self.total),
             });
         }
-        let plan = Plan::new(source, &self.query)?;
+        let plan = Plan::new(source, &self.query, &self.titles)?;
         // Веха номер k — ключ строки k × step; после неё начинается строка k × step (с нуля).
         let mark = usize::try_from(position / self.step)
             .unwrap_or(usize::MAX)
