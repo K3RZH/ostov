@@ -27,6 +27,7 @@ export component AppWindow inherits Window {
     in-out property <string> new-address;
     in-out property <string> new-admin-login;
     in-out property <string> new-admin-password;
+    in-out property <string> new-admin-repeat;
     in-out property <string> new-password;
     in-out property <string> new-password-repeat;
     in-out property <bool> new-protect-password;
@@ -130,6 +131,7 @@ export component AppWindow inherits Window {
         address <=> root.new-address;
         admin-login <=> root.new-admin-login;
         admin-password <=> root.new-admin-password;
+        admin-repeat <=> root.new-admin-repeat;
         password <=> root.new-password;
         password-repeat <=> root.new-password-repeat;
         protect-password <=> root.new-protect-password;
@@ -140,6 +142,8 @@ export component AppWindow inherits Window {
             root.creating = false;
             root.new-password = "";
             root.new-password-repeat = "";
+            root.new-admin-password = "";
+            root.new-admin-repeat = "";
         }
     }
 

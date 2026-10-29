@@ -87,6 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_new_protect_password(true);
             window.set_new_password("secret".into());
             window.set_new_password_repeat("secre".into());
+            window.set_new_protect_users(true);
+            window.set_new_admin_login("admin".into());
             save(&window, dark, &path)
         }
         "create-local" | "create-server" => {

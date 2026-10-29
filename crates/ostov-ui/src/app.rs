@@ -14,6 +14,12 @@ const PAGE_START: i32 = 0;
 const PAGE_LOGIN: i32 = 1;
 const PAGE_MAIN: i32 = 2;
 
+/// Защита локальной базы в `RecentDb.protection`: пароль на файл и пользователи независимы.
+const PROTECTION_USERS: i32 = 1;
+const PROTECTION_PASSWORD: i32 = 2;
+/// Пароль на файл и пользователи вместе: сначала пароль файла, потом вход пользователя.
+const PROTECTION_BOTH: i32 = 3;
+
 /// Какая страница входа нужна после выбора базы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginKind {
@@ -33,8 +39,8 @@ pub fn login_kind(server: bool, protection: i32) -> LoginKind {
         return LoginKind::Server;
     }
     match protection {
-        1 => LoginKind::LocalUser,
-        2 => LoginKind::LocalPassword,
+        PROTECTION_USERS => LoginKind::LocalUser,
+        PROTECTION_PASSWORD | PROTECTION_BOTH => LoginKind::LocalPassword,
         _ => LoginKind::None,
     }
 }
@@ -150,7 +156,7 @@ fn open_main(window: &AppWindow, base: &str, server: bool) -> Shell {
 }
 
 /// Строка списка для только что созданной базы. Сервер: путь хранит адрес, защита не нужна.
-/// Локальная: файл `<имя>.sqlite` в папке, защита по флажкам (пароль важнее пользователей).
+/// Локальная: файл `<имя>.sqlite` в папке, защита по флажкам (можно и пароль, и пользователей).
 pub fn new_database(
     server: bool,
     name: &str,
@@ -169,10 +175,11 @@ pub fn new_database(
         };
     }
     let file = format!("{name}.sqlite");
-    let protection = if protect_password {
-        2
-    } else {
-        i32::from(protect_users)
+    let protection = match (protect_password, protect_users) {
+        (true, true) => PROTECTION_BOTH,
+        (true, false) => PROTECTION_PASSWORD,
+        (false, true) => PROTECTION_USERS,
+        (false, false) => 0,
     };
     RecentDb {
         path: format!("{}/{file}", folder.trim_end_matches('/')).into(),
@@ -305,6 +312,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             app.set_new_address("".into());
             app.set_new_admin_login("".into());
             app.set_new_admin_password("".into());
+            app.set_new_admin_repeat("".into());
             // Пароль базы здесь не храним: файл создаст ядро, ему и передадим.
             app.set_new_password("".into());
             app.set_new_password_repeat("".into());
