@@ -3,6 +3,7 @@
 
 mod config;
 mod convert;
+mod demo;
 #[cfg(test)]
 mod tests;
 
@@ -460,27 +461,33 @@ impl Connector for LocalConnector {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
-        if Path::new(path).exists() {
-            return Err(invalid(format!(
-                "файл {path} уже есть: выберите другое имя"
-            )));
-        }
-        let config = warehouse().map_err(error)?;
-        let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
-        in_transaction(&mut db, |db| {
-            db.execute(
-                &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
-                &[],
-            )?;
-            db.execute(
-                &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
-                &[Value::Text(config.name.clone())],
-            )?;
-            config.create_tables(db)
-        })
-        .map_err(error)?;
+        let (db, config) = create_base(path)?;
         Ok(Arc::new(LocalEngine::new(Box::new(db), config)))
     }
+}
+
+/// Новый файл базы со служебной таблицей и таблицами конфигурации.
+fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config)> {
+    if Path::new(path).exists() {
+        return Err(invalid(format!(
+            "файл {path} уже есть: выберите другое имя"
+        )));
+    }
+    let config = warehouse().map_err(error)?;
+    let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
+    in_transaction(&mut db, |db| {
+        db.execute(
+            &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
+            &[],
+        )?;
+        db.execute(
+            &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
+            &[Value::Text(config.name.clone())],
+        )?;
+        config.create_tables(db)
+    })
+    .map_err(error)?;
+    Ok((db, config))
 }
 
 fn no_file_password(password: Option<&str>) -> EngineResult<()> {

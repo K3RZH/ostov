@@ -314,3 +314,35 @@ fn wrong_requests() {
         ErrorCode::NotImplemented
     );
 }
+
+#[test]
+fn demo_base_has_data_to_scroll() {
+    let base = Base::new("demo");
+    let engine = LocalConnector.create_demo(&base.path, 300).unwrap();
+
+    let page = engine.list(&query("receipt", 50)).unwrap();
+    assert_eq!(page.total, Some(300));
+    let first = &page.rows[0].values;
+    assert!(matches!(
+        &first["supplier"],
+        Value::Ref { title: Some(_), .. }
+    ));
+    assert!(matches!(&first["date"], Value::Date(d) if d.starts_with("2026-01")));
+
+    let all: Vec<_> = (0..6)
+        .flat_map(|i| engine.seek(&page.token, i * 50, 50).unwrap().rows)
+        .collect();
+    let posted = all
+        .iter()
+        .filter(|r| r.values["posted"] == Value::Int(1))
+        .count();
+    let deleted = all
+        .iter()
+        .filter(|r| r.values["deleted"] == Value::Int(1))
+        .count();
+    assert_eq!(all.len(), 300);
+    assert_eq!(deleted, 10);
+    assert_eq!(posted, 270);
+    assert!(engine.list(&query("issue", 10)).unwrap().total.unwrap() > 0);
+    assert_eq!(engine.list(&query("goods", 50)).unwrap().total, Some(8));
+}
