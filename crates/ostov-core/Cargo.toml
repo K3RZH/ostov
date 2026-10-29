@@ -10,4 +10,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+ostov-api = { path = "../ostov-api" }
 ostov-store = { path = "../ostov-store" }

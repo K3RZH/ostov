@@ -50,6 +50,24 @@ pub fn save(
     })
 }
 
+/// Записывает новый документ и сразу проводит его — одной транзакцией.
+pub fn insert_and_post(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    header: &crate::Fields,
+    parts: &std::collections::BTreeMap<String, Vec<crate::Fields>>,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<Document, CoreError> {
+    in_transaction(db, |db| {
+        let doc = kind.insert_in(db, header, parts)?;
+        let movements = rule(&doc)?;
+        register.replace(db, kind.table(), doc.id, &movements)?;
+        kind.set_posted(db, doc.id, true)?;
+        kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
+    })
+}
+
 fn check_not_deleted(doc: &Document) -> Result<(), CoreError> {
     if doc.deleted {
         return Err(CoreError::Invalid(format!(
