@@ -1,0 +1,186 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { ListView } from "std-widgets.slint";
+
+// flex: главная колонка, забирает свободную ширину (у неё width это минимум).
+// right: числа и суммы выравниваются вправо.
+export struct GridColumn { title: string, width: length, right: bool, flex: bool }
+// muted: строка приглушена (например помечена на удаление).
+export struct GridRow { cells: [string], muted: bool }
+
+component HeaderCell inherits Rectangle {
+    in property <GridColumn> spec;
+    in property <bool> sorted;
+    in property <bool> desc;
+    // Последняя колонка и гибкая ширину не тянут: у них только черта справа.
+    in property <bool> resizable: true;
+    callback clicked();
+    callback resized(length);
+
+    horizontal-stretch: root.spec.flex ? 1 : 0;
+    min-width: root.spec.width;
+    max-width: root.spec.flex ? 100000px : root.spec.width;
+    background: touch.has-hover ? Theme.border : transparent;
+
+    private property <length> start-x;
+    private property <length> start-width;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-12;
+        padding-right: Theme.space-12;
+        spacing: Theme.space-4;
+        if root.spec.right : Rectangle { }
+        Text {
+            text: root.spec.title;
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.sorted : VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "chevron-down";
+                tint: Theme.accent-text;
+                width: 16px;
+                height: 16px;
+                transform-rotation: root.desc ? 0deg : 180deg;
+            }
+        }
+    }
+
+    // Ручка-разделитель: черта 1 px, при наведении область 8 px и черта 2 px акцентом.
+    handle := TouchArea {
+        x: parent.width - 8px;
+        width: 8px;
+        enabled: root.resizable;
+        mouse-cursor: root.resizable ? MouseCursor.col-resize : MouseCursor.default;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.start-x = self.absolute-position.x + self.mouse-x;
+                root.start-width = root.spec.width;
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.resized(max(48px, root.start-width + self.absolute-position.x + self.mouse-x - root.start-x));
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width - (handle.has-hover || handle.pressed ? 2px : 1px);
+        y: (parent.height - self.height) / 2;
+        width: handle.has-hover || handle.pressed ? 2px : 1px;
+        height: handle.has-hover || handle.pressed ? parent.height : 20px;
+        background: handle.has-hover || handle.pressed ? Theme.accent-text : Theme.border-strong;
+    }
+}
+
+component GridRowView inherits Rectangle {
+    in property <GridRow> item;
+    in property <[GridColumn]> columns;
+    in property <bool> selected;
+    callback clicked();
+    callback activated();
+
+    height: 32px;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.activated(); }
+    }
+
+    HorizontalLayout {
+        for col[i] in root.columns : Rectangle {
+            horizontal-stretch: col.flex ? 1 : 0;
+            min-width: col.width;
+            max-width: col.flex ? 100000px : col.width;
+            Text {
+                x: Theme.space-12;
+                width: parent.width - 2 * Theme.space-12;
+                height: parent.height;
+                text: root.item.cells[i];
+                font-size: Theme.font-body;
+                font-weight: root.selected ? 600 : 400;
+                color: root.item.muted ? Theme.disabled-text : Theme.text;
+                horizontal-alignment: col.right ? right : left;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// Таблица ErpGrid по макету: шапка с сортировкой и ручками колонок, строки без вертикальных
+// линий, внешний контур скруглён, строки и шапка с прямыми углами, главная колонка гибкая.
+// Данные, сортировку и ширины колонок ведёт Rust: здесь только вид и события.
+export component ErpGrid inherits Rectangle {
+    in property <[GridColumn]> columns;
+    in property <[GridRow]> rows;
+    in property <string> empty-text: "Нет данных";
+    in property <int> sort-column: -1;
+    in property <bool> sort-desc;
+    in-out property <int> selected-row: -1;
+    callback sort-clicked(int);
+    callback column-resized(int, length);
+    callback row-activated(int);
+
+    border-radius: Shape.surface-radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    clip: true;
+
+    VerticalLayout {
+        Rectangle {
+            height: 36px;
+            background: Theme.surface-alt;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                for col[i] in root.columns : HeaderCell {
+                    spec: col;
+                    sorted: i == root.sort-column;
+                    desc: root.sort-desc;
+                    resizable: !col.flex && i < root.columns.length - 1;
+                    clicked => { root.sort-clicked(i); }
+                    resized(width) => { root.column-resized(i, width); }
+                }
+            }
+        }
+        if root.rows.length == 0 : Rectangle {
+            Text {
+                text: root.empty-text;
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.rows.length > 0 : ListView {
+            for row[i] in root.rows : GridRowView {
+                item: row;
+                columns: root.columns;
+                selected: i == root.selected-row;
+                clicked => { root.selected-row = i; }
+                activated => { root.row-activated(i); }
+            }
+        }
+    }
+}

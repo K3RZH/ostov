@@ -1,0 +1,163 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
+import { TextField } from "../components/text-field.slint";
+import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
+
+// Данные и события экрана «Поступления»: список и форма документа.
+// Состояние ведёт Rust (src/receipts_ui.rs), здесь только свойства и колбэки.
+export global ReceiptsData {
+    // Список
+    in property <[GridColumn]> columns;
+    in property <[GridRow]> rows;
+    in property <int> total;
+    in property <int> sort-column: -1;
+    in property <bool> sort-desc;
+    in-out property <int> selected-row: -1;
+    in-out property <string> query;
+    callback sort(int);
+    callback resize(int, length);
+    callback open(int);
+    callback create();
+    callback query-changed(string);
+
+    // Форма документа
+    in-out property <bool> form-open;
+    in property <string> form-title;
+    in property <bool> form-posted;
+    in-out property <string> form-number;
+    in-out property <string> form-date;
+    in-out property <string> form-warehouse;
+    in-out property <string> form-supplier;
+    in property <[GridColumn]> line-columns;
+    in property <[GridRow]> lines;
+    in property <string> form-total;
+    callback form-post(bool);
+    callback form-save();
+    callback form-close();
+}
+
+component ReceiptList inherits VerticalLayout {
+    padding: Theme.space-24;
+    spacing: Theme.space-16;
+
+    Text {
+        text: "Поступления товаров";
+        font-size: Theme.font-title;
+        font-weight: 700;
+        color: Theme.text;
+    }
+    HorizontalLayout {
+        spacing: Theme.space-8;
+        Button {
+            text: "Создать";
+            kind: ButtonKind.primary;
+            clicked => { ReceiptsData.create(); }
+        }
+        Button {
+            text: "Открыть";
+            enabled: ReceiptsData.selected-row >= 0;
+            clicked => { ReceiptsData.open(ReceiptsData.selected-row); }
+        }
+        Rectangle { }
+        TextField {
+            width: 280px;
+            placeholder: "Поиск по списку";
+            text <=> ReceiptsData.query;
+            edited(text) => { ReceiptsData.query-changed(text); }
+        }
+    }
+    ErpGrid {
+        vertical-stretch: 1;
+        columns: ReceiptsData.columns;
+        rows: ReceiptsData.rows;
+        empty-text: "Ничего не найдено";
+        sort-column: ReceiptsData.sort-column;
+        sort-desc: ReceiptsData.sort-desc;
+        selected-row <=> ReceiptsData.selected-row;
+        sort-clicked(i) => { ReceiptsData.sort(i); }
+        column-resized(i, width) => { ReceiptsData.resize(i, width); }
+        row-activated(i) => { ReceiptsData.open(i); }
+    }
+    Text {
+        text: "Показано " + ReceiptsData.rows.length + " из " + ReceiptsData.total;
+        font-size: Theme.font-caption;
+        color: Theme.text-muted;
+    }
+}
+
+component ReceiptForm inherits VerticalLayout {
+    padding: Theme.space-24;
+    spacing: Theme.space-16;
+
+    HorizontalLayout {
+        spacing: Theme.space-12;
+        Text {
+            text: ReceiptsData.form-title;
+            font-size: Theme.font-title;
+            font-weight: 700;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            Chip {
+                text: ReceiptsData.form-posted ? "Проведён" : "Черновик";
+                kind: ReceiptsData.form-posted ? ChipKind.posted : ChipKind.draft;
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: Theme.space-8;
+        Button {
+            text: "Провести и закрыть";
+            kind: ButtonKind.primary;
+            clicked => { ReceiptsData.form-post(true); }
+        }
+        Button { text: "Провести"; clicked => { ReceiptsData.form-post(false); } }
+        Button { text: "Записать"; clicked => { ReceiptsData.form-save(); } }
+        Rectangle { }
+        Button { text: "Закрыть"; kind: ButtonKind.text; clicked => { ReceiptsData.form-close(); } }
+    }
+    Rectangle {
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+        height: card.preferred-height;
+        card := HorizontalLayout {
+            padding: Theme.space-16;
+            spacing: Theme.space-16;
+            TextField { width: 100px; label: "Номер"; read-only: true; text <=> ReceiptsData.form-number; }
+            TextField { width: 140px; label: "Дата"; text <=> ReceiptsData.form-date; }
+            TextField { width: 180px; label: "Склад"; text <=> ReceiptsData.form-warehouse; }
+            TextField { horizontal-stretch: 1; label: "Поставщик"; text <=> ReceiptsData.form-supplier; }
+        }
+    }
+    Text {
+        text: "Товары";
+        font-size: Theme.font-subtitle;
+        font-weight: 600;
+        color: Theme.text;
+    }
+    ErpGrid {
+        vertical-stretch: 1;
+        columns: ReceiptsData.line-columns;
+        rows: ReceiptsData.lines;
+        empty-text: "Товаров пока нет";
+    }
+    Text {
+        text: "Итого: " + ReceiptsData.lines.length + " поз. · " + ReceiptsData.form-total;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        color: Theme.text;
+    }
+}
+
+// Вкладка «Поступления товаров»: список, по двойному клику или «Открыть» форма документа.
+export component ReceiptsView inherits Rectangle {
+    background: Theme.bg;
+
+    if !ReceiptsData.form-open : ReceiptList { }
+    if ReceiptsData.form-open : ReceiptForm { }
+}

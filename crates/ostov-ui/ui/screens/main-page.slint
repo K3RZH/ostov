@@ -2,6 +2,7 @@ import { Theme, Shape } from "../theme.slint";
 import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { UsersView, UserRow } from "users-view.slint";
+import { ReceiptsView } from "receipts-view.slint";
 
 // Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
 export struct NavRow {
@@ -327,7 +328,8 @@ export component MainPage inherits Rectangle {
                     add-clicked => { root.user-add-clicked(); }
                     toggle(i) => { root.user-toggle(i); }
                 }
-                if root.tabs.length == 0 || root.tabs[root.active-tab].view != "users" : Rectangle {
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
+                if root.tabs.length == 0 || (root.tabs[root.active-tab].view != "users" && root.tabs[root.active-tab].view != "receipts") : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {
                         alignment: center;

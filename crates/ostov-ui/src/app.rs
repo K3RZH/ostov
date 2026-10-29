@@ -339,6 +339,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
+    crate::receipts_ui::setup(&app);
     let directory = Rc::new(RefCell::new(Directory::demo()));
     refresh_users(&app, &directory.borrow());
     app.set_roles(ModelRc::new(VecModel::from(

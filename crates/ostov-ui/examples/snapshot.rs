@@ -78,6 +78,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
+        "receipts" | "receipt-form" => {
+            let window = app_window(2)?;
+            ostov_ui::receipts_ui::setup(&window);
+            let mut shell = ostov_ui::shell::Shell::demo();
+            shell.click(2);
+            shell.click(3);
+            ostov_ui::app::refresh(&window, &shell);
+            if screen == "receipt-form" {
+                use slint::ComponentHandle;
+                window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
+            }
+            save(&window, dark, &path)
+        }
         "settings" => {
             let window = app_window(2)?;
             window.set_settings_open(true);
