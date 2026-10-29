@@ -78,13 +78,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
-        "receipts" | "receipt-form" => {
+        "receipts" | "receipts-large" | "receipt-form" => {
             let window = app_window(2)?;
             ostov_ui::receipts_ui::setup(&window);
             let mut shell = ostov_ui::shell::Shell::demo();
             shell.click(2);
             shell.click(3);
             ostov_ui::app::refresh(&window, &shell);
+            if screen == "receipts-large" {
+                use slint::ComponentHandle;
+                window
+                    .global::<ostov_ui::Theme>()
+                    .set_font_scale(16.0 / 14.0);
+                window.global::<ostov_ui::Theme>().set_row_height(40.0);
+            }
             if screen == "receipt-form" {
                 use slint::ComponentHandle;
                 window.global::<ostov_ui::ReceiptsData>().invoke_open(2);

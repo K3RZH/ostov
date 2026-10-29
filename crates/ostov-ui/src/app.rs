@@ -313,8 +313,24 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
     window
         .global::<Shape>()
         .set_control_radius(settings.radius_px());
+    window
+        .global::<Theme>()
+        .set_font_scale(settings.font_scale());
+    window.global::<Theme>().set_row_height(settings.row_px());
     window.set_dark_theme(settings.dark);
     window.set_radius_mode(settings.radius);
+    window.set_density_mode(settings.density);
+    window.set_font_mode(settings.font);
+}
+
+/// Настройки, которые сейчас выбраны в окне.
+fn current_settings(window: &AppWindow) -> Settings {
+    Settings {
+        dark: window.get_dark_theme(),
+        radius: window.get_radius_mode(),
+        density: window.get_density_mode(),
+        font: window.get_font_mode(),
+    }
 }
 
 /// Что выбрано на старте и на каком шаге входа мы сейчас.
@@ -508,7 +524,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
                 dark,
-                radius: app.get_radius_mode(),
+                ..current_settings(&app)
             };
             apply_settings(&app, settings);
             settings.save();
@@ -520,8 +536,34 @@ pub fn run() -> Result<(), slint::PlatformError> {
         move |radius| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
-                dark: app.get_dark_theme(),
                 radius,
+                ..current_settings(&app)
+            };
+            apply_settings(&app, settings);
+            settings.save();
+        }
+    });
+
+    app.on_density_chosen({
+        let app = app.as_weak();
+        move |density| {
+            let Some(app) = app.upgrade() else { return };
+            let settings = Settings {
+                density,
+                ..current_settings(&app)
+            };
+            apply_settings(&app, settings);
+            settings.save();
+        }
+    });
+
+    app.on_font_chosen({
+        let app = app.as_weak();
+        move |font| {
+            let Some(app) = app.upgrade() else { return };
+            let settings = Settings {
+                font,
+                ..current_settings(&app)
             };
             apply_settings(&app, settings);
             settings.save();

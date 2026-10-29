@@ -61,8 +61,12 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-open;
     in-out property <bool> dark-theme;
     in-out property <int> radius-mode: 1;
+    in-out property <int> density-mode: 1;
+    in-out property <int> font-mode: 1;
     callback theme-chosen(bool);
     callback radius-chosen(int);
+    callback density-chosen(int);
+    callback font-chosen(int);
 
     // Вход
     in property <string> heading <=> login-page.heading;
@@ -190,8 +194,12 @@ export component AppWindow inherits Window {
         height: root.height;
         dark: root.dark-theme;
         radius-mode: root.radius-mode;
+        density-mode: root.density-mode;
+        font-mode: root.font-mode;
         theme-chosen(dark) => { root.theme-chosen(dark); }
         radius-chosen(mode) => { root.radius-chosen(mode); }
+        density-chosen(mode) => { root.density-chosen(mode); }
+        font-chosen(mode) => { root.font-chosen(mode); }
         closed => { root.settings-open = false; }
     }
 

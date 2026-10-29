@@ -8,6 +8,9 @@ import "../assets/fonts/OpenSans-Bold.ttf";
 
 export global Theme {
     in-out property <bool> dark: false;
+    // Настройки пользователя: размер шрифта (1.0 = 14 px для основного текста) и высота строки таблицы.
+    in-out property <float> font-scale: 1.0;
+    in-out property <length> row-height: 32px;
 
     out property <color> bg: root.dark ? #1F1512 : #FAF6EE;
     out property <color> surface: root.dark ? #2A1D19 : #FFFFFF;
@@ -40,11 +43,11 @@ export global Theme {
     out property <length> control-md: 36px;
     out property <length> control-lg: 44px;
 
-    out property <length> font-caption: 12px;
-    out property <length> font-body: 14px;
-    out property <length> font-subtitle: 16px;
-    out property <length> font-title: 20px;
-    out property <length> font-display: 28px;
+    out property <length> font-caption: 12px * root.font-scale;
+    out property <length> font-body: 14px * root.font-scale;
+    out property <length> font-subtitle: 16px * root.font-scale;
+    out property <length> font-title: 20px * root.font-scale;
+    out property <length> font-display: 28px * root.font-scale;
 }
 
 // Скругление: настройка пользователя (4 / 6 / 8 px / капсула), по умолчанию 6.

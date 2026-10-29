@@ -89,7 +89,7 @@ component GridRowView inherits Rectangle {
     callback clicked();
     callback activated();
 
-    height: 32px;
+    height: Theme.row-height;
     background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
 
     Rectangle {
