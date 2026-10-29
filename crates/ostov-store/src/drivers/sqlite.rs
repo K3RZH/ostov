@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, params_from_iter};
 
@@ -24,6 +25,11 @@ impl Dialect for SqliteDialect {
     fn lock_rows(&self) -> &'static str {
         ""
     }
+
+    // Встроенный LOWER в SQLite понимает только латиницу.
+    fn lower(&self, expr: &str) -> String {
+        format!("ostov_lower({expr})")
+    }
 }
 
 /// База режима «один компьютер»: файл SQLite рядом с приложением.
@@ -35,14 +41,25 @@ impl SqliteDriver {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        add_functions(&conn)?;
         Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        add_functions(&conn)?;
         Ok(Self { conn })
     }
+}
+
+fn add_functions(conn: &Connection) -> Result<(), StoreError> {
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    conn.create_scalar_function("ostov_lower", 1, flags, |ctx| {
+        let text: Option<String> = ctx.get(0)?;
+        Ok(text.map(|t| t.to_lowercase()))
+    })?;
+    Ok(())
 }
 
 impl Driver for SqliteDriver {
@@ -183,6 +200,21 @@ mod tests {
         let mut db = db();
         let err = db.query("SELECT 1.5 AS x", &[]).unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedType(c) if c == "x"));
+    }
+
+    #[test]
+    fn lower_knows_cyrillic() {
+        let mut db = SqliteDriver::open_in_memory().unwrap();
+        let rows = db
+            .query(
+                "SELECT ostov_lower('МУКА Ёлка ABC'), ostov_lower(NULL)",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text("мука ёлка abc".into()), Value::Null]]
+        );
     }
 
     #[test]

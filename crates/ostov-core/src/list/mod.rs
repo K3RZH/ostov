@@ -150,7 +150,7 @@ impl Plan {
             fields,
             order,
             descending: query.descending,
-            search: raw.map(like_pattern),
+            search: raw.map(|s| like_pattern(&s.to_lowercase())),
             search_number: raw.and_then(|s| s.parse().ok()),
             titles: titles.clone(),
         })
@@ -334,7 +334,8 @@ impl Plan {
                 FieldKind::Text | FieldKind::Date => {
                     params.push(Value::Text(pattern.clone()));
                     parts.push(format!(
-                        "{col} LIKE {} ESCAPE '\\'",
+                        "{} LIKE {} ESCAPE '\\'",
+                        d.lower(&col),
                         d.placeholder(params.len())
                     ));
                 }
@@ -345,7 +346,7 @@ impl Plan {
                             "{col} IN (SELECT {} FROM {} WHERE {} LIKE {} ESCAPE '\\')",
                             d.quote_ident("id"),
                             d.quote_ident(target),
-                            d.quote_ident(column),
+                            d.lower(&d.quote_ident(column)),
                             d.placeholder(params.len()),
                         ));
                     }

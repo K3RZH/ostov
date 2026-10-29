@@ -47,6 +47,11 @@ pub trait Dialect {
         " FOR UPDATE"
     }
 
+    /// Нижний регистр для поиска без учёта регистра, в том числе для кириллицы.
+    fn lower(&self, expr: &str) -> String {
+        format!("LOWER({expr})")
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }

@@ -390,12 +390,11 @@ fn receipts_search_by_supplier_number_and_date() {
         };
         engine.list(&q).unwrap()
     };
-    assert_eq!(
-        found("мельн").total,
-        Some(0),
-        "поиск в SQLite чувствителен к регистру кириллицы"
-    );
+    // Регистр не важен, в том числе для кириллицы.
+    assert_eq!(found("мельн").total, Some(2));
+    assert_eq!(found("МЕЛЬН").total, Some(2));
     assert_eq!(found("Мельн").total, Some(2));
+    assert_eq!(found("основ").total, Some(3));
     assert_eq!(found("Основ").total, Some(3));
     assert_eq!(found("2026-10").total, Some(3));
     // Число ищется точно по номеру и как подстрока в дате: «2» есть и в «2026-10-30».
