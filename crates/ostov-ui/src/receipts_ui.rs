@@ -188,15 +188,32 @@ fn line_columns() -> Vec<GridColumn> {
     ]
 }
 
-/// Пересчитывает колонки после сдвига границы: `table_width` это ширина области колонок.
+/// Колонки на момент нажатия на ручку: от них считается каждое движение, а не от прошлого.
+type Snapshot = Rc<RefCell<Option<Vec<GridColumn>>>>;
+
+fn snapshot_of(model: &ModelRc<GridColumn>) -> Vec<GridColumn> {
+    use slint::Model;
+    model.iter().collect()
+}
+
+/// Пишет колонки в ту же модель на месте: заголовки и строки остаются теми же элементами,
+/// поэтому перетаскивание не прерывается (подмена модели целиком пересоздала бы заголовки).
+fn write_columns(model: &ModelRc<GridColumn>, columns: Vec<GridColumn>) {
+    use slint::Model;
+    for (i, column) in columns.into_iter().enumerate() {
+        model.set_row_data(i, column);
+    }
+}
+
+/// Пересчитывает колонки от снимка: `delta` смещение от точки нажатия, `table_width` ширина
+/// области колонок.
 fn resized_columns(
-    columns: &ModelRc<GridColumn>,
+    start: &[GridColumn],
     index: i32,
     delta: f32,
     table_width: f32,
 ) -> Vec<GridColumn> {
-    use slint::Model;
-    let mut columns: Vec<GridColumn> = columns.iter().collect();
+    let mut columns: Vec<GridColumn> = start.to_vec();
     let Some(index) = usize::try_from(index).ok().filter(|i| *i < columns.len()) else {
         return columns;
     };
@@ -484,24 +501,54 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         }
     });
 
-    data.on_resize_list({
-        let app = app.as_weak();
-        move |index, delta, table_width| {
+    // Ширины колонок меняются на каждом движении ручки (живое перетаскивание).
+    let list_snapshot: Snapshot = Rc::default();
+    let lines_snapshot: Snapshot = Rc::default();
+
+    data.on_resize_begin_list({
+        let (app, snapshot) = (app.as_weak(), list_snapshot.clone());
+        move || {
             let Some(app) = app.upgrade() else { return };
-            let data = app.global::<ReceiptsData>();
-            let columns = resized_columns(&data.get_columns(), index, delta, table_width);
-            data.set_columns(ModelRc::new(VecModel::from(columns)));
+            *snapshot.borrow_mut() = Some(snapshot_of(&app.global::<ReceiptsData>().get_columns()));
         }
     });
-
-    data.on_resize_lines({
-        let app = app.as_weak();
+    data.on_resize_list({
+        let (app, snapshot) = (app.as_weak(), list_snapshot.clone());
         move |index, delta, table_width| {
             let Some(app) = app.upgrade() else { return };
-            let data = app.global::<ReceiptsData>();
-            let columns = resized_columns(&data.get_line_columns(), index, delta, table_width);
-            data.set_line_columns(ModelRc::new(VecModel::from(columns)));
+            let model = app.global::<ReceiptsData>().get_columns();
+            if let Some(start) = snapshot.borrow().as_ref() {
+                write_columns(&model, resized_columns(start, index, delta, table_width));
+            }
         }
+    });
+    data.on_resize_end_list({
+        let snapshot = list_snapshot;
+        move || *snapshot.borrow_mut() = None
+    });
+
+    data.on_resize_begin_lines({
+        let (app, snapshot) = (app.as_weak(), lines_snapshot.clone());
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            *snapshot.borrow_mut() = Some(snapshot_of(
+                &app.global::<ReceiptsData>().get_line_columns(),
+            ));
+        }
+    });
+    data.on_resize_lines({
+        let (app, snapshot) = (app.as_weak(), lines_snapshot.clone());
+        move |index, delta, table_width| {
+            let Some(app) = app.upgrade() else { return };
+            let model = app.global::<ReceiptsData>().get_line_columns();
+            if let Some(start) = snapshot.borrow().as_ref() {
+                write_columns(&model, resized_columns(start, index, delta, table_width));
+            }
+        }
+    });
+    data.on_resize_end_lines({
+        let snapshot = lines_snapshot;
+        move || *snapshot.borrow_mut() = None
     });
 
     data.on_query_changed({

@@ -19,8 +19,12 @@ export global ReceiptsData {
     in-out property <string> query;
     callback sort(int);
     callback open(int);
+    callback resize-begin-list();
     callback resize-list(int, length, length);
+    callback resize-end-list();
+    callback resize-begin-lines();
     callback resize-lines(int, length, length);
+    callback resize-end-lines();
     callback create();
     callback query-changed(string);
 
@@ -95,7 +99,9 @@ component ReceiptList inherits VerticalLayout {
         sort-column: ReceiptsData.sort-column;
         sort-desc: ReceiptsData.sort-desc;
         selected-row <=> ReceiptsData.selected-row;
+        resize-begin => { ReceiptsData.resize-begin-list(); }
         resize-column(i, delta, width) => { ReceiptsData.resize-list(i, delta, width); }
+        resize-end => { ReceiptsData.resize-end-list(); }
         sort-clicked(i) => { ReceiptsData.sort(i); }
         row-activated(i) => { ReceiptsData.open(i); }
     }
@@ -182,7 +188,9 @@ component ReceiptForm inherits VerticalLayout {
         rows: ReceiptsData.lines;
         empty-text: "Товаров пока нет: нажмите «Добавить»";
         selected-row <=> ReceiptsData.line-selected;
+        resize-begin => { ReceiptsData.resize-begin-lines(); }
         resize-column(i, delta, width) => { ReceiptsData.resize-lines(i, delta, width); }
+        resize-end => { ReceiptsData.resize-end-lines(); }
         row-activated(i) => { ReceiptsData.line-edit(i); }
     }
     // Итоги: слева число позиций, справа сумма документа.

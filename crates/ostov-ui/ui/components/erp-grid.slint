@@ -23,12 +23,11 @@ component HeaderCell inherits Rectangle {
     // Колонка, ручку которой тянут сейчас (подсвечивается).
     in property <bool> dragging;
     callback clicked();
-    // Ручку тянут: абсолютная X мыши в окне. Сама колонка при этом не меняется (ручка не
-    // движется), поэтому координата точная; ширина применяется при отпускании.
-    callback drag-start(length);
+    // Ручку тянут: начало, смещение мыши от точки нажатия (точное, ручка при этом не
+    // движется), конец. Ширина меняется сразу, на каждом движении.
+    callback drag-start();
     callback drag-move(length);
-    callback drag-end(length);
-    callback drag-cancel();
+    callback drag-end();
 
     horizontal-stretch: root.spec.flex ? 1 : 0;
     min-width: root.spec.width;
@@ -65,24 +64,32 @@ component HeaderCell inherits Rectangle {
         }
     }
 
+    private property <bool> grabbed;
+    private property <length> grab-x;
+    private property <length> press-x;
+
     // Ручка-разделитель: черта 1 px, при наведении область 10 px и черта 2 px акцентом.
+    // Пока ручку тянут, она стоит на месте (левый край колонки не двигается, а правый уезжает
+    // за мышью): иначе её координаты мыши отстают на кадр и колонка дёргается.
     handle := TouchArea {
-        x: parent.width - 10px;
+        x: root.grabbed ? root.grab-x : parent.width - 10px;
         width: 10px;
         enabled: root.resizable;
         mouse-cursor: root.resizable ? MouseCursor.col-resize : MouseCursor.default;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
-                root.drag-start(self.absolute-position.x + self.mouse-x);
-            } else if (event.kind == PointerEventKind.up) {
-                root.drag-end(self.absolute-position.x + self.mouse-x);
-            } else if (event.kind == PointerEventKind.cancel) {
-                root.drag-cancel();
+                root.grab-x = root.width - 10px;
+                root.grabbed = true;
+                root.press-x = self.mouse-x;
+                root.drag-start();
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.grabbed = false;
+                root.drag-end();
             }
         }
         moved => {
             if (self.pressed) {
-                root.drag-move(self.absolute-position.x + self.mouse-x);
+                root.drag-move(self.mouse-x - root.press-x);
             }
         }
     }
@@ -160,8 +167,12 @@ export component ErpGrid inherits Rectangle {
     in-out property <int> selected-row: -1;
     callback sort-clicked(int);
     callback row-activated(int);
-    // Границу колонки (индекс) сдвинули на delta; третий аргумент: ширина области колонок.
+    // Ширина колонки меняется на каждом движении ручки: начало, смещение от точки нажатия
+    // (колонка, смещение, ширина области колонок), конец. Ширины пересчитывает вызывающий
+    // (src/grid.rs) от ширин на момент начала, поэтому ошибки не накапливаются.
+    callback resize-begin();
     callback resize-column(int, length, length);
+    callback resize-end();
 
     border-radius: Shape.surface-radius;
     border-width: 1px;
@@ -169,20 +180,8 @@ export component ErpGrid inherits Rectangle {
     background: Theme.surface;
     clip: true;
 
-    // Перетаскивание ручки: какая колонка и где мышь (абсолютная X в окне).
+    // Какая колонка меняет ширину сейчас (подсвечивается).
     private property <int> drag-index: -1;
-    private property <length> drag-start-x;
-    private property <length> drag-x;
-    private property <length> drag-delta: root.drag-x - root.drag-start-x;
-
-    // Отпустили ручку: сообщаем, на сколько сдвинули границу колонки. Ширины пересчитывает
-    // вызывающий (src/grid.rs): колонка меняется, соседи справа отдают место до минимума.
-    function end-drag() {
-        if (root.drag-index >= 0) {
-            root.resize-column(root.drag-index, root.drag-delta, root.width - GridMetrics.track-width - 2px);
-        }
-        root.drag-index = -1;
-    }
 
     VerticalLayout {
         Rectangle {
@@ -202,16 +201,16 @@ export component ErpGrid inherits Rectangle {
                     resizable: i < root.columns.length - 1;
                     dragging: i == root.drag-index;
                     clicked => { root.sort-clicked(i); }
-                    drag-start(x) => {
+                    drag-start => {
                         root.drag-index = i;
-                        root.drag-start-x = x;
-                        root.drag-x = x;
+                        root.resize-begin();
                     }
-                    drag-move(x) => { root.drag-x = x; }
-                    drag-cancel => { root.drag-index = -1; }
-                    drag-end(x) => {
-                        root.drag-x = x;
-                        root.end-drag();
+                    drag-move(offset) => {
+                        root.resize-column(i, offset, root.width - GridMetrics.track-width - 2px);
+                    }
+                    drag-end => {
+                        root.drag-index = -1;
+                        root.resize-end();
                     }
                 }
             }
@@ -327,12 +326,4 @@ export component ErpGrid inherits Rectangle {
         }
     }
 
-    // Направляющая при перетаскивании ручки: акцентная линия через всю таблицу.
-    if root.drag-index >= 0 : Rectangle {
-        x: root.drag-x - root.absolute-position.x - 1px;
-        y: 0px;
-        width: 2px;
-        height: root.height;
-        background: Theme.accent-text;
-    }
 }
