@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
+use crate::grid;
 use crate::receipts::{self, COLUMNS, Column, Line, Receipt};
 use crate::shell::{RECEIPTS_NODE, Shell};
 use crate::{AppWindow, GridColumn, GridRow, ReceiptsData};
@@ -165,29 +166,50 @@ fn list_columns() -> Vec<GridColumn> {
             right: i == AMOUNT,
             flex: i == SUPPLIER,
             status: i == STATUS,
-            after_flex: i > SUPPLIER,
         })
         .collect()
 }
 
 fn line_columns() -> Vec<GridColumn> {
-    // Гибкая колонка «Номенклатура» вторая: правее неё границы делят место с соседом.
-    let column = |title: &str, width: f32, right: bool, flex: bool, after_flex: bool| GridColumn {
+    let column = |title: &str, width: f32, right: bool, flex: bool| GridColumn {
         title: title.into(),
         width,
         right,
         flex,
         status: false,
-        after_flex,
     };
     vec![
-        column("№", 56.0, false, false, false),
-        column("Номенклатура", 140.0, false, true, false),
-        column("Ед.", 70.0, false, false, true),
-        column("Количество", 120.0, true, false, true),
-        column("Цена", 120.0, true, false, true),
-        column("Сумма", 140.0, true, false, true),
+        column("№", 56.0, false, false),
+        column("Номенклатура", 140.0, false, true),
+        column("Ед.", 70.0, false, false),
+        column("Количество", 120.0, true, false),
+        column("Цена", 120.0, true, false),
+        column("Сумма", 140.0, true, false),
     ]
+}
+
+/// Пересчитывает колонки после сдвига границы: `table_width` это ширина области колонок.
+fn resized_columns(
+    columns: &ModelRc<GridColumn>,
+    index: i32,
+    delta: f32,
+    table_width: f32,
+) -> Vec<GridColumn> {
+    use slint::Model;
+    let mut columns: Vec<GridColumn> = columns.iter().collect();
+    let Some(index) = usize::try_from(index).ok().filter(|i| *i < columns.len()) else {
+        return columns;
+    };
+    let flex = columns.iter().position(|c| c.flex);
+    let mut widths: Vec<f32> = columns.iter().map(|c| c.width).collect();
+    // Фактическая ширина гибкой колонки: остаток места после обычных колонок.
+    let fixed: f32 = columns.iter().filter(|c| !c.flex).map(|c| c.width).sum();
+    let flex_actual = flex.map_or(0.0, |f| (table_width - fixed).max(widths[f]));
+    grid::resize(&mut widths, flex, flex_actual, index, delta);
+    for (column, width) in columns.iter_mut().zip(widths) {
+        column.width = width;
+    }
+    columns
 }
 
 /// Шаг вех для списка: около десяти отметок на «круглых» числах строк (10, 50, 100, 500, …).
@@ -446,6 +468,26 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
             receipts::sort(&mut state.all, kind, descending);
             app.global::<ReceiptsData>().set_selected_row(-1);
             refresh_list(&app, &state);
+        }
+    });
+
+    data.on_resize_list({
+        let app = app.as_weak();
+        move |index, delta, table_width| {
+            let Some(app) = app.upgrade() else { return };
+            let data = app.global::<ReceiptsData>();
+            let columns = resized_columns(&data.get_columns(), index, delta, table_width);
+            data.set_columns(ModelRc::new(VecModel::from(columns)));
+        }
+    });
+
+    data.on_resize_lines({
+        let app = app.as_weak();
+        move |index, delta, table_width| {
+            let Some(app) = app.upgrade() else { return };
+            let data = app.global::<ReceiptsData>();
+            let columns = resized_columns(&data.get_line_columns(), index, delta, table_width);
+            data.set_line_columns(ModelRc::new(VecModel::from(columns)));
         }
     });
 

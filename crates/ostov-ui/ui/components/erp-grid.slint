@@ -5,8 +5,7 @@ import { ListView } from "std-widgets.slint";
 
 // flex: главная колонка, забирает свободную ширину (у неё width это минимум).
 // right: числа и суммы выравниваются вправо. status: значение показывается чипом статуса.
-// after-flex: колонка правее гибкой; при перетаскивании её правой границы место берётся у соседа справа.
-export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool, after-flex: bool }
+export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool }
 // muted: строка приглушена (например помечена на удаление).
 export struct GridRow { cells: [string], muted: bool }
 
@@ -151,7 +150,7 @@ component GridRowView inherits Rectangle {
 // Полоса прокрутки своя: ползунок, отметки-вехи (ADR-014) и подсказка «Строка N из M».
 // Данные и сортировку ведёт Rust; ширины колонок меняются здесь, перетаскиванием.
 export component ErpGrid inherits Rectangle {
-    in-out property <[GridColumn]> columns;
+    in property <[GridColumn]> columns;
     in property <[GridRow]> rows;
     in property <string> empty-text: "Нет данных";
     in property <int> sort-column: -1;
@@ -161,6 +160,8 @@ export component ErpGrid inherits Rectangle {
     in-out property <int> selected-row: -1;
     callback sort-clicked(int);
     callback row-activated(int);
+    // Границу колонки (индекс) сдвинули на delta; третий аргумент: ширина области колонок.
+    callback resize-column(int, length, length);
 
     border-radius: Shape.surface-radius;
     border-width: 1px;
@@ -174,34 +175,11 @@ export component ErpGrid inherits Rectangle {
     private property <length> drag-x;
     private property <length> drag-delta: root.drag-x - root.drag-start-x;
 
-    function set-width(index: int, width: length) {
-        root.columns[index] = {
-            title: root.columns[index].title,
-            width: max(48px, width),
-            right: root.columns[index].right,
-            flex: root.columns[index].flex,
-            status: root.columns[index].status,
-            after-flex: root.columns[index].after-flex,
-        };
-    }
-
-    // Отпустили ручку: граница колонки сдвигается за мышью, место берётся у соседа.
-    // Гибкая колонка: сдвиг забирает или отдаёт сосед справа. Колонка левее гибкой: меняется
-    // она сама, гибкая подстраивается. Колонка правее гибкой: пара с соседом справа.
+    // Отпустили ручку: сообщаем, на сколько сдвинули границу колонки. Ширины пересчитывает
+    // вызывающий (src/grid.rs): колонка меняется, соседи справа отдают место до минимума.
     function end-drag() {
         if (root.drag-index >= 0) {
-            if (root.columns[root.drag-index].flex) {
-                if (root.drag-index + 1 < root.columns.length) {
-                    root.set-width(root.drag-index + 1, root.columns[root.drag-index + 1].width - root.drag-delta);
-                }
-            } else if (root.columns[root.drag-index].after-flex && root.drag-index + 1 < root.columns.length) {
-                root.set-width(root.drag-index, root.columns[root.drag-index].width
-                    + min(max(root.drag-delta, 48px - root.columns[root.drag-index].width), root.columns[root.drag-index + 1].width - 48px));
-                root.set-width(root.drag-index + 1, root.columns[root.drag-index + 1].width
-                    - min(max(root.drag-delta, 48px - root.columns[root.drag-index].width), root.columns[root.drag-index + 1].width - 48px));
-            } else {
-                root.set-width(root.drag-index, root.columns[root.drag-index].width + root.drag-delta);
-            }
+            root.resize-column(root.drag-index, root.drag-delta, root.width - GridMetrics.track-width - 2px);
         }
         root.drag-index = -1;
     }
