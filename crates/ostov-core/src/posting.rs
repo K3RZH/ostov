@@ -17,6 +17,7 @@ pub fn post(
 ) -> Result<(), CoreError> {
     in_transaction(db, |db| {
         let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        check_not_deleted(&doc)?;
         let movements = rule(&doc)?;
         register.replace(db, kind.table(), id, &movements)?;
         kind.set_posted(db, id, true)
@@ -36,6 +37,7 @@ pub fn save(
     in_transaction(db, |db| {
         let saved = kind.write(db, doc)?;
         if post {
+            check_not_deleted(&saved)?;
             let movements = rule(&saved)?;
             register.replace(db, kind.table(), saved.id, &movements)?;
             kind.set_posted(db, saved.id, true)?;
@@ -46,6 +48,16 @@ pub fn save(
         kind.get(db, saved.id)?
             .ok_or_else(|| kind.not_found(saved.id))
     })
+}
+
+fn check_not_deleted(doc: &Document) -> Result<(), CoreError> {
+    if doc.deleted {
+        return Err(CoreError::Invalid(format!(
+            "документ {} помечен на удаление: снимите пометку, чтобы провести",
+            doc.number
+        )));
+    }
+    Ok(())
 }
 
 /// Отменяет проведение: движения удаляются, итоги пересчитываются.
@@ -397,5 +409,56 @@ mod tests {
         let header = fields(&[("store", text("main"))]);
         assert!(s.receipt.insert(&mut s.db, &header, &bad).is_err());
         assert_eq!(s.receipt.get(&mut s.db, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn documents_are_numbered_by_kind() {
+        let mut s = setup();
+        let a = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        let b = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        let c = new_doc(&mut s, MovementKind::Issue, &[(1, "1")]);
+        let number = |s: &mut Setup, kind: &DocumentKind, id| {
+            kind.get(&mut s.db, id).unwrap().unwrap().number
+        };
+        let (receipt, issue) = (s.receipt.clone(), s.issue.clone());
+        assert_eq!(number(&mut s, &receipt, a), 1);
+        assert_eq!(number(&mut s, &receipt, b), 2);
+        assert_eq!(number(&mut s, &issue, c), 1);
+
+        // Неудачная запись номер не занимает.
+        let bad = BTreeMap::from([("lines".to_owned(), vec![fields(&[("item", text("мука"))])])]);
+        let header = fields(&[("store", text("main"))]);
+        assert!(s.receipt.insert(&mut s.db, &header, &bad).is_err());
+        let d = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        assert_eq!(number(&mut s, &receipt, d), 3);
+    }
+
+    #[test]
+    fn deletion_mark_and_posting() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let version = s.receipt.get(&mut s.db, r).unwrap().unwrap().version;
+        let err = s
+            .receipt
+            .mark_deleted(&mut s.db, r, version, true)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Invalid(_)), "{err}");
+
+        unpost(&mut s.db, &s.receipt, &s.stock, r).unwrap();
+        let version = s.receipt.get(&mut s.db, r).unwrap().unwrap().version;
+        let marked = s.receipt.mark_deleted(&mut s.db, r, version, true).unwrap();
+        assert!(marked.deleted);
+
+        let err = post_doc(&mut s, MovementKind::Receipt, r).unwrap_err();
+        assert!(matches!(err, CoreError::Invalid(_)), "{err}");
+        assert_eq!(balance(&mut s, 1), q("0"));
+
+        s.receipt
+            .mark_deleted(&mut s.db, r, marked.version, false)
+            .unwrap();
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        assert_eq!(balance(&mut s, 1), q("10"));
     }
 }

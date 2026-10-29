@@ -2,7 +2,7 @@ use ostov_store::{Driver, Value};
 
 use super::{
     FieldDef, Fields, check_fields, check_ident, column_defs, names, placeholders, read_fields,
-    returned_id, to_values,
+    returned_id, set_flag, to_values,
 };
 use crate::CoreError;
 
@@ -10,6 +10,8 @@ use crate::CoreError;
 pub struct Element {
     pub id: i64,
     pub version: i64,
+    /// Пометка на удаление (СТ-30).
+    pub deleted: bool,
     pub fields: Fields,
 }
 
@@ -24,7 +26,7 @@ pub struct Catalog {
 impl Catalog {
     pub fn new(table: &str, fields: Vec<FieldDef>) -> Result<Self, CoreError> {
         check_ident(table)?;
-        check_fields(&fields, &["id", "version"])?;
+        check_fields(&fields, &["id", "version", "deleted"])?;
         Ok(Self {
             table: table.to_owned(),
             fields,
@@ -44,6 +46,7 @@ impl Catalog {
         let mut columns = vec![
             format!("{} {}", d.quote_ident("id"), d.id_column()),
             format!("{} BIGINT NOT NULL", d.quote_ident("version")),
+            format!("{} BIGINT NOT NULL", d.quote_ident("deleted")),
         ];
         columns.extend(column_defs(d, &self.fields));
         let sql = format!(
@@ -56,11 +59,11 @@ impl Catalog {
     }
 
     pub fn insert(&self, db: &mut dyn Driver, fields: &Fields) -> Result<Element, CoreError> {
-        let mut values = vec![Value::Int(1)];
+        let mut values = vec![Value::Int(1), Value::Int(0)];
         values.extend(to_values(&self.table, &self.fields, fields)?);
 
         let d = db.dialect();
-        let mut cols = vec![d.quote_ident("version")];
+        let mut cols = vec![d.quote_ident("version"), d.quote_ident("deleted")];
         cols.extend(names(d, &self.fields));
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
@@ -76,7 +79,10 @@ impl Catalog {
 
     pub fn get(&self, db: &mut dyn Driver, id: i64) -> Result<Option<Element>, CoreError> {
         let d = db.dialect();
-        let mut cols = vec![d.quote_ident("id"), d.quote_ident("version")];
+        let mut cols: Vec<String> = ["id", "version", "deleted"]
+            .iter()
+            .map(|c| d.quote_ident(c))
+            .collect();
         cols.extend(names(d, &self.fields));
         let sql = format!(
             "SELECT {} FROM {} WHERE {} = {}",
@@ -90,7 +96,8 @@ impl Catalog {
             return Ok(None);
         };
         let mut values = row.into_iter();
-        let (Some(Value::Int(id)), Some(Value::Int(version))) = (values.next(), values.next())
+        let (Some(Value::Int(id)), Some(Value::Int(version)), Some(Value::Int(deleted))) =
+            (values.next(), values.next(), values.next())
         else {
             return Err(CoreError::Invalid(format!(
                 "в {} нет id или версии",
@@ -100,8 +107,29 @@ impl Catalog {
         Ok(Some(Element {
             id,
             version,
+            deleted: deleted != 0,
             fields: read_fields(&self.fields, values)?,
         }))
+    }
+
+    /// Ставит или снимает пометку на удаление с проверкой версии.
+    pub fn mark_deleted(
+        &self,
+        db: &mut dyn Driver,
+        id: i64,
+        version: i64,
+        deleted: bool,
+    ) -> Result<Element, CoreError> {
+        if !set_flag(db, &self.table, "deleted", deleted, id, version)? {
+            return Err(match self.get(db, id)? {
+                Some(_) => CoreError::VersionConflict {
+                    table: self.table.clone(),
+                    id,
+                },
+                None => self.not_found(id),
+            });
+        }
+        self.get(db, id)?.ok_or_else(|| self.not_found(id))
     }
 
     /// Сохраняет запись, только если её версия не изменилась с момента чтения (ADR-023).
@@ -259,5 +287,31 @@ mod tests {
         })
         .unwrap();
         assert!(cat.get(&mut db, id).unwrap().is_some());
+    }
+
+    #[test]
+    fn mark_deleted_checks_version() {
+        let mut db = db();
+        let cat = goods();
+        let salt = cat
+            .insert(&mut db, &fields(&[("name", text("Соль"))]))
+            .unwrap();
+        assert!(!salt.deleted);
+
+        let marked = cat
+            .mark_deleted(&mut db, salt.id, salt.version, true)
+            .unwrap();
+        assert!(marked.deleted);
+        assert_eq!(marked.version, 2);
+
+        let stale = cat.mark_deleted(&mut db, salt.id, salt.version, false);
+        assert!(matches!(stale, Err(CoreError::VersionConflict { .. })));
+        let back = cat
+            .mark_deleted(&mut db, salt.id, marked.version, false)
+            .unwrap();
+        assert!(!back.deleted);
+
+        let ghost = cat.mark_deleted(&mut db, 999, 1, true);
+        assert!(matches!(ghost, Err(CoreError::NotFound { .. })));
     }
 }

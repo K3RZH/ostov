@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use ostov_store::{Decimal, Dialect, Value};
+use ostov_store::{Decimal, Dialect, Driver, Value};
 
 use crate::CoreError;
 
@@ -184,6 +184,36 @@ pub(crate) fn read_fields(
         .zip(values)
         .map(|(def, value)| Ok((def.name.clone(), from_value(def, value)?)))
         .collect()
+}
+
+/// Ставит флаг 0/1 с проверкой версии; `false` — версия не совпала или записи нет.
+pub(crate) fn set_flag(
+    db: &mut dyn Driver,
+    table: &str,
+    column: &str,
+    value: bool,
+    id: i64,
+    version: i64,
+) -> Result<bool, CoreError> {
+    let sql = {
+        let d = db.dialect();
+        let v = d.quote_ident("version");
+        format!(
+            "UPDATE {} SET {} = {}, {v} = {v} + 1 WHERE {} = {} AND {v} = {}",
+            d.quote_ident(table),
+            d.quote_ident(column),
+            d.placeholder(1),
+            d.quote_ident("id"),
+            d.placeholder(2),
+            d.placeholder(3),
+        )
+    };
+    let params = [
+        Value::Int(value.into()),
+        Value::Int(id),
+        Value::Int(version),
+    ];
+    Ok(db.execute(&sql, &params)? > 0)
 }
 
 pub(crate) fn returned_id(rows: &[Vec<Value>]) -> Result<i64, CoreError> {

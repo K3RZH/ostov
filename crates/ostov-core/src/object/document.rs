@@ -4,7 +4,7 @@ use ostov_store::{Driver, Value};
 
 use super::{
     FieldDef, Fields, check_fields, check_ident, column_defs, names, placeholders, read_fields,
-    returned_id, to_values,
+    returned_id, set_flag, to_values,
 };
 use crate::{CoreError, in_transaction};
 
@@ -30,7 +30,11 @@ impl TablePart {
 pub struct Document {
     pub id: i64,
     pub version: i64,
+    /// Номер назначает ядро при первой записи: следующий после наибольшего.
+    pub number: i64,
     pub posted: bool,
+    /// Пометка на удаление (СТ-30): документ не стирается, а помечается.
+    pub deleted: bool,
     pub header: Fields,
     pub parts: BTreeMap<String, Vec<Fields>>,
 }
@@ -50,7 +54,7 @@ impl DocumentKind {
         parts: Vec<TablePart>,
     ) -> Result<Self, CoreError> {
         check_ident(table)?;
-        check_fields(&header, &["id", "version", "posted"])?;
+        check_fields(&header, &["id", "version", "posted", "deleted", "number"])?;
         for part in &parts {
             check_ident(&format!("{table}__{}", part.name))?;
         }
@@ -77,6 +81,8 @@ impl DocumentKind {
                 format!("{} {}", d.quote_ident("id"), d.id_column()),
                 format!("{} BIGINT NOT NULL", d.quote_ident("version")),
                 format!("{} BIGINT NOT NULL", d.quote_ident("posted")),
+                format!("{} BIGINT NOT NULL", d.quote_ident("deleted")),
+                format!("{} BIGINT NOT NULL UNIQUE", d.quote_ident("number")),
             ];
             columns.extend(column_defs(d, &self.header));
             statements.push(format!(
@@ -140,10 +146,19 @@ impl DocumentKind {
         parts: &BTreeMap<String, Vec<Fields>>,
     ) -> Result<Document, CoreError> {
         self.check_parts(parts)?;
-        let mut values = vec![Value::Int(1), Value::Int(0)];
+        let number = self.next_number(db)?;
+        let mut values = vec![
+            Value::Int(1),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(number),
+        ];
         values.extend(to_values(&self.table, &self.header, header)?);
         let d = db.dialect();
-        let mut cols = vec![d.quote_ident("version"), d.quote_ident("posted")];
+        let mut cols: Vec<String> = ["version", "posted", "deleted", "number"]
+            .iter()
+            .map(|c| d.quote_ident(c))
+            .collect();
         cols.extend(names(d, &self.header));
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
@@ -163,11 +178,10 @@ impl DocumentKind {
 
     pub fn get(&self, db: &mut dyn Driver, id: i64) -> Result<Option<Document>, CoreError> {
         let d = db.dialect();
-        let mut cols = vec![
-            d.quote_ident("id"),
-            d.quote_ident("version"),
-            d.quote_ident("posted"),
-        ];
+        let mut cols: Vec<String> = ["id", "version", "posted", "deleted", "number"]
+            .iter()
+            .map(|c| d.quote_ident(c))
+            .collect();
         cols.extend(names(d, &self.header));
         let sql = format!(
             "SELECT {} FROM {} WHERE {} = {}",
@@ -180,8 +194,19 @@ impl DocumentKind {
             return Ok(None);
         };
         let mut values = row.into_iter();
-        let (Some(Value::Int(id)), Some(Value::Int(version)), Some(Value::Int(posted))) =
-            (values.next(), values.next(), values.next())
+        let (
+            Some(Value::Int(id)),
+            Some(Value::Int(version)),
+            Some(Value::Int(posted)),
+            Some(Value::Int(deleted)),
+            Some(Value::Int(number)),
+        ) = (
+            values.next(),
+            values.next(),
+            values.next(),
+            values.next(),
+            values.next(),
+        )
         else {
             return Err(CoreError::Invalid(format!(
                 "в {} битая строка документа",
@@ -197,10 +222,56 @@ impl DocumentKind {
         Ok(Some(Document {
             id,
             version,
+            number,
             posted: posted != 0,
+            deleted: deleted != 0,
             header,
             parts,
         }))
+    }
+
+    /// Ставит или снимает пометку на удаление с проверкой версии.
+    /// Проведённый документ пометить нельзя: сначала отмените проведение.
+    pub fn mark_deleted(
+        &self,
+        db: &mut dyn Driver,
+        id: i64,
+        version: i64,
+        deleted: bool,
+    ) -> Result<Document, CoreError> {
+        in_transaction(db, |db| {
+            let doc = self.get(db, id)?.ok_or_else(|| self.not_found(id))?;
+            if deleted && doc.posted {
+                return Err(CoreError::Invalid(format!(
+                    "документ {} проведён: сначала отмените проведение",
+                    doc.number
+                )));
+            }
+            if !set_flag(db, &self.table, "deleted", deleted, id, version)? {
+                return Err(CoreError::VersionConflict {
+                    table: self.table.clone(),
+                    id,
+                });
+            }
+            self.get(db, id)?.ok_or_else(|| self.not_found(id))
+        })
+    }
+
+    fn next_number(&self, db: &mut dyn Driver) -> Result<i64, CoreError> {
+        let sql = {
+            let d = db.dialect();
+            format!(
+                "SELECT MAX({}) FROM {}",
+                d.quote_ident("number"),
+                d.quote_ident(&self.table)
+            )
+        };
+        match db.query(&sql, &[])?.first().and_then(|r| r.first()) {
+            Some(Value::Int(n)) => n
+                .checked_add(1)
+                .ok_or_else(|| CoreError::Invalid("номера документов закончились".into())),
+            _ => Ok(1),
+        }
     }
 
     pub(crate) fn set_posted(

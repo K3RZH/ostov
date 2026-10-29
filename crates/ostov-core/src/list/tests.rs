@@ -201,4 +201,9 @@ fn documents_are_listed_with_posted_flag() {
     let page = list(&mut db, &kind, &ListQuery::default(), None, 10).unwrap();
     assert_eq!(page.rows[0].fields["posted"], FieldValue::Int(0));
     assert_eq!(page.rows[0].fields["store"], text("main"));
+    assert_eq!(page.rows[0].fields["number"], FieldValue::Int(1));
+    assert_eq!(page.rows[0].fields["deleted"], FieldValue::Int(0));
+
+    let goods_page = list(&mut db_with(1), &goods(), &ListQuery::default(), None, 1).unwrap();
+    assert_eq!(goods_page.rows[0].fields["deleted"], FieldValue::Int(0));
 }

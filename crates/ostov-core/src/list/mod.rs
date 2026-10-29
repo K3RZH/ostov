@@ -26,7 +26,9 @@ impl ListSource for Catalog {
     }
 
     fn list_fields(&self) -> Vec<FieldDef> {
-        self.fields().to_vec()
+        let mut fields = self.fields().to_vec();
+        fields.push(FieldDef::new("deleted", FieldKind::Int));
+        fields
     }
 }
 
@@ -36,8 +38,11 @@ impl ListSource for DocumentKind {
     }
 
     fn list_fields(&self) -> Vec<FieldDef> {
-        let mut fields = self.header().to_vec();
-        fields.push(FieldDef::new("posted", FieldKind::Int));
+        let mut fields = vec![FieldDef::new("number", FieldKind::Int)];
+        fields.extend(self.header().iter().cloned());
+        for flag in ["posted", "deleted"] {
+            fields.push(FieldDef::new(flag, FieldKind::Int));
+        }
         fields
     }
 }
