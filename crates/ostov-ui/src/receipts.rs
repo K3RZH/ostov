@@ -11,6 +11,8 @@ pub struct Receipt {
     /// Сумма в копейках: деньги не храним дробным числом.
     pub amount: i64,
     pub posted: bool,
+    /// Строки документа; `None`: ещё не открывали (покажем примерные).
+    pub lines: Option<Vec<Line>>,
 }
 
 /// Колонки списка в порядке показа.
@@ -33,7 +35,8 @@ pub const COLUMNS: [Column; 6] = [
     Column::Status,
 ];
 
-const SUPPLIERS: [&str; 6] = [
+/// Справочник поставщиков (для выпадающего списка).
+pub const SUPPLIERS: [&str; 6] = [
     "Мясной двор",
     "Овощи оптом",
     "Молочный комбинат",
@@ -41,7 +44,8 @@ const SUPPLIERS: [&str; 6] = [
     "Рыбный ряд",
     "Пекарня №3",
 ];
-const WAREHOUSES: [&str; 3] = ["Основной", "Кухня", "Бар"];
+/// Перечисление складов (для выпадающего списка).
+pub const WAREHOUSES: [&str; 3] = ["Основной", "Кухня", "Бар"];
 
 impl Column {
     pub fn title(self) -> &'static str {
@@ -79,6 +83,7 @@ pub fn demo(count: u32) -> Vec<Receipt> {
                 warehouse: WAREHOUSES[usize::try_from((r >> 32) % 3).unwrap_or(0)].to_owned(),
                 amount: i64::try_from((r >> 40) % 9_000_000).unwrap_or(0) + 10_000,
                 posted: (r >> 60) % 4 != 0,
+                lines: None,
             }
         })
         .collect()
@@ -167,15 +172,18 @@ pub fn parse_date(text: &str) -> Option<(u16, u8, u8)> {
 /// Строка табличной части документа.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
-    pub name: &'static str,
-    pub unit: &'static str,
+    pub name: String,
+    pub unit: String,
     /// Количество в десятых долях единицы.
     pub quantity_tenths: i64,
+    /// Цена за единицу в копейках.
+    pub price: i64,
     /// Сумма строки в копейках.
     pub amount: i64,
 }
 
-const GOODS: [(&str, &str); 8] = [
+/// Справочник номенклатуры: название и единица измерения.
+pub const GOODS: [(&str, &str); 8] = [
     ("Мука пшеничная в/с", "кг"),
     ("Говядина охлаждённая", "кг"),
     ("Молоко 3,2%", "л"),
@@ -214,12 +222,13 @@ pub fn lines(receipt: &Receipt) -> Vec<Line> {
             left -= amount;
             let (name, unit) =
                 GOODS[(usize::try_from(receipt.number).unwrap_or(0) + i * 3) % GOODS.len()];
+            let quantity_tenths =
+                100 + i64::from(receipt.number % 9) * 70 + i64::try_from(i).unwrap_or(0) * 35;
             Line {
-                name,
-                unit,
-                quantity_tenths: 100
-                    + i64::from(receipt.number % 9) * 70
-                    + i64::try_from(i).unwrap_or(0) * 35,
+                name: name.to_owned(),
+                unit: unit.to_owned(),
+                quantity_tenths,
+                price: amount * 10 / quantity_tenths.max(1),
                 amount,
             }
         })
@@ -232,8 +241,66 @@ pub fn quantity(tenths: i64) -> String {
 }
 
 impl Line {
-    /// Цена за единицу в копейках (для показа): сумма, делённая на количество.
-    pub fn price(&self) -> i64 {
-        self.amount * 10 / self.quantity_tenths.max(1)
+    /// Строка из введённых данных: сумма это цена, умноженная на количество.
+    pub fn new(name: &str, quantity_tenths: i64, price: i64) -> Self {
+        Self {
+            name: name.to_owned(),
+            unit: unit_of(name).to_owned(),
+            quantity_tenths,
+            price,
+            amount: price * quantity_tenths / 10,
+        }
     }
+}
+
+/// Единица измерения товара по справочнику (нет в справочнике: «шт»).
+pub fn unit_of(name: &str) -> &'static str {
+    GOODS
+        .iter()
+        .find(|(good, _)| *good == name)
+        .map_or("шт", |(_, unit)| unit)
+}
+
+/// Разбирает неотрицательное число с запятой или точкой в целые доли: `scale` знаков после
+/// запятой (для количества 1, для денег 2). Лишние знаки отклоняются, а не округляются.
+pub fn parse_decimal(text: &str, scale: u32) -> Option<i64> {
+    let text = text.trim().replace(',', ".");
+    let (whole, fraction) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+    let scale_len = usize::try_from(scale).ok()?;
+    if (whole.is_empty() && fraction.is_empty())
+        || !digits(whole)
+        || !digits(fraction)
+        || fraction.len() > scale_len
+    {
+        return None;
+    }
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let fraction_value: i64 = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse().ok()?
+    };
+    let missing = u32::try_from(scale_len - fraction.len()).ok()?;
+    whole
+        .checked_mul(10_i64.pow(scale))?
+        .checked_add(fraction_value * 10_i64.pow(missing))
+}
+
+/// «1 позиция», «2 позиции», «5 позиций».
+pub fn positions(count: usize) -> String {
+    let last = count % 10;
+    let last_two = count % 100;
+    let word = if last == 1 && last_two != 11 {
+        "позиция"
+    } else if (2..=4).contains(&last) && !(12..=14).contains(&last_two) {
+        "позиции"
+    } else {
+        "позиций"
+    };
+    format!("{count} {word}")
 }

@@ -1,29 +1,35 @@
 import { Theme, Shape } from "../theme.slint";
 import { Icon } from "icon.slint";
+import { Chip, ChipKind } from "chip.slint";
 import { ListView } from "std-widgets.slint";
 
 // flex: главная колонка, забирает свободную ширину (у неё width это минимум).
-// right: числа и суммы выравниваются вправо.
-export struct GridColumn { title: string, width: length, right: bool, flex: bool }
+// right: числа и суммы выравниваются вправо. status: значение показывается чипом статуса.
+export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool }
 // muted: строка приглушена (например помечена на удаление).
 export struct GridRow { cells: [string], muted: bool }
+
+// Ширина полосы прокрутки: шапка и строки отступают на неё поровну, чтобы колонки совпадали.
+global GridMetrics {
+    out property <length> track-width: 14px;
+}
 
 component HeaderCell inherits Rectangle {
     in property <GridColumn> spec;
     in property <bool> sorted;
     in property <bool> desc;
-    // Последняя колонка и гибкая ширину не тянут: у них только черта справа.
+    // У последней колонки ручки нет: её правый край это край таблицы.
     in property <bool> resizable: true;
     callback clicked();
-    callback resized(length);
+    // Сдвиг ручки с прошлого события (положительный: вправо).
+    callback dragged(length);
 
     horizontal-stretch: root.spec.flex ? 1 : 0;
     min-width: root.spec.width;
     max-width: root.spec.flex ? 100000px : root.spec.width;
     background: touch.has-hover ? Theme.border : transparent;
 
-    private property <length> start-x;
-    private property <length> start-width;
+    private property <length> last-x;
 
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -55,21 +61,21 @@ component HeaderCell inherits Rectangle {
         }
     }
 
-    // Ручка-разделитель: черта 1 px, при наведении область 8 px и черта 2 px акцентом.
+    // Ручка-разделитель: черта 1 px, при наведении область 10 px и черта 2 px акцентом.
     handle := TouchArea {
-        x: parent.width - 8px;
-        width: 8px;
+        x: parent.width - 10px;
+        width: 10px;
         enabled: root.resizable;
         mouse-cursor: root.resizable ? MouseCursor.col-resize : MouseCursor.default;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
-                root.start-x = self.absolute-position.x + self.mouse-x;
-                root.start-width = root.spec.width;
+                root.last-x = self.absolute-position.x + self.mouse-x;
             }
         }
         moved => {
             if (self.pressed) {
-                root.resized(max(48px, root.start-width + self.absolute-position.x + self.mouse-x - root.start-x));
+                root.dragged(self.absolute-position.x + self.mouse-x - root.last-x);
+                root.last-x = self.absolute-position.x + self.mouse-x;
             }
         }
     }
@@ -108,7 +114,7 @@ component GridRowView inherits Rectangle {
             horizontal-stretch: col.flex ? 1 : 0;
             min-width: col.width;
             max-width: col.flex ? 100000px : col.width;
-            Text {
+            if !col.status : Text {
                 x: Theme.space-12;
                 width: parent.width - 2 * Theme.space-12;
                 height: parent.height;
@@ -120,22 +126,32 @@ component GridRowView inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
             }
+            if col.status : Chip {
+                x: Theme.space-12;
+                y: (parent.height - self.height) / 2;
+                text: root.item.cells[i];
+                kind: root.item.cells[i] == "Проведён" ? ChipKind.posted
+                    : root.item.cells[i] == "Черновик" ? ChipKind.draft
+                    : ChipKind.neutral;
+            }
         }
     }
 }
 
 // Таблица ErpGrid по макету: шапка с сортировкой и ручками колонок, строки без вертикальных
 // линий, внешний контур скруглён, строки и шапка с прямыми углами, главная колонка гибкая.
-// Данные, сортировку и ширины колонок ведёт Rust: здесь только вид и события.
+// Полоса прокрутки своя: ползунок, отметки-вехи (ADR-014) и подсказка «Строка N из M».
+// Данные и сортировку ведёт Rust; ширины колонок меняются здесь, перетаскиванием.
 export component ErpGrid inherits Rectangle {
-    in property <[GridColumn]> columns;
+    in-out property <[GridColumn]> columns;
     in property <[GridRow]> rows;
     in property <string> empty-text: "Нет данных";
     in property <int> sort-column: -1;
     in property <bool> sort-desc;
+    // Шаг вех в строках (0: без вех). Для длинных списков задаёт вызывающий.
+    in property <int> milestone-step: 0;
     in-out property <int> selected-row: -1;
     callback sort-clicked(int);
-    callback column-resized(int, length);
     callback row-activated(int);
 
     border-radius: Shape.surface-radius;
@@ -143,6 +159,29 @@ export component ErpGrid inherits Rectangle {
     border-color: Theme.border;
     background: Theme.surface;
     clip: true;
+
+    // Тянем ручку: у обычной колонки меняется её ширина, у гибкой граница делит место с соседней.
+    function drag(index: int, delta: length) {
+        if (root.columns[index].flex) {
+            if (index + 1 < root.columns.length) {
+                root.columns[index + 1] = {
+                    title: root.columns[index + 1].title,
+                    width: max(48px, root.columns[index + 1].width - delta),
+                    right: root.columns[index + 1].right,
+                    flex: root.columns[index + 1].flex,
+                    status: root.columns[index + 1].status,
+                };
+            }
+        } else {
+            root.columns[index] = {
+                title: root.columns[index].title,
+                width: max(48px, root.columns[index].width + delta),
+                right: root.columns[index].right,
+                flex: root.columns[index].flex,
+                status: root.columns[index].status,
+            };
+        }
+    }
 
     VerticalLayout {
         Rectangle {
@@ -154,13 +193,14 @@ export component ErpGrid inherits Rectangle {
                 background: Theme.border;
             }
             HorizontalLayout {
+                padding-right: GridMetrics.track-width;
                 for col[i] in root.columns : HeaderCell {
                     spec: col;
                     sorted: i == root.sort-column;
                     desc: root.sort-desc;
-                    resizable: !col.flex && i < root.columns.length - 1;
+                    resizable: i < root.columns.length - 1;
                     clicked => { root.sort-clicked(i); }
-                    resized(width) => { root.column-resized(i, width); }
+                    dragged(delta) => { root.drag(i, delta); }
                 }
             }
         }
@@ -173,13 +213,104 @@ export component ErpGrid inherits Rectangle {
                 vertical-alignment: center;
             }
         }
-        if root.rows.length > 0 : ListView {
-            for row[i] in root.rows : GridRowView {
-                item: row;
-                columns: root.columns;
-                selected: i == root.selected-row;
-                clicked => { root.selected-row = i; }
-                activated => { root.row-activated(i); }
+        if root.rows.length > 0 : Rectangle {
+            list := ListView {
+                x: 0px;
+                width: parent.width - GridMetrics.track-width;
+                height: parent.height;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                for row[i] in root.rows : GridRowView {
+                    item: row;
+                    columns: root.columns;
+                    selected: i == root.selected-row;
+                    clicked => { root.selected-row = i; }
+                    activated => { root.row-activated(i); }
+                }
+            }
+
+            // Полоса прокрутки
+            track := Rectangle {
+                x: parent.width - GridMetrics.track-width;
+                width: GridMetrics.track-width;
+                height: parent.height;
+                background: Theme.surface-alt;
+
+                private property <length> total: list.content-height;
+                private property <length> view-h: list.visible-height;
+                private property <length> scroll-range: max(0px, self.total - self.view-h);
+                private property <length> thumb-height: max(28px, self.height * self.view-h / max(1px, self.total));
+                private property <length> thumb-free: max(1px, self.height - self.thumb-height);
+                private property <length> thumb-y: self.scroll-range > 0 ? (-list.content-y / self.scroll-range) * self.thumb-free : 0px;
+                private property <length> drag-start-y;
+                private property <length> drag-start-offset;
+
+                Rectangle {
+                    x: 0px;
+                    width: 1px;
+                    background: Theme.border;
+                }
+
+                // Вехи: отметки через равные промежутки строк, по ним удобно прыгать ползунком.
+                if root.milestone-step > 0 && track.scroll-range > 0 : Rectangle {
+                    for k in Math.floor(root.rows.length / root.milestone-step) : Rectangle {
+                        x: 2px;
+                        y: ((k + 1) * root.milestone-step / root.rows.length) * track.height;
+                        width: 6px;
+                        height: 1px;
+                        background: Theme.border-strong;
+                    }
+                }
+
+                // Клик по полосе: ползунок прыгает к этому месту.
+                TouchArea {
+                    enabled: track.scroll-range > 0;
+                    clicked => {
+                        list.content-y = -min(track.scroll-range, max(0px, (self.mouse-y - track.thumb-height / 2) / track.thumb-free * track.scroll-range));
+                    }
+                }
+
+                if track.scroll-range > 0 : thumb := Rectangle {
+                    x: 3px;
+                    y: track.thumb-y;
+                    width: parent.width - 6px;
+                    height: track.thumb-height;
+                    border-radius: 4px;
+                    background: thumb-touch.pressed ? Theme.accent-text : thumb-touch.has-hover ? Theme.text-muted : Theme.border-strong;
+
+                    thumb-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                track.drag-start-y = self.absolute-position.y + self.mouse-y;
+                                track.drag-start-offset = list.content-y;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                list.content-y = -min(track.scroll-range, max(0px, -track.drag-start-offset
+                                    + (self.absolute-position.y + self.mouse-y - track.drag-start-y) / track.thumb-free * track.scroll-range));
+                            }
+                        }
+                    }
+
+                    // Подсказка при наведении на ползунок: где мы в списке.
+                    if thumb-touch.has-hover || thumb-touch.pressed : Rectangle {
+                        width: tip.preferred-width + 16px;
+                        height: 24px;
+                        x: -self.width - 6px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Shape.control-radius;
+                        background: Theme.text;
+                        tip := Text {
+                            text: "Строка " + (Math.round(-list.content-y / Theme.row-height) + 1) + " из " + root.rows.length;
+                            font-size: Theme.font-caption;
+                            color: Theme.bg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
             }
         }
     }

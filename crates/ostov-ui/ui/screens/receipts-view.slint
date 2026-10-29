@@ -2,6 +2,7 @@ import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { Chip, ChipKind } from "../components/chip.slint";
 import { TextField } from "../components/text-field.slint";
+import { Select } from "../components/select.slint";
 import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
 
 // Данные и события экрана «Поступления»: список и форма документа.
@@ -11,18 +12,17 @@ export global ReceiptsData {
     in property <[GridColumn]> columns;
     in property <[GridRow]> rows;
     in property <int> total;
+    in property <int> milestone-step;
     in property <int> sort-column: -1;
     in property <bool> sort-desc;
     in-out property <int> selected-row: -1;
     in-out property <string> query;
     callback sort(int);
-    callback resize(int, length);
     callback open(int);
     callback create();
     callback query-changed(string);
 
     // Форма документа
-    in-out property <bool> form-open;
     in property <string> form-title;
     in property <bool> form-posted;
     in-out property <string> form-number;
@@ -31,7 +31,24 @@ export global ReceiptsData {
     in-out property <string> form-supplier;
     in property <[GridColumn]> line-columns;
     in property <[GridRow]> lines;
+    in property <string> form-count;
     in property <string> form-total;
+    // Значения для выпадающих списков: справочники и перечисления.
+    in property <[string]> warehouses;
+    in property <[string]> suppliers;
+    in property <[string]> goods;
+    in-out property <int> line-selected: -1;
+    // Окно строки табличной части
+    in-out property <bool> line-open;
+    in property <string> line-title;
+    in property <string> line-error;
+    in-out property <string> line-name;
+    in-out property <string> line-quantity;
+    in-out property <string> line-price;
+    callback line-add();
+    callback line-edit(int);
+    callback line-delete();
+    callback line-confirm();
     callback form-post(bool);
     callback form-save();
     callback form-close();
@@ -72,11 +89,11 @@ component ReceiptList inherits VerticalLayout {
         columns: ReceiptsData.columns;
         rows: ReceiptsData.rows;
         empty-text: "Ничего не найдено";
+        milestone-step: ReceiptsData.milestone-step;
         sort-column: ReceiptsData.sort-column;
         sort-desc: ReceiptsData.sort-desc;
         selected-row <=> ReceiptsData.selected-row;
         sort-clicked(i) => { ReceiptsData.sort(i); }
-        column-resized(i, width) => { ReceiptsData.resize(i, width); }
         row-activated(i) => { ReceiptsData.open(i); }
     }
     Text {
@@ -130,34 +147,150 @@ component ReceiptForm inherits VerticalLayout {
             spacing: Theme.space-16;
             TextField { width: 100px; label: "Номер"; read-only: true; text <=> ReceiptsData.form-number; }
             TextField { width: 140px; label: "Дата"; text <=> ReceiptsData.form-date; }
-            TextField { width: 180px; label: "Склад"; text <=> ReceiptsData.form-warehouse; }
-            TextField { horizontal-stretch: 1; label: "Поставщик"; text <=> ReceiptsData.form-supplier; }
+            Select { width: 180px; label: "Склад"; options: ReceiptsData.warehouses; text <=> ReceiptsData.form-warehouse; }
+            Select { horizontal-stretch: 1; label: "Поставщик"; options: ReceiptsData.suppliers; text <=> ReceiptsData.form-supplier; }
         }
     }
-    Text {
-        text: "Товары";
-        font-size: Theme.font-subtitle;
-        font-weight: 600;
-        color: Theme.text;
+    HorizontalLayout {
+        spacing: Theme.space-8;
+        Text {
+            text: "Товары";
+            font-size: Theme.font-subtitle;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Rectangle { }
+        Button {
+            text: "Добавить";
+            control-height: Theme.control-sm;
+            clicked => { ReceiptsData.line-add(); }
+        }
+        Button {
+            text: "Удалить";
+            control-height: Theme.control-sm;
+            enabled: ReceiptsData.line-selected >= 0;
+            clicked => { ReceiptsData.line-delete(); }
+        }
     }
     ErpGrid {
         vertical-stretch: 1;
         columns: ReceiptsData.line-columns;
         rows: ReceiptsData.lines;
-        empty-text: "Товаров пока нет";
+        empty-text: "Товаров пока нет: нажмите «Добавить»";
+        selected-row <=> ReceiptsData.line-selected;
+        row-activated(i) => { ReceiptsData.line-edit(i); }
     }
-    Text {
-        text: "Итого: " + ReceiptsData.lines.length + " поз. · " + ReceiptsData.form-total;
-        font-size: Theme.font-body;
-        font-weight: 600;
-        color: Theme.text;
+    // Итоги: слева число позиций, справа сумма документа.
+    HorizontalLayout {
+        Text {
+            text: ReceiptsData.form-count;
+            font-size: Theme.font-body;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+        Rectangle { }
+        Text {
+            text: "Итого: " + ReceiptsData.form-total;
+            font-size: Theme.font-body;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
     }
 }
 
-// Вкладка «Поступления товаров»: список, по двойному клику или «Открыть» форма документа.
+// Окно строки табличной части: товар из справочника, количество, цена.
+component LineDialog inherits Rectangle {
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(480px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+            Text {
+                text: ReceiptsData.line-title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Select {
+                label: "Номенклатура";
+                options: ReceiptsData.goods;
+                text <=> ReceiptsData.line-name;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                TextField {
+                    label: "Количество";
+                    numeric: true;
+                    placeholder: "0,0";
+                    text <=> ReceiptsData.line-quantity;
+                }
+                TextField {
+                    label: "Цена";
+                    numeric: true;
+                    placeholder: "0,00";
+                    text <=> ReceiptsData.line-price;
+                }
+            }
+            if ReceiptsData.line-error != "" : Text {
+                text: ReceiptsData.line-error;
+                font-size: Theme.font-caption;
+                color: Theme.danger;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { ReceiptsData.line-open = false; } }
+                Button {
+                    text: "Готово";
+                    kind: ButtonKind.primary;
+                    clicked => { ReceiptsData.line-confirm(); }
+                }
+            }
+        }
+    }
+}
+
+// Вкладка «Поступления товаров»: только список; документ открывается в своей вкладке.
 export component ReceiptsView inherits Rectangle {
     background: Theme.bg;
 
-    if !ReceiptsData.form-open : ReceiptList { }
-    if ReceiptsData.form-open : ReceiptForm { }
+    ReceiptList {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+}
+
+// Вкладка документа «Поступление»: форма с табличной частью; окно строки поверх неё.
+export component ReceiptFormView inherits Rectangle {
+    background: Theme.bg;
+
+    ReceiptForm {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+    if ReceiptsData.line-open : LineDialog {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
 }

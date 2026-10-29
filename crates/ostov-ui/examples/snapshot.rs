@@ -78,24 +78,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
-        "receipts" | "receipts-large" | "receipt-form" => {
+        "receipts" | "receipts-large" | "receipt-form" | "tabs-many" => {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+
+            use slint::ComponentHandle;
             let window = app_window(2)?;
-            ostov_ui::receipts_ui::setup(&window);
-            let mut shell = ostov_ui::shell::Shell::demo();
-            shell.click(2);
-            shell.click(3);
-            ostov_ui::app::refresh(&window, &shell);
+            let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::demo()));
+            let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            {
+                let mut shell = shell.borrow_mut();
+                shell.click(2);
+                shell.click(3);
+            }
             if screen == "receipts-large" {
-                use slint::ComponentHandle;
                 window
                     .global::<ostov_ui::Theme>()
                     .set_font_scale(16.0 / 14.0);
                 window.global::<ostov_ui::Theme>().set_row_height(40.0);
             }
             if screen == "receipt-form" {
-                use slint::ComponentHandle;
                 window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
             }
+            if screen == "tabs-many" {
+                // Много закреплённых вкладок: панель должна сжимать и прокручивать.
+                let mut shell = shell.borrow_mut();
+                for id in [4, 5, 7, 8, 10, 11, 12, 13] {
+                    receipts.before(&window, &mut shell);
+                    shell.click(id);
+                    let active = shell.active_tab();
+                    shell.set_modified(active, true);
+                    receipts.after(&window, &shell);
+                }
+            }
+            ostov_ui::app::refresh(&window, &shell.borrow());
+            window.set_base_name("Кафе-2026".into());
             save(&window, dark, &path)
         }
         "settings" => {

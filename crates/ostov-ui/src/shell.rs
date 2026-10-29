@@ -2,6 +2,9 @@
 
 use std::collections::HashSet;
 
+/// Узел «Поступления товаров» в демо-дереве: его документы открываются в своих вкладках.
+pub const RECEIPTS_NODE: usize = 3;
+
 /// Узел дерева навигации. Состав сейчас примерный (из макета), позже его даст конфигурация.
 pub struct NavNode {
     pub title: &'static str,
@@ -28,13 +31,19 @@ pub struct NavRowData {
     pub favorite: bool,
 }
 
-/// Открытая вкладка.
+/// Открытая вкладка: пункт навигации или документ в нём (`doc`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
-    pub title: &'static str,
+    pub title: String,
     pub icon: &'static str,
     pub node: usize,
     pub view: &'static str,
+    /// Номер документа, если вкладка открывает документ, а не весь пункт.
+    pub doc: Option<u32>,
+    /// Вкладка предпросмотра: следующее открытие без изменений заменит её.
+    pub preview: bool,
+    /// В документе есть несохранённые изменения; такая вкладка закреплена.
+    pub modified: bool,
 }
 
 pub struct Shell {
@@ -187,18 +196,71 @@ impl Shell {
     }
 
     fn open(&mut self, id: usize) {
-        if let Some(index) = self.tabs.iter().position(|tab| tab.node == id) {
+        let (title, view) = (self.nodes[id].title.to_owned(), self.nodes[id].view);
+        self.open_tab(id, None, title, view);
+    }
+
+    /// Открывает вкладку. Уже открытая просто выбирается. Иначе: если есть вкладка
+    /// предпросмотра без изменений, новая занимает её место (число вкладок не растёт);
+    /// если все вкладки закреплены или изменены, добавляется новая вкладка предпросмотра.
+    fn open_tab(&mut self, node: usize, doc: Option<u32>, title: String, view: &'static str) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.node == node && tab.doc == doc)
+        {
             self.active = index;
             return;
         }
-        let node = &self.nodes[id];
-        self.tabs.push(Tab {
-            title: node.title,
-            icon: node.icon,
-            node: id,
-            view: node.view,
-        });
-        self.active = self.tabs.len() - 1;
+        let tab = Tab {
+            title,
+            icon: self.nodes[node].icon,
+            node,
+            view,
+            doc,
+            // «Главная» всегда остаётся.
+            preview: node != 0,
+            modified: false,
+        };
+        match self.tabs.iter().position(|t| t.preview && !t.modified) {
+            Some(index) => {
+                self.tabs[index] = tab;
+                self.active = index;
+            }
+            None => {
+                self.tabs.push(tab);
+                self.active = self.tabs.len() - 1;
+            }
+        }
+    }
+
+    /// Открывает документ пункта `node` в своей вкладке.
+    pub fn open_doc(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+        self.open_tab(node, Some(doc), title, view);
+    }
+
+    /// Отмечает вкладку изменённой: она закрепляется и больше не заменяется.
+    pub fn set_modified(&mut self, index: usize, modified: bool) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.modified = modified;
+            if modified {
+                tab.preview = false;
+            }
+        }
+    }
+
+    pub fn doc_tab(&self, doc: u32) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.doc == Some(doc))
+    }
+
+    pub fn active_doc(&self) -> Option<u32> {
+        self.tabs.get(self.active).and_then(|tab| tab.doc)
+    }
+
+    pub fn set_doc_title(&mut self, doc: u32, title: String) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc == Some(doc)) {
+            tab.title = title;
+        }
     }
 
     pub fn select_tab(&mut self, index: usize) {
@@ -256,13 +318,37 @@ mod tests {
     }
 
     #[test]
-    fn opening_same_item_does_not_duplicate_tab() {
+    fn opening_without_changes_replaces_preview_tab() {
         let mut shell = Shell::demo();
         shell.click(3);
         shell.click(4);
         shell.click(3);
-        assert_eq!(shell.tabs().len(), 3);
+        // «Главная» и одна вкладка предпросмотра, которую заменяют.
+        assert_eq!(shell.tabs().len(), 2);
         assert_eq!(shell.tabs()[shell.active_tab()].node, 3);
+    }
+
+    #[test]
+    fn modified_tab_is_kept_and_next_opens_new_one() {
+        let mut shell = Shell::demo();
+        shell.click(3);
+        shell.set_modified(1, true);
+        shell.click(4);
+        assert_eq!(shell.tabs().len(), 3);
+        assert!(shell.tabs()[1].modified && !shell.tabs()[1].preview);
+        assert!(shell.tabs()[2].preview);
+        // Новая вкладка без изменений снова заменяется.
+        shell.click(5);
+        assert_eq!(shell.tabs().len(), 3);
+    }
+
+    #[test]
+    fn same_document_is_selected_not_duplicated() {
+        let mut shell = Shell::demo();
+        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
+        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
+        assert_eq!(shell.tabs().len(), 2);
+        assert_eq!(shell.active_doc(), Some(1998));
     }
 
     #[test]
@@ -284,6 +370,7 @@ mod tests {
     fn closing_tabs_keeps_active_valid() {
         let mut shell = Shell::demo();
         shell.click(3);
+        shell.set_modified(1, true);
         shell.click(4);
         shell.close_tab(2);
         assert_eq!(shell.active_tab(), 1);

@@ -184,10 +184,11 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
         .tabs()
         .iter()
         .map(|tab| TabItem {
-            title: tab.title.into(),
+            title: tab.title.as_str().into(),
             icon: tab.icon.into(),
-            modified: false,
+            modified: tab.modified,
             view: tab.view.into(),
+            preview: tab.preview,
         })
         .collect();
     window.set_nav(ModelRc::new(VecModel::from(rows)));
@@ -355,7 +356,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
-    crate::receipts_ui::setup(&app);
+    let shell = Rc::new(RefCell::new(Shell::demo()));
+    let receipts = crate::receipts_ui::setup(&app, shell.clone());
     let directory = Rc::new(RefCell::new(Directory::demo()));
     refresh_users(&app, &directory.borrow());
     app.set_roles(ModelRc::new(VecModel::from(
@@ -367,7 +369,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let session = Rc::new(RefCell::new(Session::default()));
     // Таймер задержки после неудачных попыток входа (должен жить, пока идёт отсчёт).
     let lock_timer = Rc::new(slint::Timer::default());
-    let shell = Rc::new(RefCell::new(Shell::demo()));
 
     // Закрытие окна пользователем завершает приложение.
     app.window().on_close_requested(quit_on_close);
@@ -375,6 +376,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_open({
         let app = app.as_weak();
         let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
+        let receipts = receipts.clone();
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
@@ -392,6 +394,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             lock_timer.stop();
             if kind == LoginKind::None {
                 *shell.borrow_mut() = open_main(&app, &db.name, db.server);
+                receipts.after(&app, &shell.borrow());
                 show_page(&app, PAGE_MAIN);
                 return;
             }
@@ -403,6 +406,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_submit({
         let app = app.as_weak();
         let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
+        let receipts = receipts.clone();
         move || {
             let Some(app) = app.upgrade() else { return };
             let kind = session.borrow().stage.unwrap_or(LoginKind::None);
@@ -445,6 +449,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 return;
             }
             *shell.borrow_mut() = open_main(&app, &name, server);
+            receipts.after(&app, &shell.borrow());
             app.set_password("".into());
             app.set_repeat("".into());
             show_page(&app, PAGE_MAIN);
@@ -654,35 +659,44 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_nav_clicked({
-        let (app, shell) = (app.as_weak(), shell.clone());
+        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
         move |id| {
             let Some(app) = app.upgrade() else { return };
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
             if let Some(id) = index(id) {
-                shell.borrow_mut().click(id);
+                shell.click(id);
             }
-            refresh(&app, &shell.borrow());
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
         }
     });
 
     app.on_tab_selected({
-        let (app, shell) = (app.as_weak(), shell.clone());
+        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
         move |tab| {
             let Some(app) = app.upgrade() else { return };
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
             if let Some(tab) = index(tab) {
-                shell.borrow_mut().select_tab(tab);
+                shell.select_tab(tab);
             }
-            refresh(&app, &shell.borrow());
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
         }
     });
 
     app.on_tab_closed({
-        let (app, shell) = (app.as_weak(), shell);
+        let (app, shell, receipts) = (app.as_weak(), shell, receipts);
         move |tab| {
             let Some(app) = app.upgrade() else { return };
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
             if let Some(tab) = index(tab) {
-                shell.borrow_mut().close_tab(tab);
+                shell.close_tab(tab);
             }
-            refresh(&app, &shell.borrow());
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
         }
     });
 
