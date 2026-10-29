@@ -5,7 +5,8 @@ import { ListView } from "std-widgets.slint";
 
 // flex: главная колонка, забирает свободную ширину (у неё width это минимум).
 // right: числа и суммы выравниваются вправо. status: значение показывается чипом статуса.
-export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool }
+// after-flex: колонка правее гибкой; при перетаскивании её правой границы место берётся у соседа справа.
+export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool, after-flex: bool }
 // muted: строка приглушена (например помечена на удаление).
 export struct GridRow { cells: [string], muted: bool }
 
@@ -20,16 +21,20 @@ component HeaderCell inherits Rectangle {
     in property <bool> desc;
     // У последней колонки ручки нет: её правый край это край таблицы.
     in property <bool> resizable: true;
+    // Колонка, ручку которой тянут сейчас (подсвечивается).
+    in property <bool> dragging;
     callback clicked();
-    // Сдвиг ручки с прошлого события (положительный: вправо).
-    callback dragged(length);
+    // Ручку тянут: абсолютная X мыши в окне. Сама колонка при этом не меняется (ручка не
+    // движется), поэтому координата точная; ширина применяется при отпускании.
+    callback drag-start(length);
+    callback drag-move(length);
+    callback drag-end(length);
+    callback drag-cancel();
 
     horizontal-stretch: root.spec.flex ? 1 : 0;
     min-width: root.spec.width;
     max-width: root.spec.flex ? 100000px : root.spec.width;
-    background: touch.has-hover ? Theme.border : transparent;
-
-    private property <length> last-x;
+    background: root.dragging ? Theme.accent-soft : touch.has-hover ? Theme.border : transparent;
 
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -69,22 +74,25 @@ component HeaderCell inherits Rectangle {
         mouse-cursor: root.resizable ? MouseCursor.col-resize : MouseCursor.default;
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down) {
-                root.last-x = self.absolute-position.x + self.mouse-x;
+                root.drag-start(self.absolute-position.x + self.mouse-x);
+            } else if (event.kind == PointerEventKind.up) {
+                root.drag-end(self.absolute-position.x + self.mouse-x);
+            } else if (event.kind == PointerEventKind.cancel) {
+                root.drag-cancel();
             }
         }
         moved => {
             if (self.pressed) {
-                root.dragged(self.absolute-position.x + self.mouse-x - root.last-x);
-                root.last-x = self.absolute-position.x + self.mouse-x;
+                root.drag-move(self.absolute-position.x + self.mouse-x);
             }
         }
     }
     Rectangle {
-        x: parent.width - (handle.has-hover || handle.pressed ? 2px : 1px);
+        x: parent.width - (handle.has-hover || root.dragging ? 2px : 1px);
         y: (parent.height - self.height) / 2;
-        width: handle.has-hover || handle.pressed ? 2px : 1px;
-        height: handle.has-hover || handle.pressed ? parent.height : 20px;
-        background: handle.has-hover || handle.pressed ? Theme.accent-text : Theme.border-strong;
+        width: handle.has-hover || root.dragging ? 2px : 1px;
+        height: handle.has-hover || root.dragging ? parent.height : 20px;
+        background: handle.has-hover || root.dragging ? Theme.accent-text : Theme.border-strong;
     }
 }
 
@@ -160,27 +168,42 @@ export component ErpGrid inherits Rectangle {
     background: Theme.surface;
     clip: true;
 
-    // Тянем ручку: у обычной колонки меняется её ширина, у гибкой граница делит место с соседней.
-    function drag(index: int, delta: length) {
-        if (root.columns[index].flex) {
-            if (index + 1 < root.columns.length) {
-                root.columns[index + 1] = {
-                    title: root.columns[index + 1].title,
-                    width: max(48px, root.columns[index + 1].width - delta),
-                    right: root.columns[index + 1].right,
-                    flex: root.columns[index + 1].flex,
-                    status: root.columns[index + 1].status,
-                };
+    // Перетаскивание ручки: какая колонка и где мышь (абсолютная X в окне).
+    private property <int> drag-index: -1;
+    private property <length> drag-start-x;
+    private property <length> drag-x;
+    private property <length> drag-delta: root.drag-x - root.drag-start-x;
+
+    function set-width(index: int, width: length) {
+        root.columns[index] = {
+            title: root.columns[index].title,
+            width: max(48px, width),
+            right: root.columns[index].right,
+            flex: root.columns[index].flex,
+            status: root.columns[index].status,
+            after-flex: root.columns[index].after-flex,
+        };
+    }
+
+    // Отпустили ручку: граница колонки сдвигается за мышью, место берётся у соседа.
+    // Гибкая колонка: сдвиг забирает или отдаёт сосед справа. Колонка левее гибкой: меняется
+    // она сама, гибкая подстраивается. Колонка правее гибкой: пара с соседом справа.
+    function end-drag() {
+        if (root.drag-index >= 0) {
+            if (root.columns[root.drag-index].flex) {
+                if (root.drag-index + 1 < root.columns.length) {
+                    root.set-width(root.drag-index + 1, root.columns[root.drag-index + 1].width - root.drag-delta);
+                }
+            } else if (root.columns[root.drag-index].after-flex && root.drag-index + 1 < root.columns.length) {
+                root.set-width(root.drag-index, root.columns[root.drag-index].width
+                    + min(max(root.drag-delta, 48px - root.columns[root.drag-index].width), root.columns[root.drag-index + 1].width - 48px));
+                root.set-width(root.drag-index + 1, root.columns[root.drag-index + 1].width
+                    - min(max(root.drag-delta, 48px - root.columns[root.drag-index].width), root.columns[root.drag-index + 1].width - 48px));
+            } else {
+                root.set-width(root.drag-index, root.columns[root.drag-index].width + root.drag-delta);
             }
-        } else {
-            root.columns[index] = {
-                title: root.columns[index].title,
-                width: max(48px, root.columns[index].width + delta),
-                right: root.columns[index].right,
-                flex: root.columns[index].flex,
-                status: root.columns[index].status,
-            };
         }
+        root.drag-index = -1;
     }
 
     VerticalLayout {
@@ -199,8 +222,19 @@ export component ErpGrid inherits Rectangle {
                     sorted: i == root.sort-column;
                     desc: root.sort-desc;
                     resizable: i < root.columns.length - 1;
+                    dragging: i == root.drag-index;
                     clicked => { root.sort-clicked(i); }
-                    dragged(delta) => { root.drag(i, delta); }
+                    drag-start(x) => {
+                        root.drag-index = i;
+                        root.drag-start-x = x;
+                        root.drag-x = x;
+                    }
+                    drag-move(x) => { root.drag-x = x; }
+                    drag-cancel => { root.drag-index = -1; }
+                    drag-end(x) => {
+                        root.drag-x = x;
+                        root.end-drag();
+                    }
                 }
             }
         }
@@ -313,5 +347,14 @@ export component ErpGrid inherits Rectangle {
 
             }
         }
+    }
+
+    // Направляющая при перетаскивании ручки: акцентная линия через всю таблицу.
+    if root.drag-index >= 0 : Rectangle {
+        x: root.drag-x - root.absolute-position.x - 1px;
+        y: 0px;
+        width: 2px;
+        height: root.height;
+        background: Theme.accent-text;
     }
 }

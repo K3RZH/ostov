@@ -165,25 +165,28 @@ fn list_columns() -> Vec<GridColumn> {
             right: i == AMOUNT,
             flex: i == SUPPLIER,
             status: i == STATUS,
+            after_flex: i > SUPPLIER,
         })
         .collect()
 }
 
 fn line_columns() -> Vec<GridColumn> {
-    let column = |title: &str, width: f32, right: bool, flex: bool| GridColumn {
+    // Гибкая колонка «Номенклатура» вторая: правее неё границы делят место с соседом.
+    let column = |title: &str, width: f32, right: bool, flex: bool, after_flex: bool| GridColumn {
         title: title.into(),
         width,
         right,
         flex,
         status: false,
+        after_flex,
     };
     vec![
-        column("№", 56.0, false, false),
-        column("Номенклатура", 140.0, false, true),
-        column("Ед.", 70.0, false, false),
-        column("Количество", 120.0, true, false),
-        column("Цена", 120.0, true, false),
-        column("Сумма", 140.0, true, false),
+        column("№", 56.0, false, false, false),
+        column("Номенклатура", 140.0, false, true, false),
+        column("Ед.", 70.0, false, false, true),
+        column("Количество", 120.0, true, false, true),
+        column("Цена", 120.0, true, false, true),
+        column("Сумма", 140.0, true, false, true),
     ]
 }
 
