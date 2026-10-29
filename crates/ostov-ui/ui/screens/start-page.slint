@@ -78,6 +78,7 @@ export component StartPage inherits Rectangle {
         { name: "Кафе-2026.sqlite", path: "~/Ostov/Кафе-2026.sqlite", when: "вчера", server: false, protection: 1 },
         { name: "Кафе — общая база", path: "kafe-srv.local:7443", when: "12 октября", server: true, protection: 0 },
         { name: "Бар-2025.sqlite", path: "~/Документы/Бар-2025.sqlite", when: "3 марта", server: false, protection: 2 },
+        { name: "Новый сервер", path: "new-srv.local:7443", when: "не настроен", server: true, protection: 4 },
     ];
     callback open();
     callback create-database();

@@ -1,10 +1,12 @@
 //! Логика переходов между страницами приложения. Без ядра: только выбор нужной страницы входа.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
+use crate::login::{delay_secs, verify};
 use crate::settings::Settings;
 use crate::shell::Shell;
 use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme};
@@ -19,12 +21,16 @@ const PROTECTION_USERS: i32 = 1;
 const PROTECTION_PASSWORD: i32 = 2;
 /// Пароль на файл и пользователи вместе: сначала пароль файла, потом вход пользователя.
 const PROTECTION_BOTH: i32 = 3;
+/// Сервер без администратора: первый вход создаёт его (СТ-36).
+const PROTECTION_FIRST_RUN: i32 = 4;
 
 /// Какая страница входа нужна после выбора базы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginKind {
     /// Сервер: логин и пароль.
     Server,
+    /// Первый запуск сервера: создание администратора.
+    ServerFirstRun,
     /// Локальная база с пользователями: логин и пароль.
     LocalUser,
     /// Локальная база, зашифрованная паролем файла.
@@ -36,12 +42,25 @@ pub enum LoginKind {
 /// Выбирает страницу входа по типу и защите базы (0 нет, 1 пользователи, 2 пароль на файл).
 pub fn login_kind(server: bool, protection: i32) -> LoginKind {
     if server {
-        return LoginKind::Server;
+        return if protection == PROTECTION_FIRST_RUN {
+            LoginKind::ServerFirstRun
+        } else {
+            LoginKind::Server
+        };
     }
     match protection {
         PROTECTION_USERS => LoginKind::LocalUser,
         PROTECTION_PASSWORD | PROTECTION_BOTH => LoginKind::LocalPassword,
         _ => LoginKind::None,
+    }
+}
+
+/// Текст главной кнопки входа для вида страницы.
+fn button_text(kind: LoginKind) -> &'static str {
+    match kind {
+        LoginKind::LocalPassword => "Открыть",
+        LoginKind::ServerFirstRun => "Создать администратора",
+        _ => "Войти",
     }
 }
 
@@ -56,8 +75,14 @@ pub fn configure_login(
     window.set_source_name(source_name.into());
     window.set_source_detail(source_detail.into());
     window.set_error("".into());
+    window.set_locked(false);
     window.set_login("".into());
     window.set_password("".into());
+    window.set_repeat("".into());
+    window.set_show_repeat(kind == LoginKind::ServerFirstRun);
+    window.set_login_label("Логин".into());
+    window.set_password_label("Пароль".into());
+    window.set_button_text(button_text(kind).into());
     match kind {
         LoginKind::Server => {
             window.set_heading("Вход на сервер".into());
@@ -66,7 +91,18 @@ pub fn configure_login(
             window.set_show_login(true);
             window.set_hint("".into());
             window.set_remember_text("Запомнить сервер".into());
-            window.set_button_text("Войти".into());
+        }
+        LoginKind::ServerFirstRun => {
+            window.set_heading("Первая настройка сервера".into());
+            window.set_is_server(true);
+            window.set_change_text("Сменить".into());
+            window.set_show_login(true);
+            window.set_login_label("Логин администратора".into());
+            window.set_password_label("Пароль администратора".into());
+            window.set_hint(
+                "Сервер ещё не настроен. Создайте администратора: паролей по умолчанию нет.".into(),
+            );
+            window.set_remember_text("".into());
         }
         LoginKind::LocalUser => {
             window.set_heading("Вход в базу".into());
@@ -75,7 +111,6 @@ pub fn configure_login(
             window.set_show_login(true);
             window.set_hint("".into());
             window.set_remember_text("Запомнить пользователя".into());
-            window.set_button_text("Войти".into());
         }
         LoginKind::LocalPassword => {
             window.set_heading("Пароль базы".into());
@@ -84,10 +119,44 @@ pub fn configure_login(
             window.set_show_login(false);
             window.set_hint("База зашифрована. Без пароля открыть её нельзя.".into());
             window.set_remember_text("".into());
-            window.set_button_text("Открыть".into());
         }
         LoginKind::None => {}
     }
+}
+
+/// Показывает отказ и блокирует кнопку на время задержки, считая секунды таймером.
+fn start_lock(
+    window: &AppWindow,
+    timer: &slint::Timer,
+    kind: LoginKind,
+    message: &'static str,
+    seconds: u32,
+) {
+    let remaining = Rc::new(Cell::new(seconds));
+    show_lock(window, kind, message, seconds);
+    let weak = window.as_weak();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_secs(1),
+        move || {
+            let Some(window) = weak.upgrade() else { return };
+            let left = remaining.get().saturating_sub(1);
+            remaining.set(left);
+            if left == 0 {
+                window.set_locked(false);
+                window.set_error("".into());
+                window.set_button_text(button_text(kind).into());
+            } else {
+                show_lock(&window, kind, message, left);
+            }
+        },
+    );
+}
+
+fn show_lock(window: &AppWindow, kind: LoginKind, message: &str, seconds: u32) {
+    window.set_locked(true);
+    window.set_error(format!("{message} Повторить можно через {seconds} с.").into());
+    window.set_button_text(format!("{} (через {seconds} с)", button_text(kind)).into());
 }
 
 fn index(value: i32) -> Option<usize> {
@@ -231,6 +300,18 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
     window.set_radius_mode(settings.radius);
 }
 
+/// Что выбрано на старте и на каком шаге входа мы сейчас.
+#[derive(Default)]
+struct Session {
+    name: String,
+    server: bool,
+    protection: i32,
+    /// Текущий вид страницы входа (у базы «пароль и пользователи» их два подряд).
+    stage: Option<LoginKind>,
+    /// Неудачные попытки подряд: от них зависит задержка.
+    failures: u32,
+}
+
 /// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
 pub fn run() -> Result<(), slint::PlatformError> {
     use slint::Model;
@@ -241,8 +322,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
-    // Что выбрано на старте: имя базы и признак «сервер».
-    let chosen = Rc::new(RefCell::new((String::new(), false)));
+    let session = Rc::new(RefCell::new(Session::default()));
+    // Таймер задержки после неудачных попыток входа (должен жить, пока идёт отсчёт).
+    let lock_timer = Rc::new(slint::Timer::default());
     let shell = Rc::new(RefCell::new(Shell::demo()));
 
     // Закрытие окна пользователем завершает приложение.
@@ -250,15 +332,22 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     app.on_open({
         let app = app.as_weak();
-        let (chosen, shell) = (chosen.clone(), shell.clone());
+        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
             let Some(db) = index(app.get_selected_recent()).and_then(|i| recent.row_data(i)) else {
                 return;
             };
-            *chosen.borrow_mut() = (db.name.to_string(), db.server);
             let kind = login_kind(db.server, db.protection);
+            *session.borrow_mut() = Session {
+                name: db.name.to_string(),
+                server: db.server,
+                protection: db.protection,
+                stage: Some(kind),
+                failures: 0,
+            };
+            lock_timer.stop();
             if kind == LoginKind::None {
                 *shell.borrow_mut() = open_main(&app, &db.name, db.server);
                 show_page(&app, PAGE_MAIN);
@@ -271,25 +360,70 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     app.on_submit({
         let app = app.as_weak();
-        let (chosen, shell) = (chosen.clone(), shell.clone());
+        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            // Проверку пароля сделает ядро (Engine API); пока пускаем без неё.
-            let (name, server) = chosen.borrow().clone();
+            let kind = session.borrow().stage.unwrap_or(LoginKind::None);
+            let result = verify(
+                kind,
+                app.get_login().as_str(),
+                app.get_password().as_str(),
+                app.get_repeat().as_str(),
+            );
+            if let Err(rejection) = result {
+                let failures = {
+                    let mut session = session.borrow_mut();
+                    if rejection.counts {
+                        session.failures += 1;
+                    }
+                    session.failures
+                };
+                let wait = if rejection.counts {
+                    delay_secs(failures)
+                } else {
+                    0
+                };
+                if wait > 0 {
+                    start_lock(&app, &lock_timer, kind, rejection.message, wait);
+                } else {
+                    app.set_error(rejection.message.into());
+                }
+                return;
+            }
+            // Проверку сделает ядро (Engine API); пока пускаем, если данные не пустые.
+            let (name, server, protection) = {
+                let mut session = session.borrow_mut();
+                session.failures = 0;
+                (session.name.clone(), session.server, session.protection)
+            };
+            if kind == LoginKind::LocalPassword && protection == PROTECTION_BOTH {
+                // Файл открыт: теперь вход пользователя.
+                session.borrow_mut().stage = Some(LoginKind::LocalUser);
+                configure_login(&app, LoginKind::LocalUser, &name, &app.get_source_detail());
+                return;
+            }
             *shell.borrow_mut() = open_main(&app, &name, server);
             app.set_password("".into());
+            app.set_repeat("".into());
             show_page(&app, PAGE_MAIN);
         }
     });
 
-    app.on_back({
+    // «Назад к выбору базы» и «Сменить»: вернуться к списку баз.
+    let to_start = {
         let app = app.as_weak();
+        let lock_timer = lock_timer.clone();
         move || {
             let Some(app) = app.upgrade() else { return };
+            lock_timer.stop();
             app.set_password("".into());
+            app.set_repeat("".into());
+            app.set_error("".into());
             show_page(&app, PAGE_START);
         }
-    });
+    };
+    app.on_back(to_start.clone());
+    app.on_change_source(to_start);
 
     app.on_create_confirmed({
         let app = app.as_weak();
@@ -459,12 +593,14 @@ mod tests {
     fn server_always_asks_login() {
         assert_eq!(login_kind(true, 0), LoginKind::Server);
         assert_eq!(login_kind(true, 2), LoginKind::Server);
+        assert_eq!(login_kind(true, 4), LoginKind::ServerFirstRun);
     }
 
     #[test]
     fn local_depends_on_protection() {
         assert_eq!(login_kind(false, 1), LoginKind::LocalUser);
         assert_eq!(login_kind(false, 2), LoginKind::LocalPassword);
+        assert_eq!(login_kind(false, 3), LoginKind::LocalPassword);
         assert_eq!(login_kind(false, 0), LoginKind::None);
     }
 }

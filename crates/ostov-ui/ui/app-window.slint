@@ -62,6 +62,11 @@ export component AppWindow inherits Window {
     in property <string> remember-text <=> login-page.remember-text;
     in property <string> button-text <=> login-page.button-text;
     in property <string> error <=> login-page.error;
+    in property <bool> locked <=> login-page.locked;
+    in property <bool> show-repeat <=> login-page.show-repeat;
+    in property <string> login-label <=> login-page.login-label;
+    in property <string> password-label <=> login-page.password-label;
+    in-out property <string> repeat <=> login-page.repeat;
     in-out property <string> login <=> login-page.login;
     in-out property <string> password <=> login-page.password;
     callback submit <=> login-page.submit;

@@ -1,7 +1,7 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-empty, create-local, create-server, add-file, add-server,
-//! login-server, login-local, password, login-error.
+//! login-server, login-first-run, login-local, password, login-error.
 
 use std::io::Write;
 
@@ -118,6 +118,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             window.set_error("Неверный логин или пароль. Повторить можно через 4 секунды.".into());
             window.set_button_text("Войти (через 4 с)".into());
+            window.set_locked(true);
+            save(&window, dark, &path)
+        }
+        "login-first-run" => {
+            let window = app_window(1)?;
+            configure_login(
+                &window,
+                LoginKind::ServerFirstRun,
+                "Новый сервер",
+                "new-srv.local:7443",
+            );
             save(&window, dark, &path)
         }
         "login-local" => {
