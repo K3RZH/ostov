@@ -200,11 +200,24 @@ fn resized_columns(
     let Some(index) = usize::try_from(index).ok().filter(|i| *i < columns.len()) else {
         return columns;
     };
+    // Фактическая ширина гибкой колонки: остаток места после обычных колонок.
+    let flex_width = |columns: &[GridColumn]| {
+        let fixed: f32 = columns.iter().filter(|c| !c.flex).map(|c| c.width).sum();
+        (table_width - fixed).max(0.0)
+    };
+    // Границу гибкой колонки тянут: колонка получает собственную ширину (ту, что видна на
+    // экране) и дальше меняется сама, а гибкой становится последняя колонка.
+    if columns[index].flex {
+        let actual = flex_width(&columns).max(columns[index].width);
+        columns[index].width = actual;
+        columns[index].flex = false;
+        if let Some(last) = columns.last_mut() {
+            last.flex = true;
+        }
+    }
     let flex = columns.iter().position(|c| c.flex);
     let mut widths: Vec<f32> = columns.iter().map(|c| c.width).collect();
-    // Фактическая ширина гибкой колонки: остаток места после обычных колонок.
-    let fixed: f32 = columns.iter().filter(|c| !c.flex).map(|c| c.width).sum();
-    let flex_actual = flex.map_or(0.0, |f| (table_width - fixed).max(widths[f]));
+    let flex_actual = flex.map_or(0.0, |f| flex_width(&columns).max(widths[f]));
     grid::resize(&mut widths, flex, flex_actual, index, delta);
     for (column, width) in columns.iter_mut().zip(widths) {
         column.width = width;
