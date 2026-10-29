@@ -31,6 +31,14 @@ impl Catalog {
         })
     }
 
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn fields(&self) -> &[FieldDef] {
+        &self.fields
+    }
+
     pub fn create_table(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
         let d = db.dialect();
         let mut columns = vec![

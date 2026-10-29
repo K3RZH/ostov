@@ -65,6 +65,10 @@ impl DocumentKind {
         &self.table
     }
 
+    pub fn header(&self) -> &[FieldDef] {
+        &self.header
+    }
+
     pub fn create_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
         let mut statements = Vec::new();
         {
