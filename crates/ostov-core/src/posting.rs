@@ -23,6 +23,31 @@ pub fn post(
     })
 }
 
+/// Записывает изменения документа и сразу проводит его или снимает с проведения — одной
+/// транзакцией, чтобы записанный документ не остался со старыми движениями.
+pub fn save(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    doc: &Document,
+    post: bool,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<Document, CoreError> {
+    in_transaction(db, |db| {
+        let saved = kind.write(db, doc)?;
+        if post {
+            let movements = rule(&saved)?;
+            register.replace(db, kind.table(), saved.id, &movements)?;
+            kind.set_posted(db, saved.id, true)?;
+        } else if saved.posted {
+            register.replace(db, kind.table(), saved.id, &[])?;
+            kind.set_posted(db, saved.id, false)?;
+        }
+        kind.get(db, saved.id)?
+            .ok_or_else(|| kind.not_found(saved.id))
+    })
+}
+
 /// Отменяет проведение: движения удаляются, итоги пересчитываются.
 pub fn unpost(
     db: &mut dyn Driver,
@@ -248,5 +273,129 @@ mod tests {
         );
         assert_eq!(doc.version, 1);
         assert!(!doc.posted);
+    }
+
+    fn lines(items: &[(i64, &str)]) -> BTreeMap<String, Vec<Fields>> {
+        let lines = items
+            .iter()
+            .map(|(item, qty)| fields(&[("item", FieldValue::Int(*item)), ("qty", dec(qty))]))
+            .collect();
+        BTreeMap::from([("lines".to_owned(), lines)])
+    }
+
+    fn save_receipt(s: &mut Setup, doc: &Document, post_it: bool) -> Result<Document, CoreError> {
+        save(
+            &mut s.db,
+            &s.receipt,
+            &s.stock,
+            doc,
+            post_it,
+            rule(MovementKind::Receipt),
+        )
+    }
+
+    #[test]
+    fn update_unposted_document() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.header.insert("store".into(), text("bar"));
+        doc.parts = lines(&[(1, "7"), (2, "1")]);
+
+        let saved = s.receipt.update(&mut s.db, &doc).unwrap();
+        assert_eq!(saved.version, 2);
+        assert_eq!(saved.header["store"], text("bar"));
+        assert_eq!(saved.parts, lines(&[(1, "7"), (2, "1")]));
+    }
+
+    #[test]
+    fn stale_update_changes_nothing() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        let old = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+
+        let mut first = old.clone();
+        first.parts = lines(&[(1, "5")]);
+        s.receipt.update(&mut s.db, &first).unwrap();
+
+        let mut second = old;
+        second.parts = lines(&[(2, "99")]);
+        let err = s.receipt.update(&mut s.db, &second).unwrap_err();
+        assert!(matches!(err, CoreError::VersionConflict { .. }), "{err}");
+        let stored = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert_eq!(stored.parts, lines(&[(1, "5")]));
+    }
+
+    #[test]
+    fn posted_document_is_not_updated_directly() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        let doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert!(matches!(
+            s.receipt.update(&mut s.db, &doc),
+            Err(CoreError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn save_reposts_with_new_lines() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.parts = lines(&[(1, "4"), (2, "3")]);
+        let saved = save_receipt(&mut s, &doc, true).unwrap();
+        assert!(saved.posted);
+        assert_eq!(balance(&mut s, 1), q("4"));
+        assert_eq!(balance(&mut s, 2), q("3"));
+    }
+
+    #[test]
+    fn save_without_post_unposts() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        let saved = save_receipt(&mut s, &doc, false).unwrap();
+        assert!(!saved.posted);
+        assert_eq!(balance(&mut s, 1), q("0"));
+    }
+
+    #[test]
+    fn save_that_breaks_balance_changes_nothing() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        let i = new_doc(&mut s, MovementKind::Issue, &[(1, "6")]);
+        post_doc(&mut s, MovementKind::Issue, i).unwrap();
+
+        // Уменьшить приход до 5 нельзя: 6 уже списали.
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.parts = lines(&[(1, "5")]);
+        let err = save_receipt(&mut s, &doc, true).unwrap_err();
+        assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+
+        let stored = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert_eq!(stored.parts, lines(&[(1, "10")]));
+        assert!(stored.posted);
+        assert_eq!(balance(&mut s, 1), q("4"));
+    }
+
+    #[test]
+    fn insert_with_bad_line_writes_nothing() {
+        let mut s = setup();
+        let bad = BTreeMap::from([(
+            "lines".to_owned(),
+            vec![
+                fields(&[("item", FieldValue::Int(1)), ("qty", dec("1"))]),
+                fields(&[("item", text("мука"))]),
+            ],
+        )]);
+        let header = fields(&[("store", text("main"))]);
+        assert!(s.receipt.insert(&mut s.db, &header, &bad).is_err());
+        assert_eq!(s.receipt.get(&mut s.db, 1).unwrap(), None);
     }
 }

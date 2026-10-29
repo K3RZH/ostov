@@ -6,7 +6,7 @@ use super::{
     FieldDef, Fields, check_fields, check_ident, column_defs, names, placeholders, read_fields,
     returned_id, to_values,
 };
-use crate::CoreError;
+use crate::{CoreError, in_transaction};
 
 /// Табличная часть документа, например «Товары» в поступлении.
 #[derive(Debug, Clone)]
@@ -112,16 +112,30 @@ impl DocumentKind {
         header: &Fields,
         parts: &BTreeMap<String, Vec<Fields>>,
     ) -> Result<Document, CoreError> {
-        if let Some(unknown) = parts
-            .keys()
-            .find(|k| !self.parts.iter().any(|p| &p.name == *k))
-        {
-            return Err(CoreError::Invalid(format!(
-                "в {} нет табличной части {unknown}",
-                self.table
-            )));
-        }
+        in_transaction(db, |db| self.insert_in(db, header, parts))
+    }
 
+    /// Изменяет непроведённый документ, если его версия не менялась с момента чтения.
+    /// Проведённый документ меняется через `posting::save`, чтобы движения не разошлись с ним.
+    pub fn update(&self, db: &mut dyn Driver, doc: &Document) -> Result<Document, CoreError> {
+        in_transaction(db, |db| {
+            if self.get(db, doc.id)?.is_some_and(|stored| stored.posted) {
+                return Err(CoreError::Invalid(format!(
+                    "документ {} проведён: записывайте его с перепроведением или сначала отмените проведение",
+                    doc.id
+                )));
+            }
+            self.write(db, doc)
+        })
+    }
+
+    pub(crate) fn insert_in(
+        &self,
+        db: &mut dyn Driver,
+        header: &Fields,
+        parts: &BTreeMap<String, Vec<Fields>>,
+    ) -> Result<Document, CoreError> {
+        self.check_parts(parts)?;
         let mut values = vec![Value::Int(1), Value::Int(0)];
         values.extend(to_values(&self.table, &self.header, header)?);
         let d = db.dialect();
@@ -207,10 +221,79 @@ impl DocumentKind {
         Ok(())
     }
 
+    /// Перезаписывает шапку и строки с проверкой версии; без своей транзакции.
+    pub(crate) fn write(&self, db: &mut dyn Driver, doc: &Document) -> Result<Document, CoreError> {
+        self.check_parts(&doc.parts)?;
+        let mut values = to_values(&self.table, &self.header, &doc.header)?;
+        let n = values.len();
+
+        let d = db.dialect();
+        let version = d.quote_ident("version");
+        let mut sets: Vec<String> = names(d, &self.header)
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| format!("{name} = {}", d.placeholder(i + 1)))
+            .collect();
+        sets.push(format!("{version} = {version} + 1"));
+        let sql = format!(
+            "UPDATE {} SET {} WHERE {} = {} AND {version} = {}",
+            d.quote_ident(&self.table),
+            sets.join(", "),
+            d.quote_ident("id"),
+            d.placeholder(n + 1),
+            d.placeholder(n + 2),
+        );
+        values.push(Value::Int(doc.id));
+        values.push(Value::Int(doc.version));
+
+        if db.execute(&sql, &values)? == 0 {
+            return Err(match self.get(db, doc.id)? {
+                Some(_) => CoreError::VersionConflict {
+                    table: self.table.clone(),
+                    id: doc.id,
+                },
+                None => self.not_found(doc.id),
+            });
+        }
+
+        for part in &self.parts {
+            let sql = {
+                let d = db.dialect();
+                format!(
+                    "DELETE FROM {} WHERE {} = {}",
+                    d.quote_ident(&self.part_table(part)),
+                    d.quote_ident("doc_id"),
+                    d.placeholder(1),
+                )
+            };
+            db.execute(&sql, &[Value::Int(doc.id)])?;
+            let lines = doc
+                .parts
+                .get(&part.name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            self.insert_lines(db, part, doc.id, lines)?;
+        }
+        self.get(db, doc.id)?.ok_or_else(|| self.not_found(doc.id))
+    }
+
     pub(crate) fn not_found(&self, id: i64) -> CoreError {
         CoreError::NotFound {
             table: self.table.clone(),
             id,
+        }
+    }
+
+    fn check_parts(&self, parts: &BTreeMap<String, Vec<Fields>>) -> Result<(), CoreError> {
+        match parts
+            .keys()
+            .find(|k| !self.parts.iter().any(|p| &p.name == *k))
+        {
+            Some(unknown) => Err(CoreError::Invalid(format!(
+                "в {} нет табличной части {unknown}",
+                self.table
+            ))),
+            None => Ok(()),
         }
     }
 
