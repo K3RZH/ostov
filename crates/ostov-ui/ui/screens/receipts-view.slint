@@ -55,6 +55,8 @@ export global ReceiptsData {
     callback line-edit(int);
     callback line-delete();
     callback line-confirm();
+    callback line-quantity-edited(string);
+    callback line-price-edited(string);
     callback form-post(bool);
     callback form-save();
     callback form-close();
@@ -249,12 +251,14 @@ component LineDialog inherits Rectangle {
                     numeric: true;
                     placeholder: "0,0";
                     text <=> ReceiptsData.line-quantity;
+                    edited(text) => { ReceiptsData.line-quantity-edited(text); }
                 }
                 TextField {
                     label: "Цена";
                     numeric: true;
                     placeholder: "0,00";
                     text <=> ReceiptsData.line-price;
+                    edited(text) => { ReceiptsData.line-price-edited(text); }
                 }
             }
             if ReceiptsData.line-error != "" : Text {

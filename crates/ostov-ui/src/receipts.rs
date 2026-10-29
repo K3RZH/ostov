@@ -291,6 +291,29 @@ pub fn parse_decimal(text: &str, scale: u32) -> Option<i64> {
         .checked_add(fraction_value * 10_i64.pow(missing))
 }
 
+/// Оставляет в числе только допустимое: цифры и один разделитель («,» вместо «.»), после
+/// запятой не больше `scale` знаков. Нужна, чтобы в поля количества и цены нельзя было
+/// ввести буквы и лишние знаки.
+pub fn clean_decimal(text: &str, scale: usize) -> String {
+    let mut out = String::new();
+    let mut separator = false;
+    let mut decimals = 0;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            if !separator {
+                out.push(c);
+            } else if decimals < scale {
+                out.push(c);
+                decimals += 1;
+            }
+        } else if (c == ',' || c == '.') && !separator && scale > 0 {
+            separator = true;
+            out.push(',');
+        }
+    }
+    out
+}
+
 /// «1 позиция», «2 позиции», «5 позиций».
 pub fn positions(count: usize) -> String {
     let last = count % 10;

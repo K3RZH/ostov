@@ -197,13 +197,22 @@ impl Shell {
 
     fn open(&mut self, id: usize) {
         let (title, view) = (self.nodes[id].title.to_owned(), self.nodes[id].view);
-        self.open_tab(id, None, title, view);
+        self.open_tab(id, None, title, view, None);
     }
 
     /// Открывает вкладку. Уже открытая просто выбирается. Иначе: если есть вкладка
     /// предпросмотра без изменений, новая занимает её место (число вкладок не растёт);
     /// если все вкладки закреплены или изменены, добавляется новая вкладка предпросмотра.
-    fn open_tab(&mut self, node: usize, doc: Option<u32>, title: String, view: &'static str) {
+    ///
+    /// `after`: вкладка, рядом с которой встанет новая (родитель, из которого её открыли).
+    fn open_tab(
+        &mut self,
+        node: usize,
+        doc: Option<u32>,
+        title: String,
+        view: &'static str,
+        after: Option<usize>,
+    ) {
         if let Some(index) = self
             .tabs
             .iter()
@@ -228,15 +237,24 @@ impl Shell {
                 self.active = index;
             }
             None => {
-                self.tabs.push(tab);
-                self.active = self.tabs.len() - 1;
+                let at = after.map_or(self.tabs.len(), |parent| parent + 1);
+                self.tabs.insert(at, tab);
+                self.active = at;
             }
         }
     }
 
-    /// Открывает документ пункта `node` в своей вкладке.
+    /// Открывает документ пункта `node` в своей вкладке. Если документ открыт из списка этого
+    /// пункта, вкладка списка закрепляется (документ её не заменяет) и документ встаёт рядом.
     pub fn open_doc(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
-        self.open_tab(node, Some(doc), title, view);
+        let parent = self
+            .tabs
+            .iter()
+            .position(|tab| tab.node == node && tab.doc.is_none());
+        if let Some(parent) = parent {
+            self.tabs[parent].preview = false;
+        }
+        self.open_tab(node, Some(doc), title, view, parent);
     }
 
     /// Отмечает вкладку изменённой: она закрепляется и больше не заменяется.
@@ -273,9 +291,18 @@ impl Shell {
         if index >= self.tabs.len() {
             return;
         }
-        self.tabs.remove(index);
-        if self.active > index || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
+        let closed = self.tabs.remove(index);
+        if self.active > index {
+            self.active -= 1;
+        } else if self.active == index {
+            // Закрыли документ: возвращаемся к списку, из которого его открыли. Иначе встаёт
+            // соседняя вкладка.
+            let parent = closed.doc.and_then(|_| {
+                self.tabs
+                    .iter()
+                    .position(|t| t.node == closed.node && t.doc.is_none())
+            });
+            self.active = parent.unwrap_or_else(|| index.min(self.tabs.len().saturating_sub(1)));
         }
     }
 }
@@ -340,6 +367,25 @@ mod tests {
         // Новая вкладка без изменений снова заменяется.
         shell.click(5);
         assert_eq!(shell.tabs().len(), 3);
+    }
+
+    #[test]
+    fn document_opened_from_list_keeps_the_list_tab() {
+        let mut shell = Shell::demo();
+        shell.click(3);
+        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
+        // «Главная», список (закреплён) и документ рядом с ним.
+        assert_eq!(shell.tabs().len(), 3);
+        assert!(!shell.tabs()[1].preview);
+        assert_eq!(shell.active_doc(), Some(1998));
+        // Другой документ без изменений заменяет первый, а не добавляет вкладку.
+        shell.open_doc(3, 1997, "Поступление № 1997".into(), "receipt");
+        assert_eq!(shell.tabs().len(), 3);
+        // Закрытие документа возвращает к списку.
+        shell.close_tab(2);
+        assert_eq!(shell.tabs().len(), 2);
+        assert_eq!(shell.tabs()[shell.active_tab()].node, 3);
+        assert_eq!(shell.active_doc(), None);
     }
 
     #[test]

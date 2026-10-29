@@ -666,6 +666,28 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         }
     });
 
+    // Количество и цена: только цифры и запятая (буквы и лишние знаки отбрасываются сразу).
+    data.on_line_quantity_edited({
+        let app = app.as_weak();
+        move |text| {
+            let Some(app) = app.upgrade() else { return };
+            let clean = receipts::clean_decimal(&text, 1);
+            if clean != text.as_str() {
+                app.global::<ReceiptsData>().set_line_quantity(clean.into());
+            }
+        }
+    });
+    data.on_line_price_edited({
+        let app = app.as_weak();
+        move |text| {
+            let Some(app) = app.upgrade() else { return };
+            let clean = receipts::clean_decimal(&text, 2);
+            if clean != text.as_str() {
+                app.global::<ReceiptsData>().set_line_price(clean.into());
+            }
+        }
+    });
+
     data.on_line_confirm({
         let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
         move || {
