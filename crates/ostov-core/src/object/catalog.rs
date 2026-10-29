@@ -112,6 +112,43 @@ impl Catalog {
         }))
     }
 
+    /// Представления элементов (первое текстовое поле, обычно `name`) — одним запросом
+    /// на пачку id, чтобы список со ссылками не делал запрос на каждую строку.
+    pub fn titles(
+        &self,
+        db: &mut dyn Driver,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, String>, CoreError> {
+        let mut titles = std::collections::HashMap::new();
+        let Some(field) = self
+            .fields
+            .iter()
+            .find(|f| f.kind == super::FieldKind::Text)
+        else {
+            return Ok(titles);
+        };
+        for chunk in ids.chunks(500) {
+            let sql = {
+                let d = db.dialect();
+                format!(
+                    "SELECT {}, {} FROM {} WHERE {} IN ({})",
+                    d.quote_ident("id"),
+                    d.quote_ident(&field.name),
+                    d.quote_ident(&self.table),
+                    d.quote_ident("id"),
+                    placeholders(d, 1, chunk.len()),
+                )
+            };
+            let params: Vec<Value> = chunk.iter().map(|id| Value::Int(*id)).collect();
+            for row in db.query(&sql, &params)? {
+                if let [Value::Int(id), Value::Text(title)] = row.as_slice() {
+                    titles.insert(*id, title.clone());
+                }
+            }
+        }
+        Ok(titles)
+    }
+
     /// Ставит или снимает пометку на удаление с проверкой версии.
     pub fn mark_deleted(
         &self,

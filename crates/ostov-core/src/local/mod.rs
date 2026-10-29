@@ -22,8 +22,8 @@ use convert::{error, fields_from_api, fields_to_api, invalid};
 
 use crate::list::{MILESTONE_STEP, Milestones};
 use crate::{
-    Catalog, Document, Element, ListQuery, ListSource, in_transaction, insert_and_post, list,
-    posting,
+    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction,
+    insert_and_post, list, posting,
 };
 
 pub struct LocalEngine {
@@ -84,20 +84,67 @@ impl LocalEngine {
         }
     }
 
-    fn page(&self, token: String, page: crate::ListPage) -> ListPage {
-        ListPage {
-            rows: page
-                .rows
-                .into_iter()
-                .map(|r| Row {
-                    id: r.id,
-                    values: fields_to_api(&r.fields),
-                })
-                .collect(),
+    fn page(
+        &self,
+        db: &mut dyn Driver,
+        source: &dyn ListSource,
+        token: String,
+        page: crate::ListPage,
+    ) -> EngineResult<ListPage> {
+        let mut rows: Vec<Row> = page
+            .rows
+            .into_iter()
+            .map(|r| Row {
+                id: r.id,
+                values: fields_to_api(&r.fields),
+            })
+            .collect();
+        let mut values: Vec<&mut ostov_api::Fields> =
+            rows.iter_mut().map(|r| &mut r.values).collect();
+        self.fill_titles(db, &source.list_fields(), &mut values)?;
+        Ok(ListPage {
+            rows,
             next_key: page.next_key,
             total: page.total,
             token,
+        })
+    }
+
+    /// Подставляет названия в ссылки: один запрос на поле, а не на строку.
+    fn fill_titles(
+        &self,
+        db: &mut dyn Driver,
+        defs: &[FieldDef],
+        rows: &mut [&mut ostov_api::Fields],
+    ) -> EngineResult<()> {
+        for def in defs.iter().filter(|d| d.kind == FieldKind::Ref) {
+            let Some(catalog) = def
+                .target
+                .as_ref()
+                .and_then(|t| self.config.catalogs.get(t))
+            else {
+                continue;
+            };
+            let mut ids: Vec<i64> = rows
+                .iter()
+                .filter_map(|r| match r.get(&def.name) {
+                    Some(ostov_api::Value::Ref { id, .. }) => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.is_empty() {
+                continue;
+            }
+            let titles = catalog.titles(db, &ids).map_err(error)?;
+            for row in rows.iter_mut() {
+                if let Some(ostov_api::Value::Ref { id, title }) = row.get_mut(&def.name) {
+                    *title = titles.get(id).cloned();
+                }
+            }
         }
+        Ok(())
     }
 }
 
@@ -184,7 +231,7 @@ impl Engine for LocalEngine {
             window(q.size),
         )
         .map_err(error)?;
-        Ok(self.page(token(&q.object, &query), page))
+        self.page(&mut **db, source, token(&q.object, &query), page)
     }
 
     fn seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
@@ -201,7 +248,8 @@ impl Engine for LocalEngine {
         let page = marks
             .seek(&mut **db, source, position, window(size))
             .map_err(error)?;
-        Ok(self.page(token.to_owned(), page))
+        drop(cache);
+        self.page(&mut **db, source, token.to_owned(), page)
     }
 
     fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
@@ -211,13 +259,15 @@ impl Engine for LocalEngine {
         match self.object(object)? {
             Object::Catalog(c) => {
                 let e = c.get(&mut **db, id).map_err(error)?.ok_or_else(missing)?;
+                let mut fields = fields_to_api(&e.fields);
+                self.fill_titles(&mut **db, c.fields(), &mut [&mut fields])?;
                 Ok(ObjectData {
                     id: Some(e.id),
                     version: e.version,
                     number: None,
                     posted: false,
                     deleted: e.deleted,
-                    fields: fields_to_api(&e.fields),
+                    fields,
                     tables: BTreeMap::new(),
                 })
             }
@@ -227,20 +277,29 @@ impl Engine for LocalEngine {
                     .get(&mut **db, id)
                     .map_err(error)?
                     .ok_or_else(missing)?;
+                let mut fields = fields_to_api(&d.header);
+                self.fill_titles(&mut **db, cfg.kind.header(), &mut [&mut fields])?;
+                let mut tables = BTreeMap::new();
+                for part in cfg.kind.parts() {
+                    let mut lines: Vec<ostov_api::Fields> = d
+                        .parts
+                        .get(part.name())
+                        .into_iter()
+                        .flatten()
+                        .map(fields_to_api)
+                        .collect();
+                    let mut refs: Vec<&mut ostov_api::Fields> = lines.iter_mut().collect();
+                    self.fill_titles(&mut **db, part.fields(), &mut refs)?;
+                    tables.insert(part.name().to_owned(), lines);
+                }
                 Ok(ObjectData {
                     id: Some(d.id),
                     version: d.version,
                     number: Some(d.number),
                     posted: d.posted,
                     deleted: d.deleted,
-                    fields: fields_to_api(&d.header),
-                    tables: d
-                        .parts
-                        .iter()
-                        .map(|(name, lines)| {
-                            (name.clone(), lines.iter().map(fields_to_api).collect())
-                        })
-                        .collect(),
+                    fields,
+                    tables,
                 })
             }
         }

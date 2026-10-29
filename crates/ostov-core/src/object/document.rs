@@ -24,6 +24,14 @@ impl TablePart {
             fields,
         })
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn fields(&self) -> &[FieldDef] {
+        &self.fields
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +79,10 @@ impl DocumentKind {
 
     pub fn header(&self) -> &[FieldDef] {
         &self.header
+    }
+
+    pub fn parts(&self) -> &[TablePart] {
+        &self.parts
     }
 
     pub fn create_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {

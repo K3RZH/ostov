@@ -40,6 +40,10 @@ fn dec(units: i64, scale: u8) -> Value {
     Value::Decimal { units, scale }
 }
 
+fn refer(id: i64) -> Value {
+    Value::Ref { id, title: None }
+}
+
 fn fields(pairs: &[(&str, Value)]) -> Fields {
     pairs
         .iter()
@@ -59,19 +63,19 @@ fn add(engine: &dyn Engine, object: &str, name: &str) -> i64 {
 fn receipt(warehouse: i64, supplier: i64, lines: &[(i64, i64, i64)]) -> ObjectData {
     let lines = lines
         .iter()
-        .map(|(goods, qty, price)| {
+        .map(|&(goods, qty, price)| {
             fields(&[
-                ("goods", Value::Ref(*goods)),
-                ("qty", dec(*qty, 3)),
-                ("price", dec(*price, 2)),
+                ("goods", refer(goods)),
+                ("qty", dec(qty, 3)),
+                ("price", dec(price, 2)),
             ])
         })
         .collect();
     ObjectData {
         fields: fields(&[
             ("date", Value::Date("2026-10-30".into())),
-            ("warehouse", Value::Ref(warehouse)),
-            ("supplier", Value::Ref(supplier)),
+            ("warehouse", refer(warehouse)),
+            ("supplier", refer(supplier)),
         ]),
         tables: [("lines".to_owned(), lines)].into(),
         ..ObjectData::default()
@@ -82,14 +86,11 @@ fn issue(warehouse: i64, goods: i64, qty: i64) -> ObjectData {
     ObjectData {
         fields: fields(&[
             ("date", Value::Date("2026-10-31".into())),
-            ("warehouse", Value::Ref(warehouse)),
+            ("warehouse", refer(warehouse)),
         ]),
         tables: [(
             "lines".to_owned(),
-            vec![fields(&[
-                ("goods", Value::Ref(goods)),
-                ("qty", dec(qty, 3)),
-            ])],
+            vec![fields(&[("goods", refer(goods)), ("qty", dec(qty, 3))])],
         )]
         .into(),
         ..ObjectData::default()
@@ -128,12 +129,18 @@ fn receipt_is_saved_posted_and_listed() {
     assert!(doc.posted);
     assert_eq!(doc.fields["amount"], dec(833, 2));
     assert_eq!(doc.tables["lines"][0]["amount"], dec(833, 2));
-    assert_eq!(doc.fields["supplier"], Value::Ref(supplier));
+    let titled = |id, t: &str| Value::Ref {
+        id,
+        title: Some(t.to_owned()),
+    };
+    assert_eq!(doc.fields["supplier"], titled(supplier, "Мельница"));
+    assert_eq!(doc.tables["lines"][0]["goods"], titled(flour, "Мука"));
 
     let page = engine.list(&query("receipt", 10)).unwrap();
     assert_eq!(page.total, Some(1));
     assert_eq!(page.rows[0].values["posted"], Value::Int(1));
     assert_eq!(page.rows[0].values["number"], Value::Int(1));
+    assert_eq!(page.rows[0].values["warehouse"], titled(main, "Основной"));
 
     let err = engine
         .save("issue", &issue(main, flour, 3000), PostAction::Post)

@@ -15,7 +15,10 @@ pub fn value_to_api(v: &FieldValue) -> ostov_api::Value {
             scale: d.scale(),
         },
         FieldValue::Date(s) => ostov_api::Value::Date(s.clone()),
-        FieldValue::Ref(id) => ostov_api::Value::Ref(*id),
+        FieldValue::Ref(id) => ostov_api::Value::Ref {
+            id: *id,
+            title: None,
+        },
     }
 }
 
@@ -28,7 +31,7 @@ pub fn value_from_api(v: &ostov_api::Value) -> Result<FieldValue, EngineError> {
             FieldValue::Decimal(Decimal::new(*units, *scale).map_err(|e| invalid(e.to_string()))?)
         }
         ostov_api::Value::Date(s) => FieldValue::Date(s.clone()),
-        ostov_api::Value::Ref(id) => FieldValue::Ref(*id),
+        ostov_api::Value::Ref { id, .. } => FieldValue::Ref(*id),
         ostov_api::Value::Bool(_) => return Err(invalid("флажков в ядре пока нет".into())),
     })
 }
