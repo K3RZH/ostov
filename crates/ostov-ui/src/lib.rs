@@ -6,6 +6,7 @@
 slint::include_modules!();
 
 pub mod app;
+pub mod engine;
 pub mod login;
 pub mod receipts;
 pub mod receipts_ui;
