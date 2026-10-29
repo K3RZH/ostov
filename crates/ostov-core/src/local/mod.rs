@@ -8,6 +8,7 @@ mod demo;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -32,6 +33,8 @@ pub struct LocalEngine {
     config: Config,
     /// Вехи по токену списка; сбрасываются при любой записи.
     milestones: Mutex<HashMap<String, Milestones>>,
+    /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
+    _lock: Option<File>,
 }
 
 enum Object<'a> {
@@ -45,7 +48,13 @@ impl LocalEngine {
             db: Mutex::new(db),
             config,
             milestones: Mutex::new(HashMap::new()),
+            _lock: None,
         }
+    }
+
+    fn locked(mut self, lock: File) -> Self {
+        self._lock = Some(lock);
+        self
     }
 
     fn db(&self) -> EngineResult<MutexGuard<'_, Box<dyn Driver + Send>>> {
@@ -442,6 +451,7 @@ impl Connector for LocalConnector {
                 format!("файла базы {path} нет"),
             ));
         }
+        let lock = lock_base(path)?;
         let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
         let sql = format!("SELECT value FROM {BASE_TABLE} WHERE key = 'config'");
         if db.query(&sql, &[]).is_err() {
@@ -451,7 +461,9 @@ impl Connector for LocalConnector {
             ));
         }
         let config = warehouse().map_err(error)?;
-        Ok(Arc::new(LocalEngine::new(Box::new(db), config)))
+        Ok(Arc::new(
+            LocalEngine::new(Box::new(db), config).locked(lock),
+        ))
     }
 
     fn create_local(
@@ -461,18 +473,21 @@ impl Connector for LocalConnector {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
-        let (db, config) = create_base(path)?;
-        Ok(Arc::new(LocalEngine::new(Box::new(db), config)))
+        let (db, config, lock) = create_base(path)?;
+        Ok(Arc::new(
+            LocalEngine::new(Box::new(db), config).locked(lock),
+        ))
     }
 }
 
 /// Новый файл базы со служебной таблицей и таблицами конфигурации.
-fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config)> {
+fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
     if Path::new(path).exists() {
         return Err(invalid(format!(
             "файл {path} уже есть: выберите другое имя"
         )));
     }
+    let lock = lock_base(path)?;
     let config = warehouse().map_err(error)?;
     let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
     in_transaction(&mut db, |db| {
@@ -487,7 +502,34 @@ fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config)> {
         config.create_tables(db)
     })
     .map_err(error)?;
-    Ok((db, config))
+    Ok((db, config, lock))
+}
+
+/// Системная блокировка `<база>.lock`: снимается сама, даже если программа упала.
+fn lock_base(path: &str) -> EngineResult<File> {
+    let lock_path = format!("{path}.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| EngineError {
+            code: ErrorCode::Unavailable,
+            message: format!("не удалось открыть {lock_path}"),
+            details: e.to_string(),
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(EngineError::new(
+            ErrorCode::AlreadyOpen,
+            "База уже открыта в другом окне или программе.",
+        )),
+        Err(TryLockError::Error(e)) => Err(EngineError {
+            code: ErrorCode::Unavailable,
+            message: "не удалось заблокировать файл базы".into(),
+            details: e.to_string(),
+        }),
+    }
 }
 
 fn no_file_password(password: Option<&str>) -> EngineResult<()> {

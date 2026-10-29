@@ -346,3 +346,15 @@ fn demo_base_has_data_to_scroll() {
     assert!(engine.list(&query("issue", 10)).unwrap().total.unwrap() > 0);
     assert_eq!(engine.list(&query("goods", 50)).unwrap().total, Some(8));
 }
+
+#[test]
+fn base_opens_only_once() {
+    let base = Base::new("lock");
+    let first = base.create();
+    let err = LocalConnector.open_local(&base.path, None).err().unwrap();
+    assert_eq!(err.code, ErrorCode::AlreadyOpen);
+
+    drop(first);
+    let again = LocalConnector.open_local(&base.path, None).unwrap();
+    assert!(again.hello().is_ok());
+}
