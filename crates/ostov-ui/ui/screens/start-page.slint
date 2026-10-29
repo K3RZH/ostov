@@ -1,0 +1,171 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip } from "../components/chip.slint";
+import { BrandPanel } from "brand-panel.slint";
+
+// server: база на сервере (значок и метка «Сервер»), иначе локальный файл.
+// protection: 0 без защиты, 1 пользователи, 2 пароль на файл (для локальных баз).
+export struct RecentDb { name: string, path: string, when: string, server: bool, protection: int }
+
+component RecentRow inherits Rectangle {
+    in property <RecentDb> db;
+    in property <bool> selected;
+    callback chosen();
+
+    height: 52px;
+    border-radius: Shape.control-radius;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-12;
+        padding-right: Theme.space-12;
+        spacing: Theme.space-12;
+
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: root.db.server ? @image-url("../../assets/icons/server.svg") : @image-url("../../assets/icons/database.svg");
+                colorize: Theme.text;
+                width: 20px;
+                height: 20px;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.db.name;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.db.path;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Chip { text: root.db.server ? "Сервер" : "Локально"; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.db.when;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+            }
+        }
+    }
+}
+
+// Страница выбора базы. Тип базы (файл или сервер) выбирается при создании, здесь только список.
+// Данные недавних баз сейчас примерные: их даст ядро (Engine API).
+export component StartPage inherits Rectangle {
+    in-out property <int> selected-recent: 0;
+    in property <string> config-name: "Управление складом";
+    in property <string> config-info: "Конфигурация · версия 1.2.0";
+    in property <string> app-version: "Версия 0.1.0";
+    in-out property <[RecentDb]> recent: [
+        { name: "Кафе-2026.sqlite", path: "~/Ostov/Кафе-2026.sqlite", when: "вчера", server: false, protection: 1 },
+        { name: "Кафе — общая база", path: "kafe-srv.local:7443", when: "12 октября", server: true, protection: 0 },
+        { name: "Бар-2025.sqlite", path: "~/Документы/Бар-2025.sqlite", when: "3 марта", server: false, protection: 2 },
+    ];
+    callback open();
+    callback create-database();
+    callback add-existing();
+
+    background: Theme.bg;
+
+    HorizontalLayout {
+        BrandPanel {
+            config-name: root.config-name;
+            config-info: root.config-info;
+        }
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                padding-left: Theme.space-24;
+                padding-right: Theme.space-24;
+                VerticalLayout {
+                    min-width: 360px;
+                    max-width: 520px;
+                    spacing: Theme.space-16;
+
+                    if root.recent.length > 0 : Text {
+                        text: "Выберите базу";
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    if root.recent.length > 0 : VerticalLayout {
+                        spacing: Theme.space-4;
+                        for db[index] in root.recent : RecentRow {
+                            db: db;
+                            selected: index == root.selected-recent;
+                            chosen => { root.selected-recent = index; }
+                        }
+                    }
+                    if root.recent.length > 0 : HorizontalLayout {
+                        spacing: Theme.space-8;
+                        Button { text: "Открыть"; kind: ButtonKind.primary; clicked => { root.open(); } }
+                        Button { text: "Создать базу"; clicked => { root.create-database(); } }
+                        Rectangle { }
+                        Button { text: "Добавить существующую…"; kind: ButtonKind.text; clicked => { root.add-existing(); } }
+                    }
+
+                    // Баз ещё нет: два действия, тип базы выбирается дальше.
+                    if root.recent.length == 0 : Image {
+                        source: @image-url("../../assets/icons/database.svg");
+                        colorize: Theme.accent-text;
+                        width: 40px;
+                        height: 40px;
+                        horizontal-alignment: left;
+                    }
+                    if root.recent.length == 0 : Text {
+                        text: "Баз данных пока нет";
+                        font-size: Theme.font-title;
+                        font-weight: 700;
+                        color: Theme.text;
+                    }
+                    if root.recent.length == 0 : Text {
+                        text: "Создайте новую базу или добавьте существующую: файл на этом компьютере или базу на сервере. Тип базы выбирается дальше.";
+                        font-size: Theme.font-body;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                    if root.recent.length == 0 : HorizontalLayout {
+                        spacing: Theme.space-12;
+                        alignment: start;
+                        Button {
+                            text: "Создать базу";
+                            kind: ButtonKind.primary;
+                            control-height: Theme.control-lg;
+                            clicked => { root.create-database(); }
+                        }
+                        Button {
+                            text: "Добавить существующую…";
+                            control-height: Theme.control-lg;
+                            clicked => { root.add-existing(); }
+                        }
+                    }
+
+                    Text {
+                        text: root.app-version;
+                        font-size: Theme.font-caption;
+                        color: Theme.text-muted;
+                    }
+                }
+            }
+        }
+    }
+}

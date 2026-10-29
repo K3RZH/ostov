@@ -1,10 +1,12 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
-//! Экраны: showcase, main, start, login-server, login-local, password, login-error.
+//! Экраны: showcase, main, settings, start, start-empty, create-local, create-server, add-file, add-server,
+//! login-server, login-local, password, login-error.
 
 use std::io::Write;
 
-use slint::ComponentHandle;
+use ostov_ui::app::{LoginKind, configure_login};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
 fn save<T>(window: &T, dark: bool, path: &str) -> Result<(), Box<dyn std::error::Error>>
 where
@@ -28,6 +30,21 @@ where
     Ok(())
 }
 
+/// Окно приложения на нужной странице: размер как в приложении (главная больше остальных).
+fn app_window(page: i32) -> Result<ostov_ui::AppWindow, Box<dyn std::error::Error>> {
+    let window = ostov_ui::AppWindow::new()?;
+    let (width, height) = if page == 2 {
+        (1440.0, 900.0)
+    } else {
+        (1200.0, 760.0)
+    };
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(width, height));
+    window.set_page(page);
+    Ok(window)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let dark = args.next().is_some_and(|theme| theme == "тёмная");
@@ -36,42 +53,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match screen.as_str() {
         "main" => {
-            let window = ostov_ui::MainWindow::new()?;
+            let window = app_window(2)?;
             let mut shell = ostov_ui::shell::Shell::demo();
             shell.click(3);
             shell.click(15);
             ostov_ui::app::refresh(&window, &shell);
+            window.set_base_name("Кафе-2026".into());
             save(&window, dark, &path)
         }
-        "start" => save(&ostov_ui::StartWindow::new()?, dark, &path),
-        "login-server" => save(&ostov_ui::LoginWindow::new()?, dark, &path),
+        "settings" => {
+            let window = app_window(2)?;
+            window.set_settings_open(true);
+            window.set_dark_theme(dark);
+            window.set_radius_mode(1);
+            save(&window, dark, &path)
+        }
+        "add-file" | "add-server" => {
+            let window = app_window(0)?;
+            window.set_adding(true);
+            window.set_add_server(screen == "add-server");
+            save(&window, dark, &path)
+        }
+        "start" => save(&app_window(0)?, dark, &path),
+        "start-empty" => {
+            let window = app_window(0)?;
+            window.set_recent(ModelRc::new(VecModel::default()));
+            save(&window, dark, &path)
+        }
+        "create-local" | "create-server" => {
+            let window = app_window(0)?;
+            window.set_creating(true);
+            window.set_create_server(screen == "create-server");
+            window.set_new_name("Кафе-2026".into());
+            save(&window, dark, &path)
+        }
+        "login-server" => {
+            let window = app_window(1)?;
+            configure_login(
+                &window,
+                LoginKind::Server,
+                "Кафе — общая база",
+                "kafe-srv.local:7443",
+            );
+            save(&window, dark, &path)
+        }
         "login-error" => {
-            let window = ostov_ui::LoginWindow::new()?;
+            let window = app_window(1)?;
+            configure_login(
+                &window,
+                LoginKind::Server,
+                "Кафе — общая база",
+                "kafe-srv.local:7443",
+            );
             window.set_error("Неверный логин или пароль. Повторить можно через 4 секунды.".into());
             window.set_button_text("Войти (через 4 с)".into());
             save(&window, dark, &path)
         }
         "login-local" => {
-            let window = ostov_ui::LoginWindow::new()?;
-            window.set_heading("Вход в базу".into());
-            window.set_is_server(false);
-            window.set_source_name("Кафе-2026.sqlite".into());
-            window.set_source_detail("~/Ostov/Кафе-2026.sqlite".into());
-            window.set_change_text("Сменить базу".into());
-            window.set_remember_text("Запомнить пользователя".into());
+            let window = app_window(1)?;
+            configure_login(
+                &window,
+                LoginKind::LocalUser,
+                "Кафе-2026.sqlite",
+                "~/Ostov/Кафе-2026.sqlite",
+            );
             save(&window, dark, &path)
         }
         "password" => {
-            let window = ostov_ui::LoginWindow::new()?;
-            window.set_heading("Пароль базы".into());
-            window.set_is_server(false);
-            window.set_source_name("Бар-2025.sqlite".into());
-            window.set_source_detail("~/Документы/Бар-2025.sqlite".into());
-            window.set_change_text("Сменить базу".into());
-            window.set_show_login(false);
-            window.set_hint("База зашифрована. Без пароля открыть её нельзя.".into());
-            window.set_remember_text("".into());
-            window.set_button_text("Открыть".into());
+            let window = app_window(1)?;
+            configure_login(
+                &window,
+                LoginKind::LocalPassword,
+                "Бар-2025.sqlite",
+                "~/Документы/Бар-2025.sqlite",
+            );
             save(&window, dark, &path)
         }
         _ => save(&ostov_ui::ShowcaseWindow::new()?, dark, &path),

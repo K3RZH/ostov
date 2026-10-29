@@ -1,0 +1,96 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { ModeOption } from "create-dialog.slint";
+
+// Окно «Добавить существующую базу»: готовый файл на этом компьютере или база на сервере.
+export component AddDialog inherits Rectangle {
+    in-out property <bool> server;
+    in-out property <string> file;
+    in-out property <string> address;
+    in-out property <string> db-name;
+    callback confirmed();
+    callback cancelled();
+    callback choose-file();
+
+    private property <bool> valid: root.server ? root.address != "" && root.db-name != "" : root.file != "";
+
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Добавить существующую базу";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                ModeOption {
+                    title: "Файл";
+                    hint: "Готовая база на этом компьютере";
+                    icon: @image-url("../../assets/icons/database.svg");
+                    selected: !root.server;
+                    chosen => { root.server = false; }
+                }
+                ModeOption {
+                    title: "Сервер";
+                    hint: "Подключиться к общей базе";
+                    icon: @image-url("../../assets/icons/server.svg");
+                    selected: root.server;
+                    chosen => { root.server = true; }
+                }
+            }
+
+            if !root.server : HorizontalLayout {
+                spacing: Theme.space-8;
+                TextField {
+                    label: "Файл базы";
+                    text <=> root.file;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    width: 112px;
+                    alignment: end;
+                    Button { text: "Выбрать…"; clicked => { root.choose-file(); } }
+                }
+            }
+            if root.server : TextField {
+                label: "Адрес сервера";
+                placeholder: "kafe-srv.local:7443";
+                text <=> root.address;
+            }
+            if root.server : TextField {
+                label: "Название в списке";
+                text <=> root.db-name;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                Button {
+                    text: "Добавить";
+                    kind: ButtonKind.primary;
+                    enabled: root.valid;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}

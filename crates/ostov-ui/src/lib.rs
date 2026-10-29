@@ -6,6 +6,7 @@
 slint::include_modules!();
 
 pub mod app;
+pub mod settings;
 pub mod shell;
 
 /// Имя крейта (проверка, что каркас собран).

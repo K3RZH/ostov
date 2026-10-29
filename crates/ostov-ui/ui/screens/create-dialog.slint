@@ -1,0 +1,189 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { Checkbox } from "../components/choice.slint";
+
+export component ModeOption inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    in property <image> icon;
+    in property <bool> selected;
+    callback chosen();
+
+    horizontal-stretch: 1;
+    border-radius: Shape.surface-radius;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Theme.accent-text : Theme.border;
+    background: root.selected ? Theme.accent-soft : Theme.surface;
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    VerticalLayout {
+        padding: Theme.space-16;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            VerticalLayout {
+                alignment: center;
+                Image {
+                    source: root.icon;
+                    colorize: root.selected ? Theme.accent-text : Theme.text;
+                    width: 20px;
+                    height: 20px;
+                }
+            }
+            Text {
+                text: root.title;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.hint;
+            font-size: Theme.font-caption;
+            color: Theme.text-muted;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Окно «Создать базу» поверх затемнения: сначала выбор, где будет жить база (файл или сервер).
+// Занимает всю страницу; пока открыто, клики под ним не проходят.
+export component CreateDialog inherits Rectangle {
+    in-out property <bool> server;
+    in-out property <string> db-name;
+    in-out property <string> folder;
+    in-out property <string> address;
+    in-out property <string> admin-login;
+    in-out property <string> admin-password;
+    in-out property <bool> protect-password;
+    in-out property <bool> protect-users;
+    callback confirmed();
+    callback cancelled();
+    callback choose-folder();
+
+    private property <bool> valid: root.db-name != ""
+        && (root.server ? root.address != "" && root.admin-login != "" : root.folder != "");
+
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Создать базу";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Text {
+                text: "Где будет храниться база";
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: Theme.text;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                ModeOption {
+                    title: "Локально";
+                    hint: "Файл на этом компьютере";
+                    icon: @image-url("../../assets/icons/database.svg");
+                    selected: !root.server;
+                    chosen => { root.server = false; }
+                }
+                ModeOption {
+                    title: "Сервер";
+                    hint: "Общая база на сервере";
+                    icon: @image-url("../../assets/icons/server.svg");
+                    selected: root.server;
+                    chosen => { root.server = true; }
+                }
+            }
+
+            if root.server : TextField {
+                label: "Адрес сервера";
+                placeholder: "kafe-srv.local:7443";
+                text <=> root.address;
+            }
+            TextField {
+                label: "Название базы";
+                text <=> root.db-name;
+            }
+            if !root.server : HorizontalLayout {
+                spacing: Theme.space-8;
+                TextField {
+                    label: "Папка";
+                    text <=> root.folder;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    width: 112px;
+                    alignment: end;
+                    Button { text: "Выбрать…"; clicked => { root.choose-folder(); } }
+                }
+            }
+            if !root.server : VerticalLayout {
+                spacing: Theme.space-8;
+                Text {
+                    text: "Защита базы";
+                    font-size: Theme.font-body;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Checkbox { text: "Защитить паролем"; checked <=> root.protect-password; }
+                Checkbox { text: "Включить пользователей"; checked <=> root.protect-users; }
+                Text {
+                    text: "Пароль шифрует файл базы: без него открыть её нельзя. Пользователей можно включить позже.";
+                    font-size: Theme.font-caption;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+            }
+            if root.server : TextField {
+                label: "Логин администратора";
+                text <=> root.admin-login;
+            }
+            if root.server : TextField {
+                label: "Пароль администратора";
+                password: true;
+                text <=> root.admin-password;
+            }
+            if root.server : Text {
+                text: "Соединение защищено (TLS). Администратор нужен для первой настройки базы.";
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                Button {
+                    text: "Создать";
+                    kind: ButtonKind.primary;
+                    enabled: root.valid;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}

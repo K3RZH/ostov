@@ -4,9 +4,9 @@ import { TextField } from "../components/text-field.slint";
 import { Checkbox } from "../components/choice.slint";
 import { BrandPanel } from "brand-panel.slint";
 
-// Окно входа: на сервер, в локальную базу с пользователями, пароль зашифрованной базы.
+// Страница входа: на сервер, в локальную базу с пользователями, пароль зашифрованной базы.
 // Различаются свойствами: заголовок, источник, нужен ли логин, текст кнопки, ошибка.
-export component LoginWindow inherits Window {
+export component LoginPage inherits Rectangle {
     in property <string> heading: "Вход на сервер";
     in property <string> source-name: "kafe-srv.local:7443";
     in property <string> source-detail: "Соединение защищено (TLS)";
@@ -27,12 +27,6 @@ export component LoginWindow inherits Window {
     callback change-source();
     callback back();
 
-    title: "Ostov — " + root.heading;
-    preferred-width: 1200px;
-    preferred-height: 760px;
-    min-width: 960px;
-    min-height: 600px;
-    default-font-family: "Open Sans";
     background: Theme.bg;
 
     HorizontalLayout {
@@ -157,7 +151,7 @@ export component LoginWindow inherits Window {
                     HorizontalLayout {
                         alignment: center;
                         Button {
-                            text: "Назад к выбору режима";
+                            text: "Назад к выбору базы";
                             kind: ButtonKind.text;
                             clicked => { root.back(); }
                         }

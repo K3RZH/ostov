@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 slint = "1.18.1"
+# Системное окно выбора папки (на Linux через xdg-portal, в GNOME родное окно).
+rfd = "0.17.2"
 
 [build-dependencies]
 slint-build = "1.18.1"

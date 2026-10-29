@@ -134,9 +134,9 @@ component Separator inherits Rectangle {
     background: Theme.border;
 }
 
-// Главное окно: шапка, навигация, вкладки, содержимое, строка состояния.
+// Главная страница: шапка, навигация, вкладки, содержимое, строка состояния.
 // Сейчас заглушка: данные примерные, содержимое вкладок появится вместе с ядром.
-export component MainWindow inherits Window {
+export component MainPage inherits Rectangle {
     in property <string> base-name: "Кафе-2026";
     in property <string> database-name: "Кафе-2026.sqlite";
     in property <string> mode-text: "Режим: локально";
@@ -151,13 +151,8 @@ export component MainWindow inherits Window {
     callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
+    callback settings-clicked();
 
-    title: "Ostov — " + root.base-name;
-    preferred-width: 1440px;
-    preferred-height: 900px;
-    min-width: 1000px;
-    min-height: 600px;
-    default-font-family: "Open Sans";
     background: Theme.bg;
 
     VerticalLayout {
@@ -239,7 +234,7 @@ export component MainWindow inherits Window {
                 VerticalLayout { alignment: center; IconButton { icon: "plus"; } }
                 VerticalLayout { alignment: center; IconButton { icon: "bell"; } }
                 VerticalLayout { alignment: center; IconButton { icon: "help"; } }
-                VerticalLayout { alignment: center; IconButton { icon: "settings"; } }
+                VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
                     Rectangle {

@@ -1,14 +1,20 @@
-//! Логика переходов между окнами первого запуска. Без ядра: только выбор нужного окна входа.
+//! Логика переходов между страницами приложения. Без ядра: только выбор нужной страницы входа.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use slint::{ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
+use crate::settings::Settings;
 use crate::shell::Shell;
-use crate::{LoginWindow, MainWindow, NavRow, StartWindow, TabItem};
+use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme};
 
-/// Какое окно входа нужно после выбора режима и базы.
+/// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
+const PAGE_START: i32 = 0;
+const PAGE_LOGIN: i32 = 1;
+const PAGE_MAIN: i32 = 2;
+
+/// Какая страница входа нужна после выбора базы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginKind {
     /// Сервер: логин и пароль.
@@ -21,7 +27,7 @@ pub enum LoginKind {
     None,
 }
 
-/// Выбирает окно входа по режиму и защите базы (0 нет, 1 пользователи, 2 пароль на файл).
+/// Выбирает страницу входа по типу и защите базы (0 нет, 1 пользователи, 2 пароль на файл).
 pub fn login_kind(server: bool, protection: i32) -> LoginKind {
     if server {
         return LoginKind::Server;
@@ -33,28 +39,41 @@ pub fn login_kind(server: bool, protection: i32) -> LoginKind {
     }
 }
 
-/// Настраивает окно входа под выбранный вид.
+/// Настраивает страницу входа под выбранный вид. Задаёт всё заново: после прошлого входа
+/// в свойствах остались бы тексты другого вида.
 pub fn configure_login(
-    window: &LoginWindow,
+    window: &AppWindow,
     kind: LoginKind,
     source_name: &str,
-    source_path: &str,
+    source_detail: &str,
 ) {
+    window.set_source_name(source_name.into());
+    window.set_source_detail(source_detail.into());
+    window.set_error("".into());
+    window.set_login("".into());
+    window.set_password("".into());
     match kind {
-        LoginKind::Server => {}
+        LoginKind::Server => {
+            window.set_heading("Вход на сервер".into());
+            window.set_is_server(true);
+            window.set_change_text("Сменить".into());
+            window.set_show_login(true);
+            window.set_hint("".into());
+            window.set_remember_text("Запомнить сервер".into());
+            window.set_button_text("Войти".into());
+        }
         LoginKind::LocalUser => {
             window.set_heading("Вход в базу".into());
             window.set_is_server(false);
-            window.set_source_name(source_name.into());
-            window.set_source_detail(source_path.into());
             window.set_change_text("Сменить базу".into());
+            window.set_show_login(true);
+            window.set_hint("".into());
             window.set_remember_text("Запомнить пользователя".into());
+            window.set_button_text("Войти".into());
         }
         LoginKind::LocalPassword => {
             window.set_heading("Пароль базы".into());
             window.set_is_server(false);
-            window.set_source_name(source_name.into());
-            window.set_source_detail(source_path.into());
             window.set_change_text("Сменить базу".into());
             window.set_show_login(false);
             window.set_hint("База зашифрована. Без пароля открыть её нельзя.".into());
@@ -70,7 +89,7 @@ fn index(value: i32) -> Option<usize> {
 }
 
 /// Переносит состояние оболочки в окно.
-pub fn refresh(window: &MainWindow, shell: &Shell) {
+pub fn refresh(window: &AppWindow, shell: &Shell) {
     let rows: Vec<NavRow> = shell
         .nav_rows()
         .into_iter()
@@ -99,12 +118,26 @@ pub fn refresh(window: &MainWindow, shell: &Shell) {
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }
 
-/// Открывает главное окно для выбранной базы и закрывает окно, из которого пришли.
-fn open_main(main: &MainWindow, base: &str, server: bool) -> Shell {
+/// Показывает страницу и подгоняет размер окна: главная больше, чем выбор базы и вход.
+/// Окно одно, поэтому ничего не прячем и не показываем заново.
+fn show_page(window: &AppWindow, page: i32) {
+    let (width, height) = if page == PAGE_MAIN {
+        (1440.0, 900.0)
+    } else {
+        (1200.0, 760.0)
+    };
+    window.set_page(page);
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(width, height));
+}
+
+/// Готовит главную страницу для выбранной базы.
+fn open_main(window: &AppWindow, base: &str, server: bool) -> Shell {
     let shell = Shell::demo();
-    main.set_base_name(base.trim_end_matches(".sqlite").into());
-    main.set_database_name(base.into());
-    main.set_mode_text(
+    window.set_base_name(base.trim_end_matches(".sqlite").into());
+    window.set_database_name(base.into());
+    window.set_mode_text(
         if server {
             "Режим: сервер"
         } else {
@@ -112,123 +145,293 @@ fn open_main(main: &MainWindow, base: &str, server: bool) -> Shell {
         }
         .into(),
     );
-    refresh(main, &shell);
+    refresh(window, &shell);
     shell
 }
 
-/// Связывает окна: выбор режима → вход → назад. Ядро подключается позже через Engine API.
+/// Строка списка для только что созданной базы. Сервер: путь хранит адрес, защита не нужна.
+/// Локальная: файл `<имя>.sqlite` в папке, защита по флажкам (пароль важнее пользователей).
+pub fn new_database(
+    server: bool,
+    name: &str,
+    folder: &str,
+    address: &str,
+    protect_password: bool,
+    protect_users: bool,
+) -> RecentDb {
+    if server {
+        return RecentDb {
+            name: name.into(),
+            path: address.into(),
+            when: "только что".into(),
+            server: true,
+            protection: 0,
+        };
+    }
+    let file = format!("{name}.sqlite");
+    let protection = if protect_password {
+        2
+    } else {
+        i32::from(protect_users)
+    };
+    RecentDb {
+        path: format!("{}/{file}", folder.trim_end_matches('/')).into(),
+        name: file.into(),
+        when: "только что".into(),
+        server: false,
+        protection,
+    }
+}
+
+/// Заменяет домашнюю папку на `~`: так путь короче и привычнее.
+fn short_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_owned(),
+    }
+}
+
+/// Строка списка для добавленной существующей базы. Защиту файла заранее не знаем (ядра нет),
+/// поэтому считаем, что её нет.
+pub fn existing_database(server: bool, file: &str, address: &str, name: &str) -> RecentDb {
+    if server {
+        return RecentDb {
+            name: name.into(),
+            path: address.into(),
+            when: "только что".into(),
+            server: true,
+            protection: 0,
+        };
+    }
+    RecentDb {
+        name: file.rsplit('/').next().unwrap_or(file).into(),
+        path: file.into(),
+        when: "только что".into(),
+        server: false,
+        protection: 0,
+    }
+}
+
+/// Применяет настройки интерфейса: тема и скругление глобальные, окно тоже запоминает выбор.
+fn apply_settings(window: &AppWindow, settings: Settings) {
+    window.global::<Theme>().set_dark(settings.dark);
+    window
+        .global::<Shape>()
+        .set_control_radius(settings.radius_px());
+    window.set_dark_theme(settings.dark);
+    window.set_radius_mode(settings.radius);
+}
+
+/// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
 pub fn run() -> Result<(), slint::PlatformError> {
-    use slint::{ComponentHandle, Model};
+    use slint::Model;
 
     // Идентификатор приложения: по нему оболочка связывает окно с ярлыком ostov.desktop.
     slint::BackendSelector::new().select()?;
     slint::set_xdg_app_id("ostov")?;
 
-    let start = StartWindow::new()?;
-    let login = LoginWindow::new()?;
-    let main = MainWindow::new()?;
-    // Что выбрано на старте: имя базы и режим «сервер».
+    let app = AppWindow::new()?;
+    apply_settings(&app, Settings::load());
+    // Что выбрано на старте: имя базы и признак «сервер».
     let chosen = Rc::new(RefCell::new((String::new(), false)));
     let shell = Rc::new(RefCell::new(Shell::demo()));
 
-    // Закрытие любого окна пользователем завершает приложение.
-    start.window().on_close_requested(quit_on_close);
-    login.window().on_close_requested(quit_on_close);
-    main.window().on_close_requested(quit_on_close);
+    // Закрытие окна пользователем завершает приложение.
+    app.window().on_close_requested(quit_on_close);
 
-    start.on_open({
-        let (start, login, main) = (start.as_weak(), login.as_weak(), main.as_weak());
+    app.on_open({
+        let app = app.as_weak();
         let (chosen, shell) = (chosen.clone(), shell.clone());
         move || {
-            let (Some(start), Some(login), Some(main)) =
-                (start.upgrade(), login.upgrade(), main.upgrade())
-            else {
+            let Some(app) = app.upgrade() else { return };
+            let recent = app.get_recent();
+            let Some(db) = index(app.get_selected_recent()).and_then(|i| recent.row_data(i)) else {
                 return;
             };
-            let recent = start.get_recent();
-            let server = start.get_mode() == 1;
-            let picked = index(start.get_selected_recent()).and_then(|i| recent.row_data(i));
-            let (name, path, protection) = picked
-                .map(|db| (db.name.to_string(), db.path.to_string(), db.protection))
-                .unwrap_or_default();
-            *chosen.borrow_mut() = (name.clone(), server);
-            let kind = login_kind(server, protection);
+            *chosen.borrow_mut() = (db.name.to_string(), db.server);
+            let kind = login_kind(db.server, db.protection);
             if kind == LoginKind::None {
-                *shell.borrow_mut() = open_main(&main, &name, server);
-                if main.show().is_ok() {
-                    let _ = start.hide();
-                }
+                *shell.borrow_mut() = open_main(&app, &db.name, db.server);
+                show_page(&app, PAGE_MAIN);
                 return;
             }
-            configure_login(&login, kind, &name, &path);
-            if login.show().is_ok() {
-                let _ = start.hide();
-            }
+            configure_login(&app, kind, &db.name, &db.path);
+            show_page(&app, PAGE_LOGIN);
         }
     });
 
-    login.on_submit({
-        let (login, main) = (login.as_weak(), main.as_weak());
+    app.on_submit({
+        let app = app.as_weak();
         let (chosen, shell) = (chosen.clone(), shell.clone());
         move || {
-            let (Some(login), Some(main)) = (login.upgrade(), main.upgrade()) else {
-                return;
-            };
+            let Some(app) = app.upgrade() else { return };
             // Проверку пароля сделает ядро (Engine API); пока пускаем без неё.
             let (name, server) = chosen.borrow().clone();
-            *shell.borrow_mut() = open_main(&main, &name, server);
-            if main.show().is_ok() {
-                let _ = login.hide();
-            }
+            *shell.borrow_mut() = open_main(&app, &name, server);
+            app.set_password("".into());
+            show_page(&app, PAGE_MAIN);
         }
     });
 
-    login.on_back({
-        let (start, login) = (start.as_weak(), login.as_weak());
+    app.on_back({
+        let app = app.as_weak();
         move || {
-            let (Some(start), Some(login)) = (start.upgrade(), login.upgrade()) else {
-                return;
-            };
-            if start.show().is_ok() {
-                let _ = login.hide();
-            }
+            let Some(app) = app.upgrade() else { return };
+            app.set_password("".into());
+            show_page(&app, PAGE_START);
         }
     });
 
-    main.on_nav_clicked({
-        let (main, shell) = (main.as_weak(), shell.clone());
+    app.on_create_confirmed({
+        let app = app.as_weak();
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            let db = new_database(
+                app.get_create_server(),
+                app.get_new_name().trim(),
+                app.get_new_folder().as_str(),
+                app.get_new_address().trim(),
+                app.get_new_protect_password(),
+                app.get_new_protect_users(),
+            );
+            // Ядро ещё не создаёт файл базы: добавляем строку в список, чтобы пройти весь путь.
+            let mut rows = vec![db];
+            rows.extend(app.get_recent().iter());
+            app.set_recent(ModelRc::new(VecModel::from(rows)));
+            app.set_selected_recent(0);
+            app.set_new_name("".into());
+            app.set_new_address("".into());
+            app.set_new_admin_login("".into());
+            app.set_new_admin_password("".into());
+            app.set_new_protect_password(false);
+            app.set_new_protect_users(false);
+            app.set_creating(false);
+        }
+    });
+
+    app.on_choose_folder({
+        let app = app.as_weak();
+        move || {
+            let app = app.clone();
+            // Системное окно выбора папки: ждём ответ, не блокируя интерфейс.
+            let _ = slint::spawn_local(async move {
+                let Some(folder) = rfd::AsyncFileDialog::new()
+                    .set_title("Папка для базы")
+                    .pick_folder()
+                    .await
+                else {
+                    return;
+                };
+                if let Some(app) = app.upgrade() {
+                    app.set_new_folder(short_home(&folder.path().to_string_lossy()).into());
+                }
+            });
+        }
+    });
+
+    app.on_theme_chosen({
+        let app = app.as_weak();
+        move |dark| {
+            let Some(app) = app.upgrade() else { return };
+            let settings = Settings {
+                dark,
+                radius: app.get_radius_mode(),
+            };
+            apply_settings(&app, settings);
+            settings.save();
+        }
+    });
+
+    app.on_radius_chosen({
+        let app = app.as_weak();
+        move |radius| {
+            let Some(app) = app.upgrade() else { return };
+            let settings = Settings {
+                dark: app.get_dark_theme(),
+                radius,
+            };
+            apply_settings(&app, settings);
+            settings.save();
+        }
+    });
+
+    app.on_choose_file({
+        let app = app.as_weak();
+        move || {
+            let app = app.clone();
+            let _ = slint::spawn_local(async move {
+                let Some(file) = rfd::AsyncFileDialog::new()
+                    .set_title("Файл базы")
+                    .add_filter("База данных", &["sqlite", "sqlite3", "db"])
+                    .pick_file()
+                    .await
+                else {
+                    return;
+                };
+                if let Some(app) = app.upgrade() {
+                    app.set_add_file(short_home(&file.path().to_string_lossy()).into());
+                }
+            });
+        }
+    });
+
+    app.on_add_confirmed({
+        let app = app.as_weak();
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            let db = existing_database(
+                app.get_add_server(),
+                app.get_add_file().trim(),
+                app.get_add_address().trim(),
+                app.get_add_name().trim(),
+            );
+            let mut rows = vec![db];
+            rows.extend(app.get_recent().iter());
+            app.set_recent(ModelRc::new(VecModel::from(rows)));
+            app.set_selected_recent(0);
+            app.set_add_file("".into());
+            app.set_add_address("".into());
+            app.set_add_name("".into());
+            app.set_adding(false);
+        }
+    });
+
+    app.on_nav_clicked({
+        let (app, shell) = (app.as_weak(), shell.clone());
         move |id| {
-            let Some(main) = main.upgrade() else { return };
+            let Some(app) = app.upgrade() else { return };
             if let Some(id) = index(id) {
                 shell.borrow_mut().click(id);
             }
-            refresh(&main, &shell.borrow());
+            refresh(&app, &shell.borrow());
         }
     });
 
-    main.on_tab_selected({
-        let (main, shell) = (main.as_weak(), shell.clone());
+    app.on_tab_selected({
+        let (app, shell) = (app.as_weak(), shell.clone());
         move |tab| {
-            let Some(main) = main.upgrade() else { return };
+            let Some(app) = app.upgrade() else { return };
             if let Some(tab) = index(tab) {
                 shell.borrow_mut().select_tab(tab);
             }
-            refresh(&main, &shell.borrow());
+            refresh(&app, &shell.borrow());
         }
     });
 
-    main.on_tab_closed({
-        let (main, shell) = (main.as_weak(), shell);
+    app.on_tab_closed({
+        let (app, shell) = (app.as_weak(), shell);
         move |tab| {
-            let Some(main) = main.upgrade() else { return };
+            let Some(app) = app.upgrade() else { return };
             if let Some(tab) = index(tab) {
                 shell.borrow_mut().close_tab(tab);
             }
-            refresh(&main, &shell.borrow());
+            refresh(&app, &shell.borrow());
         }
     });
 
-    start.show()?;
+    app.show()?;
     slint::run_event_loop_until_quit()
 }
 
