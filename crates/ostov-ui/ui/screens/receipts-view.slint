@@ -3,7 +3,9 @@ import { Button, ButtonKind } from "../components/button.slint";
 import { Chip, ChipKind } from "../components/chip.slint";
 import { TextField } from "../components/text-field.slint";
 import { Select } from "../components/select.slint";
-import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
+import { DateField } from "../components/date-field.slint";
+import { MenuAction } from "../components/context-menu.slint";
+import { ErpGrid, GridColumn, GridMark, GridRow } from "../components/erp-grid.slint";
 
 // Данные и события экрана «Поступления»: список и форма документа.
 // Состояние ведёт Rust (src/receipts_ui.rs), здесь только свойства и колбэки.
@@ -12,7 +14,11 @@ export global ReceiptsData {
     in property <[GridColumn]> columns;
     in property <[GridRow]> rows;
     in property <int> total;
+    // Загрузка списка из ядра и текст ошибки (пусто: ошибки нет).
+    in property <bool> list-loading;
+    in property <string> list-error;
     in property <int> milestone-step;
+    in property <[GridMark]> marks;
     in property <int> sort-column: -1;
     in property <bool> sort-desc;
     in-out property <int> selected-row: -1;
@@ -25,6 +31,14 @@ export global ReceiptsData {
     callback resize-begin-lines();
     callback resize-lines(int, length, length);
     callback resize-end-lines();
+    // Меню строки списка: Rust выставляет пункты под строку в menu-opening, действие приходит в action.
+    in property <[MenuAction]> menu-actions;
+    callback menu-opening(int);
+    callback action(int, string);
+    // Подтверждение удаления документа.
+    in-out property <bool> confirm-open;
+    in property <string> confirm-text;
+    callback confirm-accepted();
     callback create();
     callback query-changed(string);
 
@@ -32,7 +46,9 @@ export global ReceiptsData {
     in property <string> form-title;
     in property <bool> form-posted;
     in-out property <string> form-number;
-    in-out property <string> form-date;
+    in-out property <int> form-day: 1;
+    in-out property <int> form-month: 1;
+    in-out property <int> form-year: 2026;
     in-out property <string> form-warehouse;
     in-out property <string> form-supplier;
     in property <[GridColumn]> line-columns;
@@ -44,6 +60,20 @@ export global ReceiptsData {
     in property <[string]> suppliers;
     in property <[string]> goods;
     in-out property <int> line-selected: -1;
+    // Меню строки табличной части.
+    in property <[MenuAction]> line-menu-actions;
+    callback line-menu-opening(int);
+    callback line-action(int, string);
+    // Окно нового элемента справочника («+ Добавить» в выпадающем списке): kind 0 склад,
+    // 1 поставщик, 2 номенклатура.
+    in-out property <bool> catalog-open;
+    in property <string> catalog-title;
+    in property <bool> catalog-has-unit;
+    in-out property <string> catalog-name;
+    in-out property <string> catalog-unit;
+    in property <string> catalog-error;
+    callback catalog-add(int);
+    callback catalog-confirm();
     // Окно строки табличной части
     in-out property <bool> line-open;
     in property <string> line-title;
@@ -60,6 +90,10 @@ export global ReceiptsData {
     callback form-post(bool);
     callback form-save();
     callback form-close();
+    // Отдельное окно: документ в своём окне (detached) или во вкладке главного окна.
+    in-out property <bool> detached;
+    callback form-detach();
+    callback form-dock();
 }
 
 component ReceiptList inherits VerticalLayout {
@@ -96,8 +130,12 @@ component ReceiptList inherits VerticalLayout {
         vertical-stretch: 1;
         columns: ReceiptsData.columns;
         rows: ReceiptsData.rows;
-        empty-text: "Ничего не найдено";
+        empty-text: ReceiptsData.list-loading ? "Загрузка…" : ReceiptsData.list-error != "" ? ReceiptsData.list-error : "Ничего не найдено";
         milestone-step: ReceiptsData.milestone-step;
+        marks: ReceiptsData.marks;
+        actions: ReceiptsData.menu-actions;
+        menu-opening(i) => { ReceiptsData.menu-opening(i); }
+        action-chosen(i, id) => { ReceiptsData.action(i, id); }
         sort-column: ReceiptsData.sort-column;
         sort-desc: ReceiptsData.sort-desc;
         selected-row <=> ReceiptsData.selected-row;
@@ -145,6 +183,16 @@ component ReceiptForm inherits VerticalLayout {
         Button { text: "Провести"; clicked => { ReceiptsData.form-post(false); } }
         Button { text: "Записать"; clicked => { ReceiptsData.form-save(); } }
         Rectangle { }
+        if !ReceiptsData.detached : Button {
+            text: "В отдельное окно";
+            kind: ButtonKind.text;
+            clicked => { ReceiptsData.form-detach(); }
+        }
+        if ReceiptsData.detached : Button {
+            text: "Вернуть во вкладки";
+            kind: ButtonKind.text;
+            clicked => { ReceiptsData.form-dock(); }
+        }
         Button { text: "Закрыть"; kind: ButtonKind.text; clicked => { ReceiptsData.form-close(); } }
     }
     Rectangle {
@@ -157,9 +205,29 @@ component ReceiptForm inherits VerticalLayout {
             padding: Theme.space-16;
             spacing: Theme.space-16;
             TextField { width: 100px; label: "Номер"; read-only: true; text <=> ReceiptsData.form-number; }
-            TextField { width: 140px; label: "Дата"; text <=> ReceiptsData.form-date; }
-            Select { width: 180px; label: "Склад"; options: ReceiptsData.warehouses; text <=> ReceiptsData.form-warehouse; }
-            Select { horizontal-stretch: 1; label: "Поставщик"; options: ReceiptsData.suppliers; text <=> ReceiptsData.form-supplier; }
+            DateField {
+                width: 140px;
+                label: "Дата";
+                day <=> ReceiptsData.form-day;
+                month <=> ReceiptsData.form-month;
+                year <=> ReceiptsData.form-year;
+            }
+            Select {
+                width: 180px;
+                label: "Склад";
+                options: ReceiptsData.warehouses;
+                addable: true;
+                text <=> ReceiptsData.form-warehouse;
+                add-requested => { ReceiptsData.catalog-add(0); }
+            }
+            Select {
+                horizontal-stretch: 1;
+                label: "Поставщик";
+                options: ReceiptsData.suppliers;
+                addable: true;
+                text <=> ReceiptsData.form-supplier;
+                add-requested => { ReceiptsData.catalog-add(1); }
+            }
         }
     }
     HorizontalLayout {
@@ -190,6 +258,9 @@ component ReceiptForm inherits VerticalLayout {
         rows: ReceiptsData.lines;
         empty-text: "Товаров пока нет: нажмите «Добавить»";
         selected-row <=> ReceiptsData.line-selected;
+        actions: ReceiptsData.line-menu-actions;
+        menu-opening(i) => { ReceiptsData.line-menu-opening(i); }
+        action-chosen(i, id) => { ReceiptsData.line-action(i, id); }
         resize-begin => { ReceiptsData.resize-begin-lines(); }
         resize-column(i, delta, width) => { ReceiptsData.resize-lines(i, delta, width); }
         resize-end => { ReceiptsData.resize-end-lines(); }
@@ -242,7 +313,9 @@ component LineDialog inherits Rectangle {
             Select {
                 label: "Номенклатура";
                 options: ReceiptsData.goods;
+                addable: true;
                 text <=> ReceiptsData.line-name;
+                add-requested => { ReceiptsData.catalog-add(2); }
             }
             HorizontalLayout {
                 spacing: Theme.space-12;
@@ -281,11 +354,116 @@ component LineDialog inherits Rectangle {
     }
 }
 
+// Окно нового элемента справочника: наименование (для номенклатуры ещё единица).
+component CatalogDialog inherits Rectangle {
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(400px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+            Text {
+                text: ReceiptsData.catalog-title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            TextField {
+                label: "Наименование";
+                text <=> ReceiptsData.catalog-name;
+            }
+            if ReceiptsData.catalog-has-unit : TextField {
+                label: "Единица измерения";
+                placeholder: "шт, кг, л";
+                text <=> ReceiptsData.catalog-unit;
+            }
+            if ReceiptsData.catalog-error != "" : Text {
+                text: ReceiptsData.catalog-error;
+                font-size: Theme.font-caption;
+                color: Theme.danger;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { ReceiptsData.catalog-open = false; } }
+                Button {
+                    text: "Создать";
+                    kind: ButtonKind.primary;
+                    clicked => { ReceiptsData.catalog-confirm(); }
+                }
+            }
+        }
+    }
+}
+
+// Подтверждение удаления документа из списка.
+component ConfirmDialog inherits Rectangle {
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(420px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+            Text {
+                text: "Удалить документ?";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Text {
+                text: ReceiptsData.confirm-text;
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { ReceiptsData.confirm-open = false; } }
+                Button {
+                    text: "Удалить";
+                    kind: ButtonKind.primary;
+                    clicked => { ReceiptsData.confirm-accepted(); }
+                }
+            }
+        }
+    }
+}
+
 // Вкладка «Поступления товаров»: только список; документ открывается в своей вкладке.
 export component ReceiptsView inherits Rectangle {
     background: Theme.bg;
 
     ReceiptList {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+    if ReceiptsData.confirm-open : ConfirmDialog {
         x: 0px;
         y: 0px;
         width: parent.width;
@@ -304,6 +482,12 @@ export component ReceiptFormView inherits Rectangle {
         height: parent.height;
     }
     if ReceiptsData.line-open : LineDialog {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+    if ReceiptsData.catalog-open : CatalogDialog {
         x: 0px;
         y: 0px;
         width: parent.width;

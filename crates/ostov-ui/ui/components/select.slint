@@ -4,13 +4,17 @@ import { ListView } from "std-widgets.slint";
 
 // Выпадающий список для значений из справочника или перечисления (склад, поставщик, товар).
 // Поле как у TextField, список раскрывается под ним; выбранное значение попадает в `text`.
+// addable: внизу закреплена строка «+ Добавить» (новый элемент справочника, сам элемент
+// создаёт владелец по add-requested). У перечислений её нет: набор значений задаёт конфигурация.
 export component Select inherits VerticalLayout {
     in property <string> label;
     in property <string> placeholder: "Выберите…";
     in property <[string]> options;
     in property <bool> enabled: true;
+    in property <bool> addable: false;
     in-out property <string> text;
     callback selected(string);
+    callback add-requested();
 
     spacing: Theme.space-4;
 
@@ -56,7 +60,7 @@ export component Select inherits VerticalLayout {
             x: 0px;
             y: field.height + 2px;
             width: field.width;
-            height: min(240px, root.options.length * 32px + 8px);
+            height: min(260px, root.options.length * 32px + 8px + (root.addable ? 37px : 0px));
             close-policy: PopupClosePolicy.close-on-click-outside;
 
             Rectangle {
@@ -65,9 +69,15 @@ export component Select inherits VerticalLayout {
                 border-color: Theme.border-strong;
                 background: Theme.surface;
 
+                // Отступ 4 px от рамки: подсветка пункта не должна перекрывать контур списка.
                 ListView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px - (root.addable ? 37px : 0px);
                     for option in root.options : Rectangle {
                         height: 32px;
+                        border-radius: Shape.control-radius;
                         background: option-touch.has-hover ? Theme.accent-soft : transparent;
                         HorizontalLayout {
                             padding-left: Theme.space-12;
@@ -91,6 +101,50 @@ export component Select inherits VerticalLayout {
                                 root.text = option;
                                 root.selected(option);
                                 popup.close();
+                            }
+                        }
+                    }
+                }
+
+                if root.addable : Rectangle {
+                    x: 4px;
+                    y: parent.height - 4px - 36px;
+                    width: parent.width - 8px;
+                    height: 36px;
+
+                    Rectangle {
+                        x: Theme.space-8;
+                        y: 0px;
+                        width: parent.width - 2 * Theme.space-8;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    Rectangle {
+                        y: 5px;
+                        height: 32px;
+                        border-radius: Shape.control-radius;
+                        background: add-touch.has-hover ? Theme.accent-soft : transparent;
+                        HorizontalLayout {
+                            padding-left: Theme.space-12;
+                            padding-right: Theme.space-12;
+                            spacing: Theme.space-8;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon { name: "plus"; tint: Theme.accent-text; width: 16px; height: 16px; }
+                            }
+                            Text {
+                                text: "Добавить";
+                                font-size: Theme.font-body;
+                                font-weight: 600;
+                                color: Theme.accent-text;
+                                vertical-alignment: center;
+                            }
+                        }
+                        add-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                popup.close();
+                                root.add-requested();
                             }
                         }
                     }

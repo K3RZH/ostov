@@ -7,8 +7,10 @@ import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
+import { ReceiptFormView } from "screens/receipts-view.slint";
 
-// Единственное окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная).
+// Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 3 это
+// отдельное окно документа, вынесенного из вкладки: только форма, остальное не создаётся.
 // Раньше было три окна, которые прятали и показывали по очереди: на GNOME/Wayland после этого
 // оставались невидимые окна. Размер окна при смене страницы задаёт Rust (src/app.rs).
 export component AppWindow inherits Window {
@@ -103,14 +105,18 @@ export component AppWindow inherits Window {
     callback nav-clicked <=> main-page.nav-clicked;
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
+    callback tab-detached <=> main-page.tab-detached;
+    // Страница 3 (окно документа): заголовок окна.
+    in property <string> doc-title;
 
     title: root.page == 0 ? "Ostov — Выбор базы"
         : root.page == 1 ? "Ostov — " + login-page.heading
+        : root.page == 3 ? root.doc-title + " — Ostov"
         : "Ostov — " + main-page.base-name;
     preferred-width: 1200px;
     preferred-height: 760px;
-    min-width: root.page == 2 ? 1000px : 960px;
-    min-height: root.page == 0 ? 720px : 600px;
+    min-width: root.page == 2 ? 1000px : root.page == 3 ? 760px : 960px;
+    min-height: root.page == 0 ? 720px : root.page == 3 ? 520px : 600px;
     default-font-family: "Open Sans";
     background: Theme.bg;
 
@@ -144,6 +150,13 @@ export component AppWindow inherits Window {
         visible: root.page == 2;
         settings-clicked => { root.settings-open = true; }
         user-add-clicked => { root.adding-user = true; }
+    }
+
+    if root.page == 3 : ReceiptFormView {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
     }
 
     if root.creating && root.page == 0 : CreateDialog {

@@ -3,6 +3,7 @@ import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { UsersView, UserRow } from "users-view.slint";
 import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
+import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 
 // Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
 export struct NavRow {
@@ -88,6 +89,10 @@ component TabView inherits Rectangle {
     in property <bool> active;
     callback selected();
     callback closed();
+    // Правая кнопка: координаты нажатия в окне.
+    callback context(length, length);
+    // Вкладку потянули вниз или вверх от панели: вынести в отдельное окно.
+    callback detach();
 
     // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
     callback scrolled(length);
@@ -101,12 +106,30 @@ component TabView inherits Rectangle {
         background: Theme.accent;
     }
 
+    private property <length> press-y;
+    private property <bool> dragged;
+
     TouchArea {
         mouse-cursor: pointer;
         clicked => { root.selected(); }
         scroll-event(event) => {
             root.scrolled(event.delta-y + event.delta-x);
             accept
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.press-y = self.mouse-y;
+                root.dragged = false;
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        moved => {
+            // Вытаскивание: вкладку увели от панели больше чем на 48 px по вертикали.
+            if (self.pressed && !root.dragged && abs(self.mouse-y - root.press-y) > 48px) {
+                root.dragged = true;
+                root.detach();
+            }
         }
     }
 
@@ -175,7 +198,13 @@ export component MainPage inherits Rectangle {
     callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
+    callback tab-detached(int);
     callback settings-clicked();
+
+    // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
+    private property <length> tab-menu-x;
+    private property <length> tab-menu-y;
+    private property <int> tab-menu-index: -1;
 
     private property <length> tab-min: 140px;
     private property <length> tab-max: 240px;
@@ -374,6 +403,13 @@ export component MainPage inherits Rectangle {
                                 active: i == root.active-tab;
                                 selected => { root.tab-selected(i); }
                                 closed => { root.tab-closed(i); }
+                                detach => { root.tab-detached(i); }
+                                context(ax, ay) => {
+                                    root.tab-menu-index = i;
+                                    root.tab-menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
+                                    root.tab-menu-y = ay - root.absolute-position.y + 4px;
+                                    tab-menu.show();
+                                }
                                 scrolled(delta) => { root.scroll-tabs(delta); }
                             }
                         }
@@ -441,6 +477,31 @@ export component MainPage inherits Rectangle {
                 VerticalLayout { alignment: center; Icon { name: "user"; tint: Theme.text-muted; width: 14px; height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.user-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
                 VerticalLayout { alignment: center; Text { text: root.app-version; font-size: Theme.font-caption; color: Theme.text-muted; } }
+            }
+        }
+    }
+
+    // Меню вкладки: вынести документ в отдельное окно (документы), закрыть.
+    tab-menu := PopupWindow {
+        x: root.tab-menu-x;
+        y: root.tab-menu-y;
+        width: MenuMetrics.width;
+        height: MenuMetrics.height(2);
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        MenuPanel {
+            actions: [
+                { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
+                  enabled: root.tab-menu-index >= 0 && root.tab-menu-index < root.tabs.length && root.tabs[root.tab-menu-index].view == "receipt", divider: false },
+                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
+            ];
+            chosen(id) => {
+                if (id == "detach") {
+                    root.tab-detached(root.tab-menu-index);
+                } else if (id == "close") {
+                    root.tab-closed(root.tab-menu-index);
+                }
+                tab-menu.close();
             }
         }
     }

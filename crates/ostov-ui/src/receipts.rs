@@ -3,6 +3,8 @@
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
+    /// Идентификатор в ядре (`Row::id`); у ещё не записанного документа 0.
+    pub id: i64,
     pub number: u32,
     /// Дата как (год, месяц, день): так сортировка совпадает с календарной.
     pub date: (u16, u8, u8),
@@ -11,6 +13,8 @@ pub struct Receipt {
     /// Сумма в копейках: деньги не храним дробным числом.
     pub amount: i64,
     pub posted: bool,
+    /// Помечен на удаление: окончательно удаляется отдельным действием.
+    pub deleted: bool,
     /// Строки документа; `None`: ещё не открывали (покажем примерные).
     pub lines: Option<Vec<Line>>,
 }
@@ -73,6 +77,7 @@ pub fn demo(count: u32) -> Vec<Receipt> {
         .map(|i| {
             let r = next();
             Receipt {
+                id: i64::from(count - i),
                 number: count - i,
                 date: (
                     2026,
@@ -83,6 +88,7 @@ pub fn demo(count: u32) -> Vec<Receipt> {
                 warehouse: WAREHOUSES[usize::try_from((r >> 32) % 3).unwrap_or(0)].to_owned(),
                 amount: i64::try_from((r >> 40) % 9_000_000).unwrap_or(0) + 10_000,
                 posted: (r >> 60) % 4 != 0,
+                deleted: false,
                 lines: None,
             }
         })
@@ -108,7 +114,9 @@ pub fn date_text(date: (u16, u8, u8)) -> String {
 
 impl Receipt {
     pub fn status(&self) -> &'static str {
-        if self.posted {
+        if self.deleted {
+            "К удалению"
+        } else if self.posted {
             "Проведён"
         } else {
             "Черновик"
@@ -242,10 +250,10 @@ pub fn quantity(tenths: i64) -> String {
 
 impl Line {
     /// Строка из введённых данных: сумма это цена, умноженная на количество.
-    pub fn new(name: &str, quantity_tenths: i64, price: i64) -> Self {
+    pub fn new(name: &str, unit: &str, quantity_tenths: i64, price: i64) -> Self {
         Self {
             name: name.to_owned(),
-            unit: unit_of(name).to_owned(),
+            unit: unit.to_owned(),
             quantity_tenths,
             price,
             amount: price * quantity_tenths / 10,

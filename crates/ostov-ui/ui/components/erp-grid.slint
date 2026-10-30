@@ -1,13 +1,18 @@
 import { Theme, Shape } from "../theme.slint";
 import { Icon } from "icon.slint";
 import { Chip, ChipKind } from "chip.slint";
+import { MenuAction, MenuMetrics, MenuPanel } from "context-menu.slint";
 import { ListView } from "std-widgets.slint";
 
 // flex: главная колонка, забирает свободную ширину (у неё width это минимум).
 // right: числа и суммы выравниваются вправо. status: значение показывается чипом статуса.
 export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool }
-// muted: строка приглушена (например помечена на удаление).
-export struct GridRow { cells: [string], muted: bool }
+// muted: строка приглушена (например помечена на удаление). milestone: на строке своя веха.
+export struct GridRow { cells: [string], muted: bool, milestone: bool }
+
+// Своя веха: номер строки (с нуля) и наименование объекта (стандартное поле, у поступлений
+// это поставщик), оно показывается в подсказке отметки.
+export struct GridMark { row: int, label: string }
 
 // Ширина полосы прокрутки: шапка и строки отступают на неё поровну, чтобы колонки совпадали.
 global GridMetrics {
@@ -44,6 +49,8 @@ component HeaderCell inherits Rectangle {
         padding-right: Theme.space-12;
         spacing: Theme.space-4;
         if root.spec.right : Rectangle { }
+        // У колонки слева подпись занимает всё место, и значок сортировки стоит у правого края
+        // (у числовой колонки подпись прижата вправо, значок сразу за ней).
         Text {
             text: root.spec.title;
             font-size: Theme.font-caption;
@@ -51,15 +58,15 @@ component HeaderCell inherits Rectangle {
             color: Theme.text;
             vertical-alignment: center;
             overflow: elide;
+            horizontal-stretch: root.spec.right ? 0 : 1;
         }
         if root.sorted : VerticalLayout {
             alignment: center;
             Icon {
-                name: "chevron-down";
+                name: root.desc ? "sort-desc" : "sort-asc";
                 tint: Theme.accent-text;
                 width: 16px;
                 height: 16px;
-                transform-rotation: root.desc ? 0deg : 180deg;
             }
         }
     }
@@ -102,12 +109,56 @@ component HeaderCell inherits Rectangle {
     }
 }
 
+// Отметка на полосе прокрутки: черта, при наведении подсказка с номером строки, клик
+// прокручивает к строке. Своя веха заметнее: длиннее, толще, цвет акцента.
+component TrackTick inherits Rectangle {
+    in property <int> number;
+    in property <bool> mine;
+    in property <string> label;
+    callback jump();
+
+    width: GridMetrics.track-width;
+    height: 9px;
+
+    Rectangle {
+        x: 2px;
+        y: (parent.height - self.height) / 2;
+        width: root.mine ? 10px : 6px;
+        height: root.mine ? 2px : 1px;
+        background: root.mine ? Theme.accent-text : Theme.border-strong;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.jump(); }
+    }
+
+    if touch.has-hover : Rectangle {
+        width: tip.preferred-width + 16px;
+        height: 24px;
+        x: -self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        border-radius: Shape.control-radius;
+        background: Theme.text;
+        tip := Text {
+            text: (root.mine ? "Веха · строка " : "Строка ") + root.number
+                + (root.label != "" ? " · " + root.label : "");
+            font-size: Theme.font-caption;
+            color: Theme.bg;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
 component GridRowView inherits Rectangle {
     in property <GridRow> item;
     in property <[GridColumn]> columns;
     in property <bool> selected;
     callback clicked();
     callback activated();
+    // Правая кнопка: координаты нажатия в окне.
+    callback context(length, length);
 
     height: Theme.row-height;
     background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
@@ -121,6 +172,11 @@ component GridRowView inherits Rectangle {
     touch := TouchArea {
         clicked => { root.clicked(); }
         double-clicked => { root.activated(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
 
     HorizontalLayout {
@@ -128,17 +184,28 @@ component GridRowView inherits Rectangle {
             horizontal-stretch: col.flex ? 1 : 0;
             min-width: col.width;
             max-width: col.flex ? 100000px : col.width;
-            if !col.status : Text {
-                x: Theme.space-12;
-                width: parent.width - 2 * Theme.space-12;
-                height: parent.height;
-                text: root.item.cells[i];
-                font-size: Theme.font-body;
-                font-weight: root.selected ? 600 : 400;
-                color: root.item.muted ? Theme.disabled-text : Theme.text;
-                horizontal-alignment: col.right ? right : left;
-                vertical-alignment: center;
-                overflow: elide;
+            if !col.status : Rectangle {
+                cell-text := Text {
+                    x: Theme.space-12;
+                    width: parent.width - 2 * Theme.space-12;
+                    height: parent.height;
+                    text: root.item.cells[i];
+                    font-size: Theme.font-body;
+                    font-weight: root.selected ? 600 : 400;
+                    color: root.item.muted ? Theme.disabled-text : Theme.text;
+                    horizontal-alignment: col.right ? right : left;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                // По макету вертикальных линий в теле нет: черта на границе колонки появляется
+                // только в строках, где текст обрезан «…» или почти упирается в границу.
+                if i < root.columns.length - 1 && cell-text.preferred-width > cell-text.width - Theme.space-4 : Rectangle {
+                    x: parent.width - 1px;
+                    y: (parent.height - self.height) / 2;
+                    width: 1px;
+                    height: 20px;
+                    background: Theme.border-strong;
+                }
             }
             if col.status : Chip {
                 x: Theme.space-12;
@@ -164,7 +231,16 @@ export component ErpGrid inherits Rectangle {
     in property <bool> sort-desc;
     // Шаг вех в строках (0: без вех). Для длинных списков задаёт вызывающий.
     in property <int> milestone-step: 0;
+    // Свои вехи пользователя: отметки на полосе прокрутки.
+    // marks: вехи (строка с нуля и наименование); у самих строк тоже стоит `milestone`.
+    in property <[GridMark]> marks;
+    // Меню строки по правой кнопке: перед показом вызывается menu-opening(строка), владелец
+    // выставляет `actions` под эту строку (подписи и доступность зависят от её состояния).
+    // Пустой список: меню не показывается.
+    in property <[MenuAction]> actions;
     in-out property <int> selected-row: -1;
+    callback menu-opening(int);
+    callback action-chosen(int, string);
     callback sort-clicked(int);
     callback row-activated(int);
     // Ширина колонки меняется на каждом движении ручки: начало, смещение от точки нажатия
@@ -182,6 +258,10 @@ export component ErpGrid inherits Rectangle {
 
     // Какая колонка меняет ширину сейчас (подсвечивается).
     private property <int> drag-index: -1;
+    // Меню строки: куда открыть и для какой строки.
+    private property <length> menu-x;
+    private property <length> menu-y;
+    private property <int> menu-row: -1;
 
     VerticalLayout {
         Rectangle {
@@ -236,6 +316,20 @@ export component ErpGrid inherits Rectangle {
                     selected: i == root.selected-row;
                     clicked => { root.selected-row = i; }
                     activated => { root.row-activated(i); }
+                    context(ax, ay) => {
+                        root.selected-row = i;
+                        root.menu-row = i;
+                        root.menu-opening(i);
+                        if (root.actions.length > 0) {
+                            // Не помещается снизу: открываем вверх от точки нажатия.
+                            root.menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
+                            root.menu-y = ay - root.absolute-position.y + MenuMetrics.height(root.actions.length) > root.height
+                                && ay - root.absolute-position.y - MenuMetrics.height(root.actions.length) >= 0
+                                ? ay - root.absolute-position.y - MenuMetrics.height(root.actions.length)
+                                : ay - root.absolute-position.y;
+                            menu.show();
+                        }
+                    }
                 }
             }
 
@@ -255,21 +349,20 @@ export component ErpGrid inherits Rectangle {
                 private property <length> drag-start-y;
                 private property <length> drag-start-offset;
 
+                // Где на полосе стоит центр ползунка, когда строка `number` (с 1) стоит наверху:
+                // ровно туда прыгает ползунок по клику, поэтому отметка совпадает с ним.
+                pure function tick-y(number: int) -> length {
+                    return self.thumb-height / 2
+                        + min(1, (number - 1) * Theme.row-height / max(1px, self.scroll-range)) * self.thumb-free;
+                }
+                function jump-to(number: int) {
+                    list.content-y = -min(self.scroll-range, (number - 1) * Theme.row-height);
+                }
+
                 Rectangle {
                     x: 0px;
                     width: 1px;
                     background: Theme.border;
-                }
-
-                // Вехи: отметки через равные промежутки строк, по ним удобно прыгать ползунком.
-                if root.milestone-step > 0 && track.scroll-range > 0 : Rectangle {
-                    for k in Math.floor(root.rows.length / root.milestone-step) : Rectangle {
-                        x: 2px;
-                        y: ((k + 1) * root.milestone-step / root.rows.length) * track.height;
-                        width: 6px;
-                        height: 1px;
-                        background: Theme.border-strong;
-                    }
                 }
 
                 // Клик по полосе: ползунок прыгает к этому месту.
@@ -277,6 +370,25 @@ export component ErpGrid inherits Rectangle {
                     enabled: track.scroll-range > 0;
                     clicked => {
                         list.content-y = -min(track.scroll-range, max(0px, (self.mouse-y - track.thumb-height / 2) / track.thumb-free * track.scroll-range));
+                    }
+                }
+
+                // Вехи через равные промежутки строк (шаг задаёт вызывающий) и свои вехи
+                // пользователя; подсказка у каждой показывает номер строки.
+                if root.milestone-step > 0 && track.scroll-range > 0 : Rectangle {
+                    for k in Math.floor(root.rows.length / root.milestone-step) : TrackTick {
+                        y: track.tick-y((k + 1) * root.milestone-step) - self.height / 2;
+                        number: (k + 1) * root.milestone-step;
+                        jump => { track.jump-to(self.number); }
+                    }
+                }
+                if track.scroll-range > 0 : Rectangle {
+                    for mark in root.marks : TrackTick {
+                        y: track.tick-y(mark.row + 1) - self.height / 2;
+                        number: mark.row + 1;
+                        label: mark.label;
+                        mine: true;
+                        jump => { track.jump-to(self.number); }
                     }
                 }
 
@@ -326,4 +438,20 @@ export component ErpGrid inherits Rectangle {
         }
     }
 
+    // Меню строки по правой кнопке мыши.
+    menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: MenuMetrics.width;
+        height: MenuMetrics.height(root.actions.length);
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        MenuPanel {
+            actions: root.actions;
+            chosen(id) => {
+                root.action-chosen(root.menu-row, id);
+                menu.close();
+            }
+        }
+    }
 }

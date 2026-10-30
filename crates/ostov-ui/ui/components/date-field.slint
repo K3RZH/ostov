@@ -1,0 +1,335 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { WheelList } from "wheel-list.slint";
+
+// Календарные вычисления: чистые функции без состояния.
+global DateMath {
+    out property <[string]> months: ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+    out property <[string]> weekdays: ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+    pure public function days-in(year: int, month: int) -> int {
+        if (month == 2) {
+            return (Math.mod(year, 4) == 0 && Math.mod(year, 100) != 0) || Math.mod(year, 400) == 0 ? 29 : 28;
+        }
+        return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+    }
+
+    // Номер дня недели первого числа месяца, 0 = понедельник (формула Сакамото).
+    pure public function first-weekday(year: int, month: int) -> int {
+        return Math.round(Math.mod(Math.mod(
+            (month < 3 ? year - 1 : year) + Math.floor((month < 3 ? year - 1 : year) / 4)
+            - Math.floor((month < 3 ? year - 1 : year) / 100) + Math.floor((month < 3 ? year - 1 : year) / 400)
+            + [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4][month - 1] + 1, 7) + 6, 7));
+    }
+
+    pure public function two(n: int) -> string {
+        return n < 10 ? "0" + n : "" + n;
+    }
+}
+
+// Часть даты в поле (день, месяц или год): нажатие открывает редактор именно этой части.
+component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    background: root.active ? Theme.accent-soft : touch.has-hover && root.enabled ? Theme.surface-alt : transparent;
+    border-radius: Shape.control-radius - 2px;
+    width: label.preferred-width + 6px;
+    height: 24px;
+
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        color: !root.enabled ? Theme.disabled-text : root.active ? Theme.accent-text : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Ячейка дня в календаре.
+component DayCell inherits Rectangle {
+    in property <int> number;
+    in property <bool> inside;
+    in property <bool> selected;
+    callback clicked();
+
+    if root.inside : Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: Shape.control-radius;
+        background: root.selected ? Theme.accent : touch.has-hover ? Theme.accent-soft : transparent;
+        Text {
+            text: root.number;
+            font-size: Theme.font-body;
+            font-weight: root.selected ? 600 : 400;
+            color: root.selected ? Theme.on-accent : Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        touch := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Панель выбора под полем: шапка и тело одной высоты (292 px) в трёх режимах. Вынесена из
+// всплывающего окна, чтобы её можно было показать и проверить отдельно.
+export component DatePanel inherits Rectangle {
+    in property <int> year-min: 1990;
+    in property <int> year-max: 2060;
+    in-out property <int> day: 1;
+    in-out property <int> month: 1;
+    in-out property <int> year: 2026;
+    // Что сейчас выбирают: 0 день, 1 месяц, 2 год.
+    in-out property <int> mode: 0;
+    callback edited();
+    // День выбран окончательно: владелец закрывает панель.
+    callback day-picked();
+
+    border-radius: Shape.control-radius;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    background: Theme.surface;
+
+    // Месяц и год меняют число дней: день не должен выйти за конец месяца.
+    function set-month(new-year: int, new-month: int) {
+        root.year = new-year;
+        root.month = new-month;
+        root.day = min(root.day, DateMath.days-in(new-year, new-month));
+        root.edited();
+    }
+    function shift-month(delta: int) {
+        if (root.month + delta < 1) {
+            if (root.year > root.year-min) { root.set-month(root.year - 1, 12); }
+        } else if (root.month + delta > 12) {
+            if (root.year < root.year-max) { root.set-month(root.year + 1, 1); }
+        } else {
+            root.set-month(root.year, root.month + delta);
+        }
+    }
+
+
+    // Шапка: стрелки листают месяц (только в режиме дней), название месяца и год
+    // переключают режим; повторное нажатие возвращает к дням.
+    HorizontalLayout {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: 32px;
+        spacing: Theme.space-4;
+        Rectangle {
+            width: 32px;
+            background: prev.has-hover && root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            if root.mode == 0 : Icon {
+                name: "chevron-left";
+                tint: Theme.text;
+                width: 16px;
+                height: 16px;
+            }
+            prev := TouchArea {
+                enabled: root.mode == 0;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.shift-month(-1); }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            background: month-touch.has-hover || root.mode == 1 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: DateMath.months[root.month - 1];
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 1 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            month-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = root.mode == 1 ? 0 : 1; }
+            }
+        }
+        Rectangle {
+            width: 64px;
+            background: year-touch.has-hover || root.mode == 2 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: root.year;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 2 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            year-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = root.mode == 2 ? 0 : 2; }
+            }
+        }
+        Rectangle {
+            width: 32px;
+            background: next.has-hover && root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            if root.mode == 0 : Icon {
+                name: "chevron-right";
+                tint: Theme.text;
+                width: 16px;
+                height: 16px;
+            }
+            next := TouchArea {
+                enabled: root.mode == 0;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.shift-month(1); }
+            }
+        }
+    }
+
+    // Тело: календарь дней или колесо месяцев или годов, одной высоты (232 px).
+    body := Rectangle {
+        x: 8px;
+        y: 48px;
+        width: parent.width - 16px;
+        height: 232px;
+        clip: true;
+
+        if root.mode == 0 : Rectangle {
+            HorizontalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: 28px;
+                for name in DateMath.weekdays : Text {
+                    text: name;
+                    font-size: Theme.font-caption;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            // Сетка 6 недель по 7 дней; ячейки вне месяца не показываются.
+            for k in 42 : DayCell {
+                x: Math.mod(k, 7) * (parent.width / 7);
+                y: 28px + Math.floor(k / 7) * 34px;
+                width: parent.width / 7;
+                height: 34px;
+                number: k - DateMath.first-weekday(root.year, root.month) + 1;
+                inside: self.number >= 1 && self.number <= DateMath.days-in(root.year, root.month);
+                selected: self.number == root.day;
+                clicked => {
+                    root.day = self.number;
+                    root.edited();
+                    root.day-picked();
+                }
+            }
+        }
+
+        if root.mode == 1 : WheelList {
+            items: DateMath.months;
+            index: root.month - 1;
+            moved(target) => { root.set-month(root.year, target + 1); }
+            picked(target) => {
+                root.set-month(root.year, target + 1);
+                root.mode = 0;
+            }
+        }
+
+        if root.mode == 2 : WheelList {
+            count: root.year-max - root.year-min + 1;
+            first: root.year-min;
+            index: root.year - root.year-min;
+            moved(target) => { root.set-month(root.year-min + target, root.month); }
+            picked(target) => {
+                root.set-month(root.year-min + target, root.month);
+                root.mode = 0;
+            }
+        }
+    }
+}
+
+// Поле даты. День, месяц и год нажимаются отдельно, и под полем меняется меню выбора:
+// день это обычный календарь (месяц листается стрелками), месяц и год это вертикальные
+// списки, гаснущие к краям и не прокручиваемые бесконечно. Значения лежат числами:
+// строку «дд.мм.гггг» собирает владелец.
+export component DateField inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <int> year-min: 1990;
+    in property <int> year-max: 2060;
+    in-out property <int> day: 1;
+    in-out property <int> month: 1;
+    in-out property <int> year: 2026;
+    callback edited();
+
+    private property <int> mode: 0;
+
+    spacing: Theme.space-4;
+
+    function open-with(new-mode: int) {
+        root.mode = new-mode;
+        popup.show();
+    }
+
+    if root.label != "" : Text {
+        text: root.label;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: root.enabled ? Theme.text : Theme.disabled-text;
+    }
+
+    field := Rectangle {
+        height: Theme.control-md;
+        border-radius: Shape.control-radius;
+        border-width: 1px;
+        border-color: !root.enabled ? transparent : Theme.border-strong;
+        background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+        HorizontalLayout {
+            padding-left: Theme.space-8;
+            padding-right: Theme.space-12;
+            spacing: Theme.space-8;
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    Segment { text: DateMath.two(root.day); enabled: root.enabled; clicked => { root.open-with(0); } }
+                    Text { text: "."; font-size: Theme.font-body; color: Theme.text-muted; vertical-alignment: center; }
+                    Segment { text: DateMath.two(root.month); enabled: root.enabled; clicked => { root.open-with(1); } }
+                    Text { text: "."; font-size: Theme.font-body; color: Theme.text-muted; vertical-alignment: center; }
+                    Segment { text: "" + root.year; enabled: root.enabled; clicked => { root.open-with(2); } }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                alignment: center;
+                Icon { name: "calendar"; tint: Theme.text-muted; width: 16px; height: 16px; }
+            }
+        }
+
+        popup := PopupWindow {
+            x: 0px;
+            y: field.height + 2px;
+            width: 272px;
+            height: 292px;
+            close-policy: PopupClosePolicy.close-on-click-outside;
+
+            DatePanel {
+                year-min: root.year-min;
+                year-max: root.year-max;
+                day <=> root.day;
+                month <=> root.month;
+                year <=> root.year;
+                mode <=> root.mode;
+                edited => { root.edited(); }
+                day-picked => { popup.close(); }
+            }
+        }
+    }
+}

@@ -309,6 +309,15 @@ pub fn existing_database(server: bool, file: &str, address: &str, name: &str) ->
 }
 
 /// Применяет настройки интерфейса: тема и скругление глобальные, окно тоже запоминает выбор.
+/// Готовит второй экземпляр окна как окно документа (страница 3): текущие настройки вида и размер.
+pub fn prepare_doc_window(window: &AppWindow) {
+    apply_settings(window, Settings::load());
+    window.set_page(3);
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1100.0, 760.0));
+}
+
 fn apply_settings(window: &AppWindow, settings: Settings) {
     window.global::<Theme>().set_dark(settings.dark);
     window
@@ -344,6 +353,18 @@ struct Session {
     stage: Option<LoginKind>,
     /// Неудачные попытки подряд: от них зависит задержка.
     failures: u32,
+}
+
+/// Подключает ядро при первом входе в главную: пока открывается демо-база (любая выбранная
+/// база), дальше `open_local` по пути выбранной. Ошибку показывает список поступлений.
+fn attach_core(app: &AppWindow, receipts: &crate::receipts_ui::ReceiptsUi) {
+    if receipts.is_attached() {
+        return;
+    }
+    match crate::local_base::open_demo() {
+        Ok(engine) => receipts.attach(app, engine),
+        Err(error) => receipts.show_error(app, &error.message),
+    }
 }
 
 /// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
@@ -395,6 +416,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if kind == LoginKind::None {
                 *shell.borrow_mut() = open_main(&app, &db.name, db.server);
                 receipts.after(&app, &shell.borrow());
+                attach_core(&app, &receipts);
                 show_page(&app, PAGE_MAIN);
                 return;
             }
@@ -450,6 +472,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             *shell.borrow_mut() = open_main(&app, &name, server);
             receipts.after(&app, &shell.borrow());
+            attach_core(&app, &receipts);
             app.set_password("".into());
             app.set_repeat("".into());
             show_page(&app, PAGE_MAIN);
@@ -524,7 +547,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_theme_chosen({
-        let app = app.as_weak();
+        let (app, receipts) = (app.as_weak(), receipts.clone());
         move |dark| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -532,12 +555,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            receipts.each_detached(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_radius_chosen({
-        let app = app.as_weak();
+        let (app, receipts) = (app.as_weak(), receipts.clone());
         move |radius| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -545,12 +569,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            receipts.each_detached(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_density_chosen({
-        let app = app.as_weak();
+        let (app, receipts) = (app.as_weak(), receipts.clone());
         move |density| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -558,12 +583,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            receipts.each_detached(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_font_chosen({
-        let app = app.as_weak();
+        let (app, receipts) = (app.as_weak(), receipts.clone());
         move |font| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -571,6 +597,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            receipts.each_detached(|window| apply_settings(window, settings));
             settings.save();
         }
     });
@@ -686,6 +713,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
+    app.on_tab_detached({
+        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            if let Some(tab) = index(tab) {
+                receipts.detach(&app, &mut shell.borrow_mut(), tab);
+            }
+        }
+    });
     app.on_tab_closed({
         let (app, shell, receipts) = (app.as_weak(), shell, receipts);
         move |tab| {

@@ -1,0 +1,74 @@
+import { Theme, Shape } from "../theme.slint";
+
+// Вертикальное «колесо» значений: выбранное стоит по центру, соседи плавно смещаются и гаснут
+// к верхнему и нижнему краю (opacity). Список конечный: дальше первого и последнего значения
+// не крутится. Колесо мыши двигает выбор на шаг (moved), клик по значению выбирает его (picked).
+// Значение хранит владелец: компонент только сообщает, куда пользователь хочет перейти.
+export component WheelList inherits Rectangle {
+    // Подписи; если пусто, показываются числа first, first + 1, …, всего count штук.
+    in property <[string]> items;
+    in property <int> count: 0;
+    in property <int> first: 0;
+    // Выбранное значение (с нуля).
+    in property <int> index;
+    callback moved(int);
+    callback picked(int);
+
+    private property <length> item-h: 32px;
+    private property <int> total: root.items.length > 0 ? root.items.length : root.count;
+    // Положение колеса с анимацией: при смене index значения плавно уезжают на место.
+    private property <float> pos: root.index;
+    animate pos { duration: 180ms; easing: ease-out; }
+
+    // Какое значение под курсором: смещение от центра в строках относительно положения колеса.
+    pure function under(y: length) -> int {
+        return Math.round(root.pos + (y - root.height / 2) / root.item-h);
+    }
+
+    clip: true;
+
+    // Подсветка выбранной строки (по центру).
+    Rectangle {
+        y: (parent.height - root.item-h) / 2;
+        height: root.item-h;
+        border-radius: Shape.control-radius;
+        background: Theme.accent-soft;
+    }
+
+    for i in root.total : Rectangle {
+        x: 0px;
+        y: (root.height - root.item-h) / 2 + (i - root.pos) * root.item-h;
+        width: root.width;
+        height: root.item-h;
+        // Чем дальше от центра, тем прозрачнее; у краёв значение исчезает полностью.
+        opacity: max(0.0, 1.0 - Math.abs(i - root.pos) / (root.height / root.item-h / 2));
+        Text {
+            x: Theme.space-12;
+            width: parent.width - 2 * Theme.space-12;
+            height: parent.height;
+            text: root.items.length > 0 ? root.items[i] : "" + (root.first + i);
+            font-size: Theme.font-body;
+            font-weight: i == root.index ? 600 : 400;
+            color: i == root.index ? Theme.accent-text : Theme.text;
+            vertical-alignment: center;
+        }
+    }
+
+    TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        scroll-event(event) => {
+            // Один «щелчок» колеса это один шаг, независимо от величины прокрутки.
+            if (event.delta-y > 0px && root.index > 0) {
+                root.moved(root.index - 1);
+            } else if (event.delta-y < 0px && root.index < root.total - 1) {
+                root.moved(root.index + 1);
+            }
+            return EventResult.accept;
+        }
+        clicked => {
+            if (root.under(self.mouse-y) >= 0 && root.under(self.mouse-y) < root.total) {
+                root.picked(root.under(self.mouse-y));
+            }
+        }
+    }
+}

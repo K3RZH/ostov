@@ -267,6 +267,13 @@ impl Shell {
         }
     }
 
+    /// Закрепляет вкладку: следующее открытие её не заменит.
+    pub fn pin_tab(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.preview = false;
+        }
+    }
+
     pub fn doc_tab(&self, doc: u32) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.doc == Some(doc))
     }
