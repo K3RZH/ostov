@@ -108,6 +108,7 @@ export component AppWindow inherits Window {
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
     callback tab-detached <=> main-page.tab-detached;
+    callback tab-reordered <=> main-page.tab-reordered;
     // Страница 4 (дополнительное окно с вкладками): вернуть вкладку в главное окно.
     callback tab-returned(int);
     // Страница 3 (окно документа): заголовок окна.
@@ -180,6 +181,7 @@ export component AppWindow inherits Window {
         tab-selected(i) => { root.tab-selected(i); }
         tab-closed(i) => { root.tab-closed(i); }
         tab-detached(i) => { root.tab-detached(i); }
+        tab-reordered(from, to) => { root.tab-reordered(from, to); }
         tab-returned(i) => { root.tab-returned(i); }
         user-add-clicked => { root.adding-user = true; }
         user-toggle(i) => { root.user-toggle(i); }

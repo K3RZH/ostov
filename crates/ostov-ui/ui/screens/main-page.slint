@@ -110,6 +110,7 @@ export component MainPage inherits Rectangle {
     callback tab-selected(int);
     callback tab-closed(int);
     callback tab-detached(int);
+    callback tab-reordered(int, int);
     // Кнопки окна: свою панель окна здесь заменяет шапка.
     in property <bool> maximized;
     callback minimize();
@@ -286,6 +287,7 @@ export component MainPage inherits Rectangle {
                 tab-selected(i) => { root.tab-selected(i); }
                 tab-closed(i) => { root.tab-closed(i); }
                 tab-detached(i) => { root.tab-detached(i); }
+                tab-reordered(from, to) => { root.tab-reordered(from, to); }
                 user-add-clicked => { root.user-add-clicked(); }
                 user-toggle(i) => { root.user-toggle(i); }
             }

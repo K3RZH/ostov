@@ -83,6 +83,31 @@ impl Windows {
         }
     }
 
+    /// Меняет порядок вкладок внутри окна: `to` это новый индекс вкладки после переноса.
+    pub fn reorder(
+        &self,
+        main: &AppWindow,
+        shell: &Rc<RefCell<Shell>>,
+        window: WindowRef,
+        from: usize,
+        to: usize,
+    ) {
+        if from == to {
+            return;
+        }
+        // Модель принимает место вставки до изъятия вкладки.
+        let at = if to > from { to + 1 } else { to };
+        let change = {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .workspace
+                .move_tab(&mut shell.borrow_mut(), window, from, window, at)
+        };
+        if let Some(change) = change {
+            self.apply(main, shell, change);
+        }
+    }
+
     /// Применяет изменение набора окон и обновляет все окна.
     fn apply(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, change: Change) {
         for id in change.closed {
@@ -153,6 +178,17 @@ impl Windows {
                     return;
                 };
                 this.detach(&main, &shell, WindowRef::Extra(id), tab);
+            }
+        });
+        window.on_tab_reordered({
+            let (this, shell, main) = (self.clone(), shell.clone(), main.as_weak());
+            move |from, to| {
+                let (Ok(from), Ok(to), Some(main)) =
+                    (usize::try_from(from), usize::try_from(to), main.upgrade())
+                else {
+                    return;
+                };
+                this.reorder(&main, &shell, WindowRef::Extra(id), from, to);
             }
         });
         window.on_tab_returned({

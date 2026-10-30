@@ -14,14 +14,18 @@ component TabView inherits Rectangle {
     callback closed();
     // Правая кнопка: координаты нажатия в окне.
     callback context(length, length);
-    // Вкладку потянули вниз или вверх от панели: вынести в отдельное окно.
-    callback detach();
+    // Вкладку тащат: положение указателя в окне. Что делать, решает панель вкладок.
+    callback drag-moved(length, length);
+    callback drag-ended(length, length);
+    // Эту вкладку тащат: она бледнеет, вместо неё по панели идёт «призрак».
+    in property <bool> lifted;
 
     // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
     callback scrolled(length);
 
     height: 40px;
     background: root.active ? Theme.bg : transparent;
+    opacity: root.lifted ? 0.35 : 1.0;
 
     if root.active : Rectangle {
         y: 0px;
@@ -29,8 +33,9 @@ component TabView inherits Rectangle {
         background: Theme.accent;
     }
 
+    private property <length> press-x;
     private property <length> press-y;
-    private property <bool> dragged;
+    private property <bool> dragging;
 
     TouchArea {
         mouse-cursor: pointer;
@@ -41,17 +46,29 @@ component TabView inherits Rectangle {
         }
         pointer-event(event) => {
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                root.press-y = self.mouse-y;
-                root.dragged = false;
+                root.press-x = self.absolute-position.x + self.mouse-x;
+                root.press-y = self.absolute-position.y + self.mouse-y;
+                root.dragging = false;
+            } else if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                if (root.dragging) {
+                    root.drag-ended(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                    root.dragging = false;
+                }
             } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
                 root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
         moved => {
-            // Вытаскивание: вкладку увели от панели больше чем на 48 px по вертикали.
-            if (self.pressed && !root.dragged && abs(self.mouse-y - root.press-y) > 48px) {
-                root.dragged = true;
-                root.detach();
+            if (self.pressed) {
+                // Меньше 6 px это обычный щелчок, а не перетаскивание.
+                if (!root.dragging && (abs(self.absolute-position.x + self.mouse-x - root.press-x) > 6px
+                    || abs(self.absolute-position.y + self.mouse-y - root.press-y) > 6px)) {
+                    root.dragging = true;
+                    root.selected();
+                }
+                if (root.dragging) {
+                    root.drag-moved(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
             }
         }
     }
@@ -109,8 +126,19 @@ export component TabHost inherits VerticalLayout {
     callback tab-closed(int);
     callback tab-detached(int);
     callback tab-returned(int);
+    // Порядок вкладок изменили перетаскиванием: откуда и куда (новый индекс).
+    callback tab-reordered(int, int);
     // Дополнительное окно: в меню вкладки есть «Вернуть в главное окно».
     in property <bool> extra;
+
+    // Перетаскивание вкладки: какую тащат и где указатель относительно панели вкладок.
+    private property <int> drag-index: -1;
+    private property <length> drag-x;
+    private property <length> drag-y;
+    // Указатель ушёл от панели вверх или вниз: при отпускании вкладка станет отдельным окном.
+    private property <bool> drag-out: root.drag-index >= 0 && (root.drag-y < -24px || root.drag-y > bar.height + 24px);
+    // Куда встанет вкладка внутри панели.
+    private property <int> drop-index: Math.max(0, Math.min(root.tabs.length - 1, Math.floor((root.drag-x - flick.content-x - Theme.space-8) / root.tab-width)));
 
     // Какие вкладки можно вынести в окно: документы и вкладки без своего состояния.
     pure function can-detach(index: int) -> bool {
@@ -175,7 +203,20 @@ export component TabHost inherits VerticalLayout {
                                 active: i == root.active-tab;
                                 selected => { root.tab-selected(i); }
                                 closed => { root.tab-closed(i); }
-                                detach => { root.tab-detached(i); }
+                                lifted: i == root.drag-index;
+                                drag-moved(x, y) => {
+                                    root.drag-index = i;
+                                    root.drag-x = x - bar.absolute-position.x;
+                                    root.drag-y = y - bar.absolute-position.y;
+                                }
+                                drag-ended(x, y) => {
+                                    if (root.drag-out) {
+                                        root.tab-detached(i);
+                                    } else if (root.drop-index != i) {
+                                        root.tab-reordered(i, root.drop-index);
+                                    }
+                                    root.drag-index = -1;
+                                }
                                 context(ax, ay) => {
                                     root.tab-menu-index = i;
                                     root.tab-menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
@@ -184,6 +225,35 @@ export component TabHost inherits VerticalLayout {
                                 }
                                 scrolled(delta) => { root.scroll-tabs(delta); }
                             }
+                        }
+                    }
+                    // Метка места вставки при перетаскивании внутри панели.
+                    if root.drag-index >= 0 && !root.drag-out && root.drop-index != root.drag-index : Rectangle {
+                        x: Theme.space-8 + flick.content-x + (root.drop-index + (root.drop-index > root.drag-index ? 1 : 0)) * root.tab-width - 1.5px;
+                        y: 6px;
+                        width: 3px;
+                        height: parent.height - 12px;
+                        border-radius: 1.5px;
+                        background: Theme.accent;
+                    }
+                    // «Призрак» вкладки идёт за указателем (внутри окна, пока указатель над ним).
+                    if root.drag-index >= 0 : Rectangle {
+                        x: root.drag-x - root.tab-width / 2;
+                        y: root.drag-out ? root.drag-y - 20px : 0px;
+                        width: root.tab-width;
+                        height: 40px;
+                        border-radius: 6px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: root.drag-out ? Theme.danger : Theme.accent;
+                        opacity: 0.92;
+                        Text {
+                            text: root.tabs[root.drag-index].title;
+                            font-size: Theme.font-body;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
                         }
                     }
                     if root.tabs-overflow : HorizontalLayout {

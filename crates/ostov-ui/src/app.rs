@@ -742,6 +742,25 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
+    app.on_tab_reordered({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |from, to| {
+            let Some(app) = app.upgrade() else { return };
+            let (Some(from), Some(to)) = (index(from), index(to)) else {
+                return;
+            };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            receipts.before(&app, &mut shell.borrow_mut());
+            windows.reorder(&app, &shell, crate::workspace::WindowRef::Main, from, to);
+            receipts.after(&app, &shell.borrow());
+        }
+    });
+
     app.on_tab_detached({
         let (app, shell, receipts, windows) = (
             app.as_weak(),
