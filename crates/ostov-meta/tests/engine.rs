@@ -15,9 +15,11 @@ fn yaml_config_runs_in_core() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("shop.db").to_string_lossy().into_owned();
 
-    let engine = LocalConnector::new(ostov_meta::load(&repo_config()).unwrap())
+    let model = ostov_meta::load(&repo_config()).unwrap();
+    let engine = LocalConnector::new(model.clone())
         .create_local(&path, None, None)
         .unwrap();
+    assert_eq!(engine.get_meta().unwrap(), ostov_model::Meta::new(&model));
     let add = |object: &str, name: &str| {
         let data = ObjectData {
             fields: [("name".to_owned(), Value::Text(name.to_owned()))].into(),

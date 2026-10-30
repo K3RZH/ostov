@@ -522,6 +522,10 @@ impl Engine for LocalEngine {
         self.guarded("RunReport", || self.run_run_report(query))
     }
 
+    fn get_meta(&self) -> EngineResult<ostov_api::Meta> {
+        Ok(self.config.meta.clone())
+    }
+
     fn closing_date(&self) -> EngineResult<Option<String>> {
         self.guarded("GetClosingDate", || {
             crate::closing::closing_date(&mut **self.db()).map_err(error)

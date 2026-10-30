@@ -3402,6 +3402,9 @@ dependencies = [
 [[package]]
 name = "ostov-api"
 version = "0.1.0"
+dependencies = [
+ "ostov-model",
+]
 
 [[package]]
 name = "ostov-cli"

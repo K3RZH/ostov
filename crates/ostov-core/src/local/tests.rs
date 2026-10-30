@@ -947,6 +947,7 @@ fn base_follows_config_changes() {
         m.catalogs.push(ostov_model::CatalogDef {
             name: "units".into(),
             title: "Единицы".into(),
+            icon: None,
             fields: vec![FieldDef::new("name", FieldKind::Text)],
         });
         let receipt = &mut m.documents[1];
@@ -1055,4 +1056,72 @@ fn base_before_restructuring_is_adopted() {
     .open_local(&base.path, None)
     .unwrap();
     add(&*engine, "goods", "Соль");
+}
+
+#[test]
+fn meta_describes_objects_and_menu() {
+    let base = Base::new("meta");
+    let meta = base.create().get_meta().unwrap();
+    let receipt = meta.objects.iter().find(|o| o.name == "receipt").unwrap();
+    assert_eq!(receipt.kind, ostov_api::ObjectKind::Document);
+    assert_eq!(receipt.icon.as_deref(), Some("stock-in"));
+    assert!(
+        receipt
+            .fields
+            .iter()
+            .any(|f| f.name == "amount" && f.read_only)
+    );
+    assert_eq!(receipt.table_parts[0].name, "lines");
+    let supplier = receipt
+        .fields
+        .iter()
+        .find(|f| f.name == "supplier")
+        .unwrap();
+    assert_eq!(supplier.target.as_deref(), Some("suppliers"));
+    assert!(receipt.rights.post);
+
+    let [section] = meta.menu.as_slice() else {
+        panic!("{:?}", meta.menu);
+    };
+    assert_eq!(section.object, None);
+    assert_eq!(section.children.len(), 5);
+}
+
+#[test]
+fn required_fields_must_be_filled() {
+    let base = Base::new("required");
+    let engine = changed_model(|m| {
+        m.catalogs[0].fields[0].required = true;
+        m.catalogs[0].fields[0].title = "Наименование".into();
+        m.documents[1].fields[0].required = true;
+    })
+    .create_local(&base.path, None, None)
+    .unwrap();
+
+    for name in [Value::Null, text("  ")] {
+        let data = ObjectData {
+            fields: fields(&[("name", name), ("unit", text("кг"))]),
+            ..ObjectData::default()
+        };
+        let err = engine.save("goods", &data, PostAction::Write).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Validation);
+        assert!(err.message.contains("Наименование"), "{}", err.message);
+    }
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+
+    // Поступление без даты не записать; с датой — можно.
+    let mut no_date = receipt(main, mill, &[(flour, 1_000, 100)]);
+    no_date.fields.remove("date");
+    assert_eq!(
+        engine
+            .save("receipt", &no_date, PostAction::Write)
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+    engine
+        .save("receipt", &dated(no_date, "2026-02-01"), PostAction::Post)
+        .unwrap();
 }

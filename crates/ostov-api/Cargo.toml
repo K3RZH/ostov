@@ -8,3 +8,6 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+ostov-model = { path = "../ostov-model" }

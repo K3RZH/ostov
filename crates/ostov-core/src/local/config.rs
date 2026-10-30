@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use ostov_model::{CatalogDef, DocumentDef, RegisterDef, RegisterKind, TablePartDef};
+use ostov_model::{
+    CatalogDef, DocumentDef, MenuItem, Meta, RegisterDef, RegisterKind, TablePartDef,
+};
 use ostov_store::{Decimal, Driver};
 
 use crate::{
@@ -21,6 +23,8 @@ pub struct DocumentConfig {
 }
 
 pub struct Config {
+    /// Что интерфейс получает по `GetMeta`: объекты с заголовками, меню, права.
+    pub meta: Meta,
     /// Название для людей (`title` манифеста): его показывает `hello()`.
     pub name: String,
     pub version: String,
@@ -95,6 +99,7 @@ impl Config {
         }
 
         Ok(Self {
+            meta: Meta::new(model),
             name: model.title.clone(),
             version: model.version.clone(),
             catalogs,
@@ -137,9 +142,21 @@ pub fn warehouse_model() -> ostov_model::Config {
     let date = || FieldDef::new("date", FieldKind::Date);
     let qty = || FieldDef::new("qty", FieldKind::Decimal { scale: 3 });
     let money = |n: &str| FieldDef::new(n, FieldKind::Decimal { scale: 2 });
-    let catalog = |name: &str, fields| CatalogDef {
+    // Сумму считает ядро.
+    let total = || FieldDef {
+        read_only: true,
+        ..money("amount")
+    };
+    let item = |object: &str| MenuItem {
+        title: object.to_owned(),
+        icon: None,
+        object: Some(object.to_owned()),
+        children: Vec::new(),
+    };
+    let catalog = |name: &str, icon: &str, fields| CatalogDef {
         name: name.to_owned(),
         title: name.to_owned(),
+        icon: Some(icon.to_owned()),
         fields,
     };
     let lines = |fields| TablePartDef {
@@ -147,9 +164,10 @@ pub fn warehouse_model() -> ostov_model::Config {
         title: "lines".to_owned(),
         fields,
     };
-    let document = |name: &str, fields, part| DocumentDef {
+    let document = |name: &str, icon: &str, fields, part| DocumentDef {
         name: name.to_owned(),
         title: name.to_owned(),
+        icon: Some(icon.to_owned()),
         fields,
         table_parts: vec![part],
         registers: vec![STOCK.to_owned()],
@@ -162,30 +180,33 @@ pub fn warehouse_model() -> ostov_model::Config {
         catalogs: vec![
             catalog(
                 "goods",
+                "box",
                 vec![name(), FieldDef::new("unit", FieldKind::Text)],
             ),
-            catalog("suppliers", vec![name()]),
-            catalog("warehouses", vec![name()]),
+            catalog("suppliers", "users", vec![name()]),
+            catalog("warehouses", "warehouse", vec![name()]),
         ],
         documents: vec![
             document(
                 "issue",
+                "stock-out",
                 vec![date(), FieldDef::reference("warehouse", "warehouses")],
                 lines(vec![FieldDef::reference("goods", "goods"), qty()]),
             ),
             document(
                 "receipt",
+                "stock-in",
                 vec![
                     date(),
                     FieldDef::reference("supplier", "suppliers"),
                     FieldDef::reference("warehouse", "warehouses"),
-                    money("amount"),
+                    total(),
                 ],
                 lines(vec![
                     FieldDef::reference("goods", "goods"),
                     qty(),
                     money("price"),
-                    money("amount"),
+                    total(),
                 ]),
             ),
         ],
@@ -198,6 +219,14 @@ pub fn warehouse_model() -> ostov_model::Config {
                 FieldDef::reference("goods", "goods"),
             ],
             resources: vec![qty()],
+        }],
+        menu: vec![MenuItem {
+            title: "Склад".to_owned(),
+            icon: Some("warehouse".to_owned()),
+            object: None,
+            children: ["goods", "warehouses", "suppliers", "receipt", "issue"]
+                .map(item)
+                .into(),
         }],
     }
 }

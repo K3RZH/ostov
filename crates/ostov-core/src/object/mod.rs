@@ -77,6 +77,14 @@ pub(crate) fn column_defs(d: &dyn Dialect, fields: &[FieldDef]) -> Vec<String> {
         .collect()
 }
 
+fn is_empty(value: &FieldValue) -> bool {
+    match value {
+        FieldValue::Null => true,
+        FieldValue::Text(s) => s.trim().is_empty(),
+        _ => false,
+    }
+}
+
 pub(crate) fn names(d: &dyn Dialect, fields: &[FieldDef]) -> Vec<String> {
     fields.iter().map(|f| d.quote_ident(&f.name)).collect()
 }
@@ -98,7 +106,16 @@ pub(crate) fn to_values(
         return Err(CoreError::Invalid(format!("в {table} нет поля {unknown}")));
     }
     defs.iter()
-        .map(|def| to_value(def, fields.get(&def.name).unwrap_or(&FieldValue::Null)))
+        .map(|def| {
+            let value = fields.get(&def.name).unwrap_or(&FieldValue::Null);
+            if def.required && is_empty(value) {
+                return Err(CoreError::Invalid(format!(
+                    "не заполнено обязательное поле «{}»",
+                    def.title
+                )));
+            }
+            to_value(def, value)
+        })
         .collect()
 }
 

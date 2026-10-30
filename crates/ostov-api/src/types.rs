@@ -45,73 +45,10 @@ pub struct SessionInfo {
     pub roles: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObjectKind {
-    Catalog,
-    Document,
-    Register,
-    Report,
-    Enum,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Rights {
-    pub read: bool,
-    pub create: bool,
-    pub update: bool,
-    pub post: bool,
-    pub unpost: bool,
-    pub delete: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MenuItem {
-    pub title: String,
-    pub icon: String,
-    /// Объект, который открывает пункт; `None` — группа.
-    pub object: Option<String>,
-    pub children: Vec<MenuItem>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FieldKind {
-    Text,
-    Int,
-    Decimal { scale: u8 },
-    Date,
-    Ref,
-    Enum,
-    Flag,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldMeta {
-    pub name: String,
-    pub title: String,
-    pub kind: FieldKind,
-    pub required: bool,
-    pub read_only: bool,
-    /// Для ссылки и перечисления: откуда брать значения.
-    pub source: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObjectMeta {
-    pub name: String,
-    pub title: String,
-    pub kind: ObjectKind,
-    pub fields: Vec<FieldMeta>,
-    /// Табличные части: имя и поля.
-    pub tables: Vec<(String, Vec<FieldMeta>)>,
-    pub rights: Rights,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Meta {
-    pub menu: Vec<MenuItem>,
-    pub objects: Vec<ObjectMeta>,
-    pub roles: Vec<String>,
-}
+/// Метаданные — те же типы, что строит `ostov-meta` из конфигурации: одно описание на всех.
+pub use ostov_model::{
+    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, Rights, TablePartDef,
+};
 
 // ---------------------------------------------------------------- списки
 
