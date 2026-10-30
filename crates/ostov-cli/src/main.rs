@@ -35,7 +35,7 @@ fn check(dir: &Path) -> ExitCode {
                 config.catalogs.len(),
                 config.documents.len(),
                 config.registers.len(),
-                config.subsystems.len()
+                config.menu.len()
             );
             ExitCode::SUCCESS
         }

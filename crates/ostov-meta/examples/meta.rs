@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use ostov_model::{FieldDef, FieldKind, Meta, ObjectKind};
+use ostov_model::{FieldDef, FieldKind, MenuItem, Meta, ObjectKind};
 
 fn main() -> ExitCode {
     let config = match std::env::args().nth(1) {
@@ -27,24 +27,20 @@ fn main() -> ExitCode {
 
 fn render(meta: &Meta) -> String {
     let mut out = String::from("Меню\n");
-    for section in &meta.menu {
-        out += &format!("  {} [{}]\n", section.title, section.name);
-        for item in &section.items {
-            out += &format!(
-                "    {} [{}], {}\n",
-                item.title,
-                item.object,
-                kind(item.kind)
-            );
-        }
+    for item in &meta.menu {
+        out += &menu_item(item, "  ");
     }
     out += "\nОбъекты\n";
     for object in &meta.objects {
+        let kind = match object.kind {
+            ObjectKind::Catalog => "справочник",
+            ObjectKind::Document => "документ",
+        };
         out += &format!(
-            "  {} [{}], {}\n",
+            "  {} [{}], {kind}{}\n",
             object.title,
             object.name,
-            kind(object.kind)
+            icon(object.icon.as_deref())
         );
         out += &fields(&object.fields, "    ");
         for part in &object.table_parts {
@@ -52,7 +48,29 @@ fn render(meta: &Meta) -> String {
             out += &fields(&part.fields, "      ");
         }
     }
+    out += &format!("\nРоли: {:?}\n", meta.roles);
     out
+}
+
+fn menu_item(item: &MenuItem, indent: &str) -> String {
+    let what = match &item.object {
+        Some(object) => format!(" → {object}"),
+        None => " (группа)".to_owned(),
+    };
+    let mut out = format!(
+        "{indent}{}{what}{}\n",
+        item.title,
+        icon(item.icon.as_deref())
+    );
+    for child in &item.children {
+        out += &menu_item(child, &format!("{indent}  "));
+    }
+    out
+}
+
+fn icon(icon: Option<&str>) -> String {
+    icon.map(|icon| format!(", значок {icon}"))
+        .unwrap_or_default()
 }
 
 fn fields(fields: &[FieldDef], indent: &str) -> String {
@@ -63,17 +81,20 @@ fn fields(fields: &[FieldDef], indent: &str) -> String {
                 (FieldKind::Ref, Some(target)) => format!(" → {target}"),
                 _ => String::new(),
             };
+            let required = if field.required {
+                ", обязательное"
+            } else {
+                ""
+            };
+            let read_only = if field.read_only {
+                ", только чтение"
+            } else {
+                ""
+            };
             format!(
-                "{indent}{} [{}]: {}{target}\n",
+                "{indent}{} [{}]: {}{target}{required}{read_only}\n",
                 field.title, field.name, field.kind
             )
         })
         .collect()
-}
-
-fn kind(kind: ObjectKind) -> &'static str {
-    match kind {
-        ObjectKind::Catalog => "справочник",
-        ObjectKind::Document => "документ",
-    }
 }

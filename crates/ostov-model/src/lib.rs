@@ -37,6 +37,11 @@ pub struct FieldDef {
     pub kind: FieldKind,
     /// Для ссылки: на какой справочник или документ.
     pub target: Option<String>,
+    /// Без значения нельзя провести документ; проверяет ядро при записи.
+    pub required: bool,
+    /// Подсказка интерфейсу: поле не редактируют (его считает ядро). Ядро значению от клиента
+    /// всё равно не верит и пересчитывает вычисляемые поля само.
+    pub read_only: bool,
 }
 
 impl FieldDef {
@@ -46,15 +51,15 @@ impl FieldDef {
             title: name.to_owned(),
             kind,
             target: None,
+            required: false,
+            read_only: false,
         }
     }
 
     pub fn reference(name: &str, target: &str) -> Self {
         Self {
-            name: name.to_owned(),
-            title: name.to_owned(),
-            kind: FieldKind::Ref,
             target: Some(target.to_owned()),
+            ..Self::new(name, FieldKind::Ref)
         }
     }
 
@@ -68,6 +73,8 @@ impl FieldDef {
 pub struct CatalogDef {
     pub name: String,
     pub title: String,
+    /// Значок из набора интерфейса (`ostov-ui/assets/icons`).
+    pub icon: Option<String>,
     pub fields: Vec<FieldDef>,
 }
 
@@ -82,6 +89,7 @@ pub struct TablePartDef {
 pub struct DocumentDef {
     pub name: String,
     pub title: String,
+    pub icon: Option<String>,
     pub fields: Vec<FieldDef>,
     pub table_parts: Vec<TablePartDef>,
     /// Регистры, по которым документ делает движения. Сами движения считает правило проведения.
@@ -102,7 +110,7 @@ pub struct RegisterDef {
     pub resources: Vec<FieldDef>,
 }
 
-/// Конфигурация целиком: манифест и все объекты.
+/// Конфигурация целиком: манифест, все объекты и меню.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub name: String,
@@ -112,25 +120,32 @@ pub struct Config {
     pub catalogs: Vec<CatalogDef>,
     pub documents: Vec<DocumentDef>,
     pub registers: Vec<RegisterDef>,
-    pub subsystems: Vec<SubsystemDef>,
-}
-
-/// Раздел меню: объекты (справочники и документы) в порядке, как они записаны в файле.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubsystemDef {
-    pub name: String,
-    pub title: String,
-    pub objects: Vec<String>,
+    /// Разделы меню в порядке `menu:` манифеста.
+    pub menu: Vec<MenuItem>,
 }
 
 // ---------------------------------------------------------------- ответ GetMeta
+// Единственное место этих типов: ostov-api их переэкспортирует, своих не заводит.
 
-/// Что интерфейсу нужно, чтобы построить меню, колонки списков и формы (ответ GetMeta).
-/// Права и роли добавятся с `ostov-sec`.
+/// Пункт меню. Раздел и группа — пункты без объекта, с детьми; в YAML глубина ограничена:
+/// раздел → группа → объекты.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem {
+    pub title: String,
+    /// Значок из набора интерфейса (`ostov-ui/assets/icons`); `None` — интерфейс выбирает сам.
+    pub icon: Option<String>,
+    /// Объект, который открывает пункт; `None` — раздел или группа.
+    pub object: Option<String>,
+    pub children: Vec<MenuItem>,
+}
+
+/// Что интерфейсу нужно, чтобы построить меню, колонки списков и формы.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
-    pub menu: Vec<MenuSection>,
+    pub menu: Vec<MenuItem>,
     pub objects: Vec<ObjectMeta>,
+    /// Роли для экрана «Пользователи и роли»; заполнит ostov-sec, пока пусто.
+    pub roles: Vec<String>,
 }
 
 /// Объект, который открывается в интерфейсе: справочник или документ.
@@ -139,70 +154,70 @@ pub struct ObjectMeta {
     pub name: String,
     pub title: String,
     pub kind: ObjectKind,
-    /// Поля шапки: имя, заголовок, тип, цель ссылки.
+    pub icon: Option<String>,
+    /// Поля шапки: имя, заголовок, тип, цель ссылки, required, read_only.
     pub fields: Vec<FieldDef>,
     /// У справочника пусто.
     pub table_parts: Vec<TablePartDef>,
+    pub rights: Rights,
 }
 
+/// Виды объектов в интерфейсе. Регистры, отчёты и перечисления добавятся вместе с их поддержкой.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Catalog,
     Document,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MenuSection {
-    pub name: String,
-    pub title: String,
-    pub items: Vec<MenuItem>,
+/// Что текущий пользователь может делать с объектом.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rights {
+    pub read: bool,
+    pub create: bool,
+    pub update: bool,
+    pub post: bool,
+    pub unpost: bool,
+    pub delete: bool,
 }
 
-/// Пункт меню. Заголовок и вид продублированы из объекта, чтобы меню рисовалось без поиска.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MenuItem {
-    pub object: String,
-    pub title: String,
-    pub kind: ObjectKind,
+impl Rights {
+    /// Всё разрешено: так сейчас и есть, пока нет ostov-sec (один пользователь без входа).
+    pub const ALL: Self = Self {
+        read: true,
+        create: true,
+        update: true,
+        post: true,
+        unpost: true,
+        delete: true,
+    };
 }
 
 impl Meta {
-    /// Метаданные для интерфейса из проверенной конфигурации. Пункт меню на объект, которого
-    /// нет, пропускается: в проверенной конфигурации (`ostov check`) таких не бывает.
+    /// Метаданные для интерфейса из конфигурации. Права — `Rights::ALL`, роли пусты:
+    /// их будет выдавать ostov-sec по пользователю.
     pub fn new(config: &Config) -> Self {
         let catalogs = config.catalogs.iter().map(|c| ObjectMeta {
             name: c.name.clone(),
             title: c.title.clone(),
             kind: ObjectKind::Catalog,
+            icon: c.icon.clone(),
             fields: c.fields.clone(),
             table_parts: Vec::new(),
+            rights: Rights::ALL,
         });
         let documents = config.documents.iter().map(|d| ObjectMeta {
             name: d.name.clone(),
             title: d.title.clone(),
             kind: ObjectKind::Document,
+            icon: d.icon.clone(),
             fields: d.fields.clone(),
             table_parts: d.table_parts.clone(),
+            rights: Rights::ALL,
         });
-        let objects: Vec<ObjectMeta> = catalogs.chain(documents).collect();
-        let menu = config
-            .subsystems
-            .iter()
-            .map(|section| MenuSection {
-                name: section.name.clone(),
-                title: section.title.clone(),
-                items: section
-                    .objects
-                    .iter()
-                    .filter_map(|name| objects.iter().find(|o| &o.name == name))
-                    .map(|object| MenuItem {
-                        object: object.name.clone(),
-                        title: object.title.clone(),
-                        kind: object.kind,
-                    })
-                    .collect(),
-            })
-            .collect();
-        Self { menu, objects }
+        Self {
+            menu: config.menu.clone(),
+            objects: catalogs.chain(documents).collect(),
+            roles: Vec::new(),
+        }
     }
 }

@@ -18,6 +18,6 @@ pub use error::Error;
 pub use field_type::FieldType;
 pub use load::{FORMAT_VERSION, load, parse};
 pub use model::{
-    Catalog, ConfigFiles, Document, Field, Located, Manifest, Register, RegisterKind, Subsystem,
-    TablePart,
+    Catalog, ConfigFiles, Document, Field, Group, Located, Manifest, MenuEntry, Register,
+    RegisterKind, Subsystem, TablePart,
 };

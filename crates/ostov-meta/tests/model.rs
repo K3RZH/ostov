@@ -8,7 +8,7 @@ mod common;
 use common::repo_config;
 use ostov_core::local::warehouse;
 use ostov_meta::{demo, load};
-use ostov_model::{FieldDef, FieldKind, Meta, ObjectKind, RegisterKind};
+use ostov_model::{FieldDef, FieldKind, Meta, ObjectKind, RegisterKind, Rights};
 
 /// Поле без заголовка: в config.rs заголовков нет, сравниваем имя, тип и цель ссылки.
 fn shape(fields: &[FieldDef]) -> Vec<(String, FieldKind, Option<String>)> {
@@ -92,33 +92,39 @@ fn demo_matches_config_folder() {
 #[test]
 fn get_meta_for_warehouse() {
     let meta = Meta::new(&load(&repo_config()).unwrap());
+    assert!(meta.roles.is_empty(), "роли заполнит ostov-sec");
 
     let [section] = meta.menu.as_slice() else {
         panic!("ожидался один раздел меню: {:?}", meta.menu);
     };
     assert_eq!(
-        (section.name.as_str(), section.title.as_str()),
-        ("warehouse", "Склад")
+        (
+            section.title.as_str(),
+            section.icon.as_deref(),
+            section.object.as_deref()
+        ),
+        ("Склад", Some("warehouse"), None)
     );
-    let items: Vec<(&str, &str, ObjectKind)> = section
-        .items
+    let items: Vec<(&str, Option<&str>, Option<&str>)> = section
+        .children
         .iter()
-        .map(|i| (i.object.as_str(), i.title.as_str(), i.kind))
+        .map(|i| (i.title.as_str(), i.icon.as_deref(), i.object.as_deref()))
         .collect();
     assert_eq!(
         items,
         vec![
-            ("goods", "Товары", ObjectKind::Catalog),
-            ("warehouses", "Склады", ObjectKind::Catalog),
-            ("suppliers", "Поставщики", ObjectKind::Catalog),
-            ("receipt", "Поступление", ObjectKind::Document),
-            ("issue", "Расход", ObjectKind::Document),
+            ("Товары", Some("box"), Some("goods")),
+            ("Склады", Some("warehouse"), Some("warehouses")),
+            ("Поставщики", Some("users"), Some("suppliers")),
+            ("Поступление", Some("stock-in"), Some("receipt")),
+            ("Расход", Some("stock-out"), Some("issue")),
         ]
     );
 
     assert_eq!(meta.objects.len(), 5, "регистры в GetMeta не попадают");
     let receipt = meta.objects.iter().find(|o| o.name == "receipt").unwrap();
     assert_eq!(receipt.kind, ObjectKind::Document);
+    assert_eq!(receipt.rights, Rights::ALL, "пока нет ostov-sec");
     let supplier = &receipt.fields[1];
     assert_eq!(
         (
@@ -129,12 +135,18 @@ fn get_meta_for_warehouse() {
         ),
         ("supplier", "Поставщик", FieldKind::Ref, Some("suppliers"))
     );
+    let amount = &receipt.fields[3];
+    assert_eq!(
+        (amount.name.as_str(), amount.read_only, amount.required),
+        ("amount", true, false)
+    );
     let lines = &receipt.table_parts[0];
     assert_eq!(
         (lines.name.as_str(), lines.title.as_str()),
         ("lines", "Товары")
     );
     assert_eq!(lines.fields[1].kind, FieldKind::Decimal { scale: 3 });
+    assert!(lines.fields[3].read_only, "сумму строки считает ядро");
 
     let goods = meta.objects.iter().find(|o| o.name == "goods").unwrap();
     assert_eq!(goods.kind, ObjectKind::Catalog);

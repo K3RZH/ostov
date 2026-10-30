@@ -1,5 +1,6 @@
 subsystem: warehouse
 title: Склад
+icon: warehouse
 objects:
   - goods
   - warehouses

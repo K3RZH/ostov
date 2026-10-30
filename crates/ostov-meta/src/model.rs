@@ -2,9 +2,11 @@
 //!
 //! Имена и типы обёрнуты в `Spanned`: так `ostov check` укажет строку конкретного значения.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_saphyr::Spanned;
 
 use crate::FieldType;
@@ -19,14 +21,58 @@ pub struct ConfigFiles {
     pub subsystems: Vec<Located<Subsystem>>,
 }
 
-/// Раздел меню: заголовок и объекты, которые из него открываются.
+/// Раздел меню: заголовок, значок и пункты — объекты и группы объектов.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subsystem {
     #[serde(rename = "subsystem")]
     pub name: Spanned<String>,
     pub title: String,
-    pub objects: Vec<Spanned<String>>,
+    #[serde(default)]
+    pub icon: Option<Spanned<String>>,
+    pub objects: Vec<Spanned<MenuEntry>>,
+}
+
+/// Пункт раздела: имя объекта (`- goods`) или группа (`- title: ...`, `objects: [...]`).
+#[derive(Debug)]
+pub enum MenuEntry {
+    Object(String),
+    Group(Group),
+}
+
+/// Группа внутри раздела. Пункты у неё того же вида, но вложенную группу запрещает `ostov check`:
+/// так ошибка получит понятную причину, а не «ожидалась строка».
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Group {
+    pub title: String,
+    #[serde(default)]
+    pub icon: Option<Spanned<String>>,
+    pub objects: Vec<Spanned<MenuEntry>>,
+}
+
+impl<'de> Deserialize<'de> for MenuEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = MenuEntry;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("имя объекта или группу (title, icon, objects)")
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<MenuEntry, E> {
+                Ok(MenuEntry::Object(name.to_owned()))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<MenuEntry, A::Error> {
+                Group::deserialize(de::value::MapAccessDeserializer::new(map)).map(MenuEntry::Group)
+            }
+        }
+
+        deserializer.deserialize_any(EntryVisitor)
+    }
 }
 
 /// Объект и файл, из которого он прочитан.
@@ -46,6 +92,9 @@ pub struct Manifest {
     pub version: String,
     /// Версия формата файлов, её проверяет загрузчик.
     pub format: Spanned<u32>,
+    /// Разделы меню по порядку; каждый раздел из `subsystems/` должен быть здесь.
+    #[serde(default)]
+    pub menu: Vec<Spanned<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +104,10 @@ pub struct Field {
     pub title: String,
     #[serde(rename = "type")]
     pub kind: Spanned<FieldType>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +116,8 @@ pub struct Catalog {
     #[serde(rename = "catalog")]
     pub name: Spanned<String>,
     pub title: String,
+    #[serde(default)]
+    pub icon: Option<Spanned<String>>,
     pub fields: Vec<Field>,
 }
 
@@ -72,6 +127,8 @@ pub struct Document {
     #[serde(rename = "document")]
     pub name: Spanned<String>,
     pub title: String,
+    #[serde(default)]
+    pub icon: Option<Spanned<String>>,
     /// Регистры, по которым документ делает движения.
     #[serde(default)]
     pub registers: Vec<Spanned<String>>,

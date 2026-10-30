@@ -1,5 +1,6 @@
 catalog: goods
 title: Товары
+icon: box
 fields:
   - name: name
     title: Наименование
