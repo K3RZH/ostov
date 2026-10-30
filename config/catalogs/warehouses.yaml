@@ -1,5 +1,6 @@
 catalog: warehouses
 title: Склады
+icon: warehouse
 fields:
   - name: name
     title: Наименование

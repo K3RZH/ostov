@@ -1,5 +1,6 @@
 document: issue
 title: Расход
+icon: stock-out
 registers:
   - stock
 fields:

@@ -1,5 +1,6 @@
 document: receipt
 title: Поступление
+icon: stock-in
 registers:
   - stock
 fields:
@@ -15,6 +16,7 @@ fields:
   - name: amount
     title: Сумма
     type: decimal(2)
+    read_only: true
 tables:
   - name: lines
     title: Товары
@@ -31,3 +33,4 @@ tables:
       - name: amount
         title: Сумма
         type: decimal(2)
+        read_only: true

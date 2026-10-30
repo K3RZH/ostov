@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_saphyr::Spanned;
 
-use crate::{ConfigFiles, Document, Error, Field, FieldType, Register};
+use crate::{ConfigFiles, Document, Error, Field, FieldType, MenuEntry, Register, Subsystem};
 
 /// Лимит идентификатора PostgreSQL: из имён делаются таблицы и колонки (ADR-025).
 pub const MAX_NAME_LEN: usize = 63;
@@ -24,6 +24,43 @@ pub const RESERVED_NAMES: [&str; 11] = [
     "recorder_id",
     "kind",
     "period",
+];
+/// Значки интерфейса: файлы `ostov-ui/assets/icons/*.svg` без расширения; тест сверяет с папкой.
+pub const ICONS: [&str; 34] = [
+    "bar-chart",
+    "bell",
+    "box",
+    "calendar",
+    "check",
+    "chevron-down",
+    "chevron-right",
+    "chevrons-left",
+    "chevrons-right",
+    "close",
+    "database",
+    "document",
+    "error",
+    "folder",
+    "help",
+    "home",
+    "inventory",
+    "list",
+    "lock",
+    "minus",
+    "pin",
+    "plus",
+    "recipe",
+    "search",
+    "settings",
+    "star",
+    "star-filled",
+    "stock-in",
+    "stock-out",
+    "success",
+    "transfer",
+    "user",
+    "users",
+    "warehouse",
 ];
 
 /// Проверяет прочитанную конфигурацию и возвращает все ошибки, по файлам и строкам.
@@ -50,17 +87,64 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
     };
 
     for catalog in &config.catalogs {
+        check_icon(&catalog.file, catalog.value.icon.as_ref(), &mut errors);
         scope.check_fields(&catalog.file, &catalog.value.fields, &mut errors);
     }
     for document in &config.documents {
+        check_icon(&document.file, document.value.icon.as_ref(), &mut errors);
         scope.check_document(&document.file, &document.value, &mut errors);
     }
     for register in &config.registers {
         scope.check_register(&register.file, &register.value, &mut errors);
     }
+    check_menu(config, &scope, &mut errors);
 
     errors.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     errors
+}
+
+/// Меню: каждый раздел из `subsystems/` перечислен в `menu:` манифеста и наоборот.
+fn check_menu(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) {
+    let mut sections = Names::new("раздел меню");
+    for subsystem in &config.subsystems {
+        sections.add(&subsystem.file, &subsystem.value.name, errors);
+        scope.check_subsystem(&subsystem.file, &subsystem.value, errors);
+    }
+    let manifest = &config.manifest;
+    let mut listed = Names::new("раздел в menu");
+    for name in &manifest.value.menu {
+        listed.add_repeat_only(&manifest.file, name, errors);
+        if !sections.contains(&name.value) {
+            errors.push(at(
+                &manifest.file,
+                name,
+                format!("нет раздела меню «{}»", name.value),
+            ));
+        }
+    }
+    for subsystem in &config.subsystems {
+        let name = &subsystem.value.name;
+        if !listed.contains(&name.value) {
+            let reason = format!(
+                "раздела «{}» нет в списке menu в {}",
+                name.value,
+                manifest.file.display()
+            );
+            errors.push(at(&subsystem.file, name, reason));
+        }
+    }
+}
+
+fn check_icon(file: &Path, icon: Option<&Spanned<String>>, errors: &mut Vec<Error>) {
+    if let Some(icon) = icon
+        && !ICONS.contains(&icon.value.as_str())
+    {
+        let reason = format!(
+            "нет значка «{}»: допустимы имена файлов ostov-ui/assets/icons без .svg",
+            icon.value
+        );
+        errors.push(at(file, icon, reason));
+    }
 }
 
 /// Имена объектов, на которые можно сослаться.
@@ -86,6 +170,58 @@ impl Scope<'_> {
                     register,
                     format!("нет регистра «{}»", register.value),
                 ));
+            }
+        }
+    }
+
+    /// Раздел → группа → объекты; объект встречается в разделе один раз, даже в разных группах.
+    fn check_subsystem(&self, file: &Path, subsystem: &Subsystem, errors: &mut Vec<Error>) {
+        check_icon(file, subsystem.icon.as_ref(), errors);
+        if subsystem.objects.is_empty() {
+            let reason = format!("в разделе «{}» нет объектов", subsystem.name.value);
+            errors.push(at(file, &subsystem.name, reason));
+        }
+        let mut items = Names::new("пункт меню");
+        self.check_entries(file, &subsystem.objects, true, &mut items, errors);
+    }
+
+    fn check_entries<'a>(
+        &self,
+        file: &'a Path,
+        entries: &[Spanned<MenuEntry>],
+        groups_allowed: bool,
+        items: &mut Names<'a>,
+        errors: &mut Vec<Error>,
+    ) {
+        for entry in entries {
+            match &entry.value {
+                MenuEntry::Object(name) => {
+                    items.repeat(file, name, entry.referenced.line(), errors);
+                    if self.registers.contains(name.as_str()) {
+                        let reason = format!(
+                            "регистр «{name}» нельзя открыть из меню: там справочники и документы"
+                        );
+                        errors.push(at(file, entry, reason));
+                    } else if !self.ref_targets.contains(name.as_str()) {
+                        let reason = format!("нет справочника или документа «{name}»");
+                        errors.push(at(file, entry, reason));
+                    }
+                }
+                MenuEntry::Group(group) if groups_allowed => {
+                    check_icon(file, group.icon.as_ref(), errors);
+                    if group.objects.is_empty() {
+                        let reason = format!("в группе «{}» нет объектов", group.title);
+                        errors.push(at(file, entry, reason));
+                    }
+                    self.check_entries(file, &group.objects, false, items, errors);
+                }
+                MenuEntry::Group(group) => {
+                    let reason = format!(
+                        "группа «{}» внутри группы: в меню допустим один уровень групп",
+                        group.title
+                    );
+                    errors.push(at(file, entry, reason));
+                }
             }
         }
     }
@@ -189,18 +325,24 @@ impl<'a> Names<'a> {
 
     /// Только повтор, без проверки вида: для ссылок на уже объявленные имена.
     fn add_repeat_only(&mut self, file: &'a Path, name: &Spanned<String>, errors: &mut Vec<Error>) {
-        if let Some((first_file, first_line)) = self.first.get(&name.value) {
+        self.repeat(file, &name.value, name.referenced.line(), errors);
+    }
+
+    fn repeat(&mut self, file: &'a Path, name: &str, line: u64, errors: &mut Vec<Error>) {
+        if let Some((first_file, first_line)) = self.first.get(name) {
             let reason = format!(
-                "{} «{}» повторяется, первое объявление: {}:{first_line}",
+                "{} «{name}» повторяется, первое объявление: {}:{first_line}",
                 self.what,
-                name.value,
                 first_file.display()
             );
-            errors.push(at(file, name, reason));
+            errors.push(Error::new(file, Some(line), reason));
         } else {
-            self.first
-                .insert(name.value.clone(), (file, name.referenced.line()));
+            self.first.insert(name.to_owned(), (file, line));
         }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.first.contains_key(name)
     }
 }
 

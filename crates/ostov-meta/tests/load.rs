@@ -40,7 +40,7 @@ fn warehouse_config_loads() {
     assert!(receipt.file.ends_with("documents/receipt.yaml"));
     let supplier = &receipt.value.fields[1];
     assert_eq!(supplier.kind.value, FieldType::Ref("suppliers".into()));
-    assert_eq!(supplier.kind.referenced.line(), 11, "строка ref(suppliers)");
+    assert_eq!(supplier.kind.referenced.line(), 12, "строка ref(suppliers)");
     let qty = &receipt.value.tables[0].fields[1];
     assert_eq!(qty.kind.value, FieldType::Decimal { scale: 3 });
 

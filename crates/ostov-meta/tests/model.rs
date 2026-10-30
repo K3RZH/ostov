@@ -8,7 +8,7 @@ mod common;
 use common::repo_config;
 use ostov_core::local::warehouse;
 use ostov_meta::{demo, load};
-use ostov_model::{FieldDef, FieldKind, RegisterKind};
+use ostov_model::{FieldDef, FieldKind, Meta, ObjectKind, RegisterKind, Rights};
 
 /// Поле без заголовка: в config.rs заголовков нет, сравниваем имя, тип и цель ссылки.
 fn shape(fields: &[FieldDef]) -> Vec<(String, FieldKind, Option<String>)> {
@@ -87,4 +87,68 @@ fn titles_come_from_yaml() {
 #[test]
 fn demo_matches_config_folder() {
     assert_eq!(demo().unwrap(), load(&repo_config()).unwrap());
+}
+
+#[test]
+fn get_meta_for_warehouse() {
+    let meta = Meta::new(&load(&repo_config()).unwrap());
+    assert!(meta.roles.is_empty(), "роли заполнит ostov-sec");
+
+    let [section] = meta.menu.as_slice() else {
+        panic!("ожидался один раздел меню: {:?}", meta.menu);
+    };
+    assert_eq!(
+        (
+            section.title.as_str(),
+            section.icon.as_deref(),
+            section.object.as_deref()
+        ),
+        ("Склад", Some("warehouse"), None)
+    );
+    let items: Vec<(&str, Option<&str>, Option<&str>)> = section
+        .children
+        .iter()
+        .map(|i| (i.title.as_str(), i.icon.as_deref(), i.object.as_deref()))
+        .collect();
+    assert_eq!(
+        items,
+        vec![
+            ("Товары", Some("box"), Some("goods")),
+            ("Склады", Some("warehouse"), Some("warehouses")),
+            ("Поставщики", Some("users"), Some("suppliers")),
+            ("Поступление", Some("stock-in"), Some("receipt")),
+            ("Расход", Some("stock-out"), Some("issue")),
+        ]
+    );
+
+    assert_eq!(meta.objects.len(), 5, "регистры в GetMeta не попадают");
+    let receipt = meta.objects.iter().find(|o| o.name == "receipt").unwrap();
+    assert_eq!(receipt.kind, ObjectKind::Document);
+    assert_eq!(receipt.rights, Rights::ALL, "пока нет ostov-sec");
+    let supplier = &receipt.fields[1];
+    assert_eq!(
+        (
+            supplier.name.as_str(),
+            supplier.title.as_str(),
+            supplier.kind,
+            supplier.target.as_deref()
+        ),
+        ("supplier", "Поставщик", FieldKind::Ref, Some("suppliers"))
+    );
+    let amount = &receipt.fields[3];
+    assert_eq!(
+        (amount.name.as_str(), amount.read_only, amount.required),
+        ("amount", true, false)
+    );
+    let lines = &receipt.table_parts[0];
+    assert_eq!(
+        (lines.name.as_str(), lines.title.as_str()),
+        ("lines", "Товары")
+    );
+    assert_eq!(lines.fields[1].kind, FieldKind::Decimal { scale: 3 });
+    assert!(lines.fields[3].read_only, "сумму строки считает ядро");
+
+    let goods = meta.objects.iter().find(|o| o.name == "goods").unwrap();
+    assert_eq!(goods.kind, ObjectKind::Catalog);
+    assert!(goods.table_parts.is_empty());
 }

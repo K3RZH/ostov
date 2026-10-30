@@ -1,0 +1,9 @@
+subsystem: warehouse
+title: Склад
+icon: warehouse
+objects:
+  - goods
+  - warehouses
+  - suppliers
+  - receipt
+  - issue
