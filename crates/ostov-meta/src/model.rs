@@ -16,6 +16,17 @@ pub struct ConfigFiles {
     pub catalogs: Vec<Located<Catalog>>,
     pub documents: Vec<Located<Document>>,
     pub registers: Vec<Located<Register>>,
+    pub subsystems: Vec<Located<Subsystem>>,
+}
+
+/// Раздел меню: заголовок и объекты, которые из него открываются.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subsystem {
+    #[serde(rename = "subsystem")]
+    pub name: Spanned<String>,
+    pub title: String,
+    pub objects: Vec<Spanned<String>>,
 }
 
 /// Объект и файл, из которого он прочитан.

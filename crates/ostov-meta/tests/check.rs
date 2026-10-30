@@ -276,3 +276,105 @@ fn all_errors_are_reported_sorted_by_file_and_line() {
     assert_error(&errors[1], "catalogs/units.yaml", Some(4), "не ASCII");
     assert_error(&errors[2], "catalogs/units.yaml", Some(6), "«nothing»");
 }
+
+/// Раздел меню; объекты начинаются со строки 4.
+fn section(name: &str, objects: &[&str]) -> String {
+    let items: String = objects.iter().map(|o| format!("\n  - {o}")).collect();
+    let items = if items.is_empty() {
+        " []".to_owned()
+    } else {
+        items
+    };
+    format!("subsystem: {name}\ntitle: Раздел\nobjects:{items}\n")
+}
+
+#[test]
+fn menu_objects_must_exist() {
+    let config = TempConfig::new("check-menu-missing");
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write(
+            "subsystems/warehouse.yaml",
+            &section("warehouse", &["goods", "receipt"]),
+        );
+    assert_error(
+        &single(config.check_errors()),
+        "subsystems/warehouse.yaml",
+        Some(5),
+        "нет справочника или документа «receipt»",
+    );
+}
+
+#[test]
+fn registers_are_not_menu_items() {
+    let config = TempConfig::new("check-menu-register");
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write(
+            "registers/stock.yaml",
+            &register(&[("goods", "ref(goods)")], &[("qty", "decimal(3)")]),
+        )
+        .write(
+            "subsystems/warehouse.yaml",
+            &section("warehouse", &["stock"]),
+        );
+    assert_error(
+        &single(config.check_errors()),
+        "subsystems/warehouse.yaml",
+        Some(4),
+        "регистр «stock» нельзя открыть из меню",
+    );
+}
+
+#[test]
+fn menu_item_repeats_in_section() {
+    let config = TempConfig::new("check-menu-dup-item");
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write(
+            "subsystems/warehouse.yaml",
+            &section("warehouse", &["goods", "goods"]),
+        );
+    assert_error(
+        &single(config.check_errors()),
+        "subsystems/warehouse.yaml",
+        Some(5),
+        "пункт меню «goods» повторяется",
+    );
+}
+
+#[test]
+fn same_object_in_two_sections_is_fine() {
+    let config = TempConfig::new("check-menu-two-sections");
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write("subsystems/sales.yaml", &section("sales", &["goods"]))
+        .write(
+            "subsystems/warehouse.yaml",
+            &section("warehouse", &["goods"]),
+        );
+    load(&config.dir).unwrap();
+}
+
+#[test]
+fn menu_sections_are_unique_and_not_empty() {
+    let config = TempConfig::new("check-menu-sections");
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write("subsystems/a.yaml", &section("warehouse", &["goods"]))
+        .write("subsystems/b.yaml", &section("warehouse", &[]));
+    let errors = config.check_errors();
+    assert_eq!(errors.len(), 2, "{errors:#?}");
+    assert_error(
+        &errors[0],
+        "subsystems/b.yaml",
+        Some(1),
+        "раздел меню «warehouse» повторяется",
+    );
+    assert_error(
+        &errors[1],
+        "subsystems/b.yaml",
+        Some(1),
+        "в разделе «warehouse» нет объектов",
+    );
+}

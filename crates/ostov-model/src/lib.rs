@@ -112,4 +112,97 @@ pub struct Config {
     pub catalogs: Vec<CatalogDef>,
     pub documents: Vec<DocumentDef>,
     pub registers: Vec<RegisterDef>,
+    pub subsystems: Vec<SubsystemDef>,
+}
+
+/// Раздел меню: объекты (справочники и документы) в порядке, как они записаны в файле.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubsystemDef {
+    pub name: String,
+    pub title: String,
+    pub objects: Vec<String>,
+}
+
+// ---------------------------------------------------------------- ответ GetMeta
+
+/// Что интерфейсу нужно, чтобы построить меню, колонки списков и формы (ответ GetMeta).
+/// Права и роли добавятся с `ostov-sec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Meta {
+    pub menu: Vec<MenuSection>,
+    pub objects: Vec<ObjectMeta>,
+}
+
+/// Объект, который открывается в интерфейсе: справочник или документ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectMeta {
+    pub name: String,
+    pub title: String,
+    pub kind: ObjectKind,
+    /// Поля шапки: имя, заголовок, тип, цель ссылки.
+    pub fields: Vec<FieldDef>,
+    /// У справочника пусто.
+    pub table_parts: Vec<TablePartDef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectKind {
+    Catalog,
+    Document,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuSection {
+    pub name: String,
+    pub title: String,
+    pub items: Vec<MenuItem>,
+}
+
+/// Пункт меню. Заголовок и вид продублированы из объекта, чтобы меню рисовалось без поиска.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem {
+    pub object: String,
+    pub title: String,
+    pub kind: ObjectKind,
+}
+
+impl Meta {
+    /// Метаданные для интерфейса из проверенной конфигурации. Пункт меню на объект, которого
+    /// нет, пропускается: в проверенной конфигурации (`ostov check`) таких не бывает.
+    pub fn new(config: &Config) -> Self {
+        let catalogs = config.catalogs.iter().map(|c| ObjectMeta {
+            name: c.name.clone(),
+            title: c.title.clone(),
+            kind: ObjectKind::Catalog,
+            fields: c.fields.clone(),
+            table_parts: Vec::new(),
+        });
+        let documents = config.documents.iter().map(|d| ObjectMeta {
+            name: d.name.clone(),
+            title: d.title.clone(),
+            kind: ObjectKind::Document,
+            fields: d.fields.clone(),
+            table_parts: d.table_parts.clone(),
+        });
+        let objects: Vec<ObjectMeta> = catalogs.chain(documents).collect();
+        let menu = config
+            .subsystems
+            .iter()
+            .map(|section| MenuSection {
+                name: section.name.clone(),
+                title: section.title.clone(),
+                items: section
+                    .objects
+                    .iter()
+                    .filter_map(|name| objects.iter().find(|o| &o.name == name))
+                    .map(|object| MenuItem {
+                        object: object.name.clone(),
+                        title: object.title.clone(),
+                        kind: object.kind,
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self { menu, objects }
+    }
 }

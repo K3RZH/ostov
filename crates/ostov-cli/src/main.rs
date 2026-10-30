@@ -30,11 +30,12 @@ fn check(dir: &Path) -> ExitCode {
     match ostov_meta::load(dir) {
         Ok(config) => {
             println!(
-                "{}: ошибок нет. Справочников: {}, документов: {}, регистров: {}.",
+                "{}: ошибок нет. Справочников: {}, документов: {}, регистров: {}, разделов меню: {}.",
                 dir.display(),
                 config.catalogs.len(),
                 config.documents.len(),
-                config.registers.len()
+                config.registers.len(),
+                config.subsystems.len()
             );
             ExitCode::SUCCESS
         }

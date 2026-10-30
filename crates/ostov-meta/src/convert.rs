@@ -1,7 +1,8 @@
 //! Проверенные файлы → модель для ядра (`ostov-model`). Номера строк здесь уже не нужны.
 
 use ostov_model::{
-    CatalogDef, Config, DocumentDef, FieldDef, FieldKind, RegisterDef, RegisterKind, TablePartDef,
+    CatalogDef, Config, DocumentDef, FieldDef, FieldKind, RegisterDef, RegisterKind, SubsystemDef,
+    TablePartDef,
 };
 
 use crate::{ConfigFiles, Field, FieldType};
@@ -59,6 +60,18 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
                     },
                     dimensions: fields(register.dimensions),
                     resources: fields(register.resources),
+                }
+            })
+            .collect(),
+        subsystems: files
+            .subsystems
+            .into_iter()
+            .map(|subsystem| {
+                let subsystem = subsystem.value;
+                SubsystemDef {
+                    name: subsystem.name.value,
+                    title: subsystem.title,
+                    objects: subsystem.objects.into_iter().map(|o| o.value).collect(),
                 }
             })
             .collect(),

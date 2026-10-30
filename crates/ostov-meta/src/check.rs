@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_saphyr::Spanned;
 
-use crate::{ConfigFiles, Document, Error, Field, FieldType, Register};
+use crate::{ConfigFiles, Document, Error, Field, FieldType, Register, Subsystem};
 
 /// Лимит идентификатора PostgreSQL: из имён делаются таблицы и колонки (ADR-025).
 pub const MAX_NAME_LEN: usize = 63;
@@ -58,6 +58,11 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
     for register in &config.registers {
         scope.check_register(&register.file, &register.value, &mut errors);
     }
+    let mut sections = Names::new("раздел меню");
+    for subsystem in &config.subsystems {
+        sections.add(&subsystem.file, &subsystem.value.name, &mut errors);
+        scope.check_subsystem(&subsystem.file, &subsystem.value, &mut errors);
+    }
 
     errors.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     errors
@@ -86,6 +91,27 @@ impl Scope<'_> {
                     register,
                     format!("нет регистра «{}»", register.value),
                 ));
+            }
+        }
+    }
+
+    /// Пункт меню открывает справочник или документ; один объект — один пункт раздела.
+    fn check_subsystem(&self, file: &Path, subsystem: &Subsystem, errors: &mut Vec<Error>) {
+        if subsystem.objects.is_empty() {
+            let reason = format!("в разделе «{}» нет объектов", subsystem.name.value);
+            errors.push(at(file, &subsystem.name, reason));
+        }
+        let mut items = Names::new("пункт меню");
+        for object in &subsystem.objects {
+            items.add_repeat_only(file, object, errors);
+            let name = object.value.as_str();
+            if self.registers.contains(name) {
+                let reason =
+                    format!("регистр «{name}» нельзя открыть из меню: там справочники и документы");
+                errors.push(at(file, object, reason));
+            } else if !self.ref_targets.contains(name) {
+                let reason = format!("нет справочника или документа «{name}»");
+                errors.push(at(file, object, reason));
             }
         }
     }
