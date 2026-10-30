@@ -450,3 +450,33 @@ fn receipts_sort_by_supplier_title_across_pages() {
         assert_eq!(jumped, titles[150..187].to_vec());
     }
 }
+
+#[test]
+fn panic_in_command_becomes_error_and_engine_keeps_working() {
+    let base = Base::new("panic");
+    let mut config = super::warehouse().unwrap();
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    config.create_tables(&mut db).unwrap();
+    if let Some(receipt) = config.documents.get_mut("receipt") {
+        receipt.rule = |_| panic!("ошибка в правиле проведения");
+    }
+    let engine = super::LocalEngine::new(Box::new(db), config);
+
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    let doc = receipt(main, mill, &[(flour, 1000, 100)]);
+
+    let err = engine.save("receipt", &doc, PostAction::Post).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(
+        err.details.contains("ошибка в правиле проведения"),
+        "{}",
+        err.details
+    );
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(0));
+
+    // Тот же движок дальше работает: документ записывается без проведения.
+    engine.save("receipt", &doc, PostAction::Write).unwrap();
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(1));
+}
