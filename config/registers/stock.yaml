@@ -1,5 +1,6 @@
 register: stock
 title: Остатки товаров
+kind: accumulation
 dimensions:
   - name: warehouse
     title: Склад

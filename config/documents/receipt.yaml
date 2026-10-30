@@ -1,5 +1,7 @@
 document: receipt
 title: Поступление
+registers:
+  - stock
 fields:
   - name: date
     title: Дата

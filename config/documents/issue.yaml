@@ -1,0 +1,21 @@
+document: issue
+title: Расход
+registers:
+  - stock
+fields:
+  - name: date
+    title: Дата
+    type: date
+  - name: warehouse
+    title: Склад
+    type: ref(warehouses)
+tables:
+  - name: lines
+    title: Товары
+    fields:
+      - name: goods
+        title: Товар
+        type: ref(goods)
+      - name: qty
+        title: Количество
+        type: decimal(3)
