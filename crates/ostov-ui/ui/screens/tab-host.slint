@@ -144,6 +144,8 @@ export component TabHost inherits VerticalLayout {
     // Куда падает вкладка из другого окна: подсветка панели и место вставки (-1: нет).
     in property <bool> drop-target;
     in property <int> insert-at: -1;
+    // Вместо «призрака» за указателем идёт настоящее окно с вкладкой.
+    in property <bool> follower-active;
     // Где в окне стоит панель вкладок (для поиска окна под указателем).
     out property <length> strip-left: bar.absolute-position.x;
     out property <length> strip-top: bar.absolute-position.y;
@@ -270,7 +272,7 @@ export component TabHost inherits VerticalLayout {
                         }
                     }
                     // Вкладка вытащена за панель: за указателем идёт её «призрак», при отпускании откроется окно.
-                    if root.drag-index >= 0 && root.drag-out : Rectangle {
+                    if root.drag-index >= 0 && root.drag-out && !root.follower-active : Rectangle {
                         x: root.drag-x - root.tab-width / 2;
                         y: root.drag-y - 20px;
                         z: 20;

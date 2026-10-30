@@ -246,6 +246,11 @@ impl Windows {
             let id = self.inner.borrow_mut().workspace.open_extra(tab);
             self.open_host(main, shell, id);
             self.refresh_host(id);
+            // Окно-копия поверх остальных, а вместо «призрака» вкладки идёт оно само.
+            if let Some(window) = self.inner.borrow().hosts.get(&id) {
+                window.set_keep_on_top(true);
+            }
+            source_window.set_follower_active(true);
             if let Some(drag) = self.inner.borrow_mut().drag.as_mut() {
                 drag.follower = Some(id);
             }
@@ -253,6 +258,7 @@ impl Windows {
         } else if !out && let Some(id) = follower {
             // Вернулись в панель исходного окна: окно-копия не нужно.
             let change = self.inner.borrow_mut().workspace.cancel_detach(id);
+            source_window.set_follower_active(false);
             if let Some(drag) = self.inner.borrow_mut().drag.as_mut() {
                 drag.follower = None;
             }
@@ -288,7 +294,16 @@ impl Windows {
         out: bool,
     ) -> bool {
         self.highlight(main, None);
+        source_window.set_follower_active(false);
         let state = self.inner.borrow_mut().drag.take();
+        // Окно, которое осталось жить, снова обычное.
+        if let Some(window) = state
+            .as_ref()
+            .and_then(|s| s.follower)
+            .and_then(|id| self.inner.borrow().hosts.get(&id).map(|w| w.clone_strong()))
+        {
+            window.set_keep_on_top(false);
+        }
         let Some(state) = state.filter(|_| global_coords()) else {
             return false;
         };

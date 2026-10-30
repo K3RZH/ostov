@@ -115,6 +115,7 @@ export component MainPage inherits Rectangle {
     callback tab-drag-ended(int, length, length, bool);
     in property <bool> drop-target;
     in property <int> insert-at: -1;
+    in property <bool> follower-active;
     out property <length> strip-left <=> tab-host.strip-left;
     out property <length> strip-top <=> tab-host.strip-top;
     out property <length> strip-width <=> tab-host.strip-width;
@@ -300,6 +301,7 @@ export component MainPage inherits Rectangle {
                 tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
                 drop-target: root.drop-target;
                 insert-at: root.insert-at;
+                follower-active: root.follower-active;
                 user-add-clicked => { root.user-add-clicked(); }
                 user-toggle(i) => { root.user-toggle(i); }
             }

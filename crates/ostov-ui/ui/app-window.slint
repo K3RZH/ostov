@@ -127,6 +127,12 @@ export component AppWindow inherits Window {
     // тонкая полоса `WindowBar`. Края окна тянутся за `resize-border-width`.
     no-frame: true;
     resize-border-width: 6px;
+    // Окно-копия вкладки на время перетаскивания: поверх остальных, иначе GNOME прячет новое окно
+    // за активным.
+    in property <bool> keep-on-top;
+    always-on-top: root.keep-on-top;
+    // Вместо «призрака» вкладки за указателем идёт настоящее окно.
+    in property <bool> follower-active;
     private property <length> chrome-height: root.page == 2 ? 0px : 36px;
 
     title: root.page == 0 ? "Ostov — Выбор базы"
@@ -172,6 +178,7 @@ export component AppWindow inherits Window {
         maximized: root.maximized;
         drop-target: root.drop-target;
         insert-at: root.insert-at;
+        follower-active: root.follower-active;
         tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
         tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
         minimize => { root.minimized = true; }
@@ -200,6 +207,7 @@ export component AppWindow inherits Window {
         tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
         drop-target: root.drop-target;
         insert-at: root.insert-at;
+        follower-active: root.follower-active;
         tab-returned(i) => { root.tab-returned(i); }
         user-add-clicked => { root.adding-user = true; }
         user-toggle(i) => { root.user-toggle(i); }
