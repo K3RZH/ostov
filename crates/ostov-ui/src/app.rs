@@ -165,6 +165,19 @@ fn index(value: i32) -> Option<usize> {
 }
 
 /// Переносит состояние оболочки в окно.
+/// Вкладки в виде для Slint.
+pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
+    tabs.iter()
+        .map(|tab| TabItem {
+            title: tab.title.as_str().into(),
+            icon: tab.icon.into(),
+            modified: tab.modified,
+            view: tab.view.into(),
+            preview: tab.preview,
+        })
+        .collect()
+}
+
 pub fn refresh(window: &AppWindow, shell: &Shell) {
     let rows: Vec<NavRow> = shell
         .nav_rows()
@@ -180,17 +193,7 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
             favorite: row.favorite,
         })
         .collect();
-    let tabs: Vec<TabItem> = shell
-        .tabs()
-        .iter()
-        .map(|tab| TabItem {
-            title: tab.title.as_str().into(),
-            icon: tab.icon.into(),
-            modified: tab.modified,
-            view: tab.view.into(),
-            preview: tab.preview,
-        })
-        .collect();
+    let tabs = tab_items(shell.tabs());
     window.set_nav(ModelRc::new(VecModel::from(rows)));
     window.set_tabs(ModelRc::new(VecModel::from(tabs)));
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
@@ -318,6 +321,15 @@ pub fn prepare_doc_window(window: &AppWindow) {
         .set_size(slint::LogicalSize::new(1100.0, 760.0));
 }
 
+/// Дополнительное окно с вкладками (страница 4): те же настройки вида, что у главного.
+pub fn prepare_host_window(window: &AppWindow, settings: Settings) {
+    apply_settings(window, settings);
+    window.set_page(4);
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1000.0, 700.0));
+}
+
 fn apply_settings(window: &AppWindow, settings: Settings) {
     window.global::<Theme>().set_dark(settings.dark);
     window
@@ -334,7 +346,7 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
 }
 
 /// Настройки, которые сейчас выбраны в окне.
-fn current_settings(window: &AppWindow) -> Settings {
+pub fn current_settings(window: &AppWindow) -> Settings {
     Settings {
         dark: window.get_dark_theme(),
         radius: window.get_radius_mode(),
@@ -379,6 +391,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     apply_settings(&app, Settings::load());
     let shell = Rc::new(RefCell::new(Shell::demo()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
+    let windows = crate::windows::Windows::new();
     let directory = Rc::new(RefCell::new(Directory::demo()));
     refresh_users(&app, &directory.borrow());
     app.set_roles(ModelRc::new(VecModel::from(
@@ -547,7 +560,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_theme_chosen({
-        let (app, receipts) = (app.as_weak(), receipts.clone());
+        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
         move |dark| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -556,12 +569,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             apply_settings(&app, settings);
             receipts.each_detached(|window| apply_settings(window, settings));
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_radius_chosen({
-        let (app, receipts) = (app.as_weak(), receipts.clone());
+        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
         move |radius| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -570,12 +584,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             apply_settings(&app, settings);
             receipts.each_detached(|window| apply_settings(window, settings));
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_density_chosen({
-        let (app, receipts) = (app.as_weak(), receipts.clone());
+        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
         move |density| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -584,12 +599,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             apply_settings(&app, settings);
             receipts.each_detached(|window| apply_settings(window, settings));
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_font_chosen({
-        let (app, receipts) = (app.as_weak(), receipts.clone());
+        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
         move |font| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -598,6 +614,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             apply_settings(&app, settings);
             receipts.each_detached(|window| apply_settings(window, settings));
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
@@ -686,9 +703,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_nav_clicked({
-        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
         move |id| {
             let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
             let mut shell = shell.borrow_mut();
             receipts.before(&app, &mut shell);
             if let Some(id) = index(id) {
@@ -700,9 +723,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_tab_selected({
-        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
         move |tab| {
             let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
             let mut shell = shell.borrow_mut();
             receipts.before(&app, &mut shell);
             if let Some(tab) = index(tab) {
@@ -714,11 +743,25 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_tab_detached({
-        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
         move |tab| {
             let Some(app) = app.upgrade() else { return };
-            if let Some(tab) = index(tab) {
-                receipts.detach(&app, &mut shell.borrow_mut(), tab);
+            let Some(tab) = index(tab) else { return };
+            let kind = shell
+                .borrow()
+                .tabs()
+                .get(tab)
+                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
+            match kind {
+                // Документ выносится прежним способом: его состояние привязано к окну документа.
+                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
+                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
+                _ => {}
             }
         }
     });

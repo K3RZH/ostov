@@ -108,6 +108,14 @@ export component TabHost inherits VerticalLayout {
     callback tab-selected(int);
     callback tab-closed(int);
     callback tab-detached(int);
+    callback tab-returned(int);
+    // Дополнительное окно: в меню вкладки есть «Вернуть в главное окно».
+    in property <bool> extra;
+
+    // Какие вкладки можно вынести в окно: документы и вкладки без своего состояния.
+    pure function can-detach(index: int) -> bool {
+        index >= 0 && index < root.tabs.length && root.tabs[index].view != "users" && root.tabs[index].view != "receipts"
+    }
     callback user-add-clicked();
     callback user-toggle(int);
 
@@ -217,22 +225,42 @@ export component TabHost inherits VerticalLayout {
                     }
                 }
 
-    // Меню вкладки: вынести документ в отдельное окно (документы), закрыть.
+    // Меню вкладки: вынести в отдельное окно, вернуть в главное (в дополнительном окне), закрыть.
+    // Пока список и пользователи в отдельное окно не выносятся: их состояние привязано к главному окну.
     tab-menu := PopupWindow {
         x: root.tab-menu-x;
         y: root.tab-menu-y;
         width: MenuMetrics.width;
-        height: MenuMetrics.height(2);
+        height: MenuMetrics.height(root.extra ? 3 : 2);
         close-policy: PopupClosePolicy.close-on-click-outside;
 
-        MenuPanel {
+        if !root.extra : MenuPanel {
             actions: [
                 { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
-                  enabled: root.tab-menu-index >= 0 && root.tab-menu-index < root.tabs.length && root.tabs[root.tab-menu-index].view == "receipt", divider: false },
+                  enabled: root.can-detach(root.tab-menu-index), divider: false },
                 { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
             ];
             chosen(id) => {
                 if (id == "detach") {
+                    root.tab-detached(root.tab-menu-index);
+                } else if (id == "close") {
+                    root.tab-closed(root.tab-menu-index);
+                }
+                tab-menu.close();
+            }
+        }
+        if root.extra : MenuPanel {
+            actions: [
+                { id: "return", label: "Вернуть в главное окно", icon: "undo", danger: false,
+                  enabled: root.tab-menu-index >= 0, divider: false },
+                { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
+                  enabled: root.tabs.length > 1 && root.can-detach(root.tab-menu-index), divider: false },
+                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
+            ];
+            chosen(id) => {
+                if (id == "return") {
+                    root.tab-returned(root.tab-menu-index);
+                } else if (id == "detach") {
                     root.tab-detached(root.tab-menu-index);
                 } else if (id == "close") {
                     root.tab-closed(root.tab-menu-index);

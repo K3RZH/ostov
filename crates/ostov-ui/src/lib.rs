@@ -21,6 +21,7 @@ pub mod receipts_ui;
 pub mod settings;
 pub mod shell;
 pub mod users;
+pub mod windows;
 pub mod workspace;
 
 /// Имя крейта (проверка, что каркас собран).

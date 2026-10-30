@@ -2,7 +2,7 @@ import { Theme } from "theme.slint";
 import { StartPage, RecentDb } from "screens/start-page.slint";
 import { LoginPage } from "screens/login-page.slint";
 import { MainPage, NavRow } from "screens/main-page.slint";
-import { TabItem } from "screens/tab-host.slint";
+import { TabHost, TabItem } from "screens/tab-host.slint";
 import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
@@ -108,6 +108,8 @@ export component AppWindow inherits Window {
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
     callback tab-detached <=> main-page.tab-detached;
+    // Страница 4 (дополнительное окно с вкладками): вернуть вкладку в главное окно.
+    callback tab-returned(int);
     // Страница 3 (окно документа): заголовок окна.
     in property <string> doc-title;
 
@@ -120,11 +122,12 @@ export component AppWindow inherits Window {
     title: root.page == 0 ? "Ostov — Выбор базы"
         : root.page == 1 ? "Ostov — " + login-page.heading
         : root.page == 3 ? root.doc-title + " — Ostov"
+        : root.page == 4 ? root.doc-title + " — Ostov"
         : "Ostov — " + main-page.base-name;
     preferred-width: 1200px;
     preferred-height: 760px;
-    min-width: root.page == 2 ? 1000px : root.page == 3 ? 760px : 960px;
-    min-height: root.page == 0 ? 720px : root.page == 3 ? 520px : 600px;
+    min-width: root.page == 2 ? 1000px : root.page == 3 || root.page == 4 ? 760px : 960px;
+    min-height: root.page == 0 ? 720px : root.page == 3 || root.page == 4 ? 520px : 600px;
     default-font-family: "Open Sans";
     background: Theme.bg;
 
@@ -162,6 +165,24 @@ export component AppWindow inherits Window {
         close-window => { root.close(); }
         settings-clicked => { root.settings-open = true; }
         user-add-clicked => { root.adding-user = true; }
+    }
+
+    if root.page == 4 : TabHost {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        extra: true;
+        tabs: root.tabs;
+        active-tab: root.active-tab;
+        users: root.users;
+        user-message: root.user-message;
+        tab-selected(i) => { root.tab-selected(i); }
+        tab-closed(i) => { root.tab-closed(i); }
+        tab-detached(i) => { root.tab-detached(i); }
+        tab-returned(i) => { root.tab-returned(i); }
+        user-add-clicked => { root.adding-user = true; }
+        user-toggle(i) => { root.user-toggle(i); }
     }
 
     if root.page == 3 : ReceiptFormView {

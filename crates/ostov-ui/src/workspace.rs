@@ -264,6 +264,14 @@ impl Workspace {
         })
     }
 
+    /// Закрывает окно целиком (крестиком): его вкладки закрываются вместе с ним.
+    pub fn close_window(&mut self, id: WindowId) {
+        self.extra.retain(|(i, _)| *i != id);
+        if self.active == WindowRef::Extra(id) {
+            self.active = WindowRef::Main;
+        }
+    }
+
     /// Закрывает вкладку дополнительного окна; пустое окно закрывается.
     pub fn close_tab(&mut self, id: WindowId, index: usize) -> Change {
         if let Some(list) = self.list_mut(id) {

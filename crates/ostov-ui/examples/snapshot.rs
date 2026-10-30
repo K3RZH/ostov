@@ -217,6 +217,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_base_name("Кафе-2026".into());
             save(&window, dark, &path)
         }
+        "tab-host" => {
+            // Вкладка вынесена в отдельное окно с панелью вкладок.
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            let window = app_window(2)?;
+            let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::demo()));
+            {
+                let mut shell = shell.borrow_mut();
+                shell.click(2);
+                shell.click(4);
+                shell.click(6);
+            }
+            let windows = ostov_ui::windows::Windows::new();
+            windows.detach_from_main(&window, &shell, 1);
+            let mut result = Ok(());
+            windows.each(|host| result = save(host, dark, &path));
+            result
+        }
         "settings" => {
             let window = app_window(2)?;
             window.set_settings_open(true);
