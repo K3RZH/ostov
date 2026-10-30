@@ -20,7 +20,7 @@ use ostov_api::{
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
-pub use config::{Config, DocumentConfig, warehouse};
+pub use config::{Config, DocumentConfig, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid};
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
@@ -640,9 +640,28 @@ fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
     }
 }
 
-/// Открывает и создаёт локальные базы (режим 1) с временной конфигурацией «Склад».
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LocalConnector;
+/// Открывает и создаёт локальные базы (режим 1).
+///
+/// Конфигурацию передаёт приложение: `LocalConnector::new(ostov_meta::load("config")?)`.
+/// `LocalConnector::default()` — встроенный «Склад» из кода.
+#[derive(Debug, Default, Clone)]
+pub struct LocalConnector {
+    model: Option<ostov_model::Config>,
+}
+
+impl LocalConnector {
+    pub fn new(model: ostov_model::Config) -> Self {
+        Self { model: Some(model) }
+    }
+
+    fn config(&self) -> EngineResult<Config> {
+        match &self.model {
+            Some(model) => Config::from_model(model),
+            None => warehouse(),
+        }
+        .map_err(error)
+    }
+}
 
 // Служебная таблица: по ней видно, что файл — база Ostov.
 const BASE_TABLE: &str = "ostov_base";
@@ -665,7 +684,7 @@ impl Connector for LocalConnector {
                 format!("{path} — не база Ostov"),
             ));
         }
-        let config = warehouse().map_err(error)?;
+        let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
@@ -679,7 +698,7 @@ impl Connector for LocalConnector {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
-        let (db, config, lock) = create_base(path)?;
+        let (db, config, lock) = create_base(path, self.config()?)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
         ))
@@ -687,14 +706,13 @@ impl Connector for LocalConnector {
 }
 
 /// Новый файл базы со служебной таблицей и таблицами конфигурации.
-fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
+fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config, File)> {
     if Path::new(path).exists() {
         return Err(invalid(format!(
             "файл {path} уже есть: выберите другое имя"
         )));
     }
     let lock = lock_base(path)?;
-    let config = warehouse().map_err(error)?;
     let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
     in_transaction(&mut db, |db| {
         db.execute(

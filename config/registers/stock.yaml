@@ -1,0 +1,14 @@
+register: stock
+title: Остатки товаров
+kind: accumulation
+dimensions:
+  - name: warehouse
+    title: Склад
+    type: ref(warehouses)
+  - name: goods
+    title: Товар
+    type: ref(goods)
+resources:
+  - name: qty
+    title: Количество
+    type: decimal(3)

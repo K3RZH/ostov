@@ -1,7 +1,6 @@
 //! Объекты: справочники и документы, общее описание полей.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use ostov_store::{Decimal, Dialect, Driver, Value};
 
@@ -12,56 +11,8 @@ pub mod document;
 
 pub type Fields = BTreeMap<String, FieldValue>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FieldKind {
-    Int,
-    Text,
-    Decimal {
-        scale: u8,
-    },
-    /// Дата `ГГГГ-ММ-ДД`; хранится текстом, такая строка сортируется как дата.
-    Date,
-    /// Ссылка на элемент справочника или документ: хранится id, цель — в `FieldDef::target`.
-    Ref,
-}
-
-impl fmt::Display for FieldKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Int => write!(f, "целое число"),
-            Self::Text => write!(f, "строка"),
-            Self::Decimal { scale } => write!(f, "число с {scale} знаками после запятой"),
-            Self::Date => write!(f, "дата ГГГГ-ММ-ДД"),
-            Self::Ref => write!(f, "ссылка"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FieldDef {
-    pub name: String,
-    pub kind: FieldKind,
-    /// Для ссылки: на какой справочник или документ.
-    pub target: Option<String>,
-}
-
-impl FieldDef {
-    pub fn new(name: &str, kind: FieldKind) -> Self {
-        Self {
-            name: name.to_owned(),
-            kind,
-            target: None,
-        }
-    }
-
-    pub fn reference(name: &str, target: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            kind: FieldKind::Ref,
-            target: Some(target.to_owned()),
-        }
-    }
-}
+/// Описания полей общие с `ostov-meta`, живут в `ostov-model`.
+pub use ostov_model::{FieldDef, FieldKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldValue {

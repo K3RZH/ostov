@@ -1,8 +1,9 @@
-//! Временная конфигурация «Склад» под экран поступлений Артёма, пока нет `ostov-meta`.
-//! Когда появятся метаданные, всё это будет читаться из файлов конфигурации.
+//! Конфигурация для `LocalEngine`: объекты ядра, построенные из модели `ostov-model`,
+//! и правила проведения, которые пока написаны в коде.
 
 use std::collections::BTreeMap;
 
+use ostov_model::{CatalogDef, DocumentDef, RegisterDef, RegisterKind, TablePartDef};
 use ostov_store::{Decimal, Driver};
 
 use crate::{
@@ -14,12 +15,13 @@ pub type Parts = BTreeMap<String, Vec<Fields>>;
 
 pub struct DocumentConfig {
     pub kind: DocumentKind,
-    pub rule: fn(&Document) -> Result<Vec<Movement>, CoreError>,
+    pub rule: Rule,
     /// Пересчёт перед записью: суммы считает ядро, а не интерфейс.
-    pub prepare: fn(&mut Fields, &mut Parts) -> Result<(), CoreError>,
+    pub prepare: Prepare,
 }
 
 pub struct Config {
+    /// Название для людей (`title` манифеста): его показывает `hello()`.
     pub name: String,
     pub version: String,
     pub catalogs: BTreeMap<String, Catalog>,
@@ -39,82 +41,165 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Объекты ядра из модели конфигурации (её читает `ostov-meta`).
+    /// Логика проведения пока в коде: правило ищется по имени документа.
+    /// Регистр пока один — `stock`: под него написаны правила и отчёты.
+    pub fn from_model(model: &ostov_model::Config) -> Result<Self, CoreError> {
+        let catalogs = model
+            .catalogs
+            .iter()
+            .map(|c| Ok((c.name.clone(), Catalog::new(&c.name, c.fields.clone())?)))
+            .collect::<Result<BTreeMap<_, _>, CoreError>>()?;
+
+        let stock = match model.registers.as_slice() {
+            [r] if r.name == STOCK && r.kind == RegisterKind::Accumulation => {
+                AccumulationRegister::new(&r.name, r.dimensions.clone(), r.resources.clone())?
+            }
+            _ => {
+                return Err(CoreError::Invalid(format!(
+                    "пока поддерживается ровно один регистр накопления {STOCK}"
+                )));
+            }
+        };
+
+        let mut documents = BTreeMap::new();
+        for d in &model.documents {
+            if let Some(other) = d.registers.iter().find(|r| *r != STOCK) {
+                return Err(CoreError::Invalid(format!(
+                    "документ {} двигает регистр {other}, а пока есть только {STOCK}",
+                    d.name
+                )));
+            }
+            let parts = d
+                .table_parts
+                .iter()
+                .map(|p| TablePart::new(&p.name, p.fields.clone()))
+                .collect::<Result<_, _>>()?;
+            let kind = DocumentKind::new(&d.name, d.fields.clone(), parts)?;
+            let (rule, prepare) = if d.registers.is_empty() {
+                (no_movements as Rule, no_prepare as Prepare)
+            } else {
+                handlers(&d.name).ok_or_else(|| {
+                    CoreError::Invalid(format!("для документа {} нет правила проведения", d.name))
+                })?
+            };
+            documents.insert(
+                d.name.clone(),
+                DocumentConfig {
+                    kind,
+                    rule,
+                    prepare,
+                },
+            );
+        }
+
+        Ok(Self {
+            name: model.title.clone(),
+            version: model.version.clone(),
+            catalogs,
+            documents,
+            stock,
+        })
+    }
+}
+
+const STOCK: &str = "stock";
+
+type Rule = fn(&Document) -> Result<Vec<Movement>, CoreError>;
+type Prepare = fn(&mut Fields, &mut Parts) -> Result<(), CoreError>;
+
+/// Правила проведения, пока их не пишут на Python (`on_post`).
+fn handlers(document: &str) -> Option<(Rule, Prepare)> {
+    match document {
+        "receipt" => Some((|doc| movements(doc, MovementKind::Receipt), receipt_totals)),
+        "issue" => Some((|doc| movements(doc, MovementKind::Issue), no_prepare)),
+        _ => None,
+    }
+}
+
+fn no_movements(_: &Document) -> Result<Vec<Movement>, CoreError> {
+    Ok(Vec::new())
+}
+
+fn no_prepare(_: &mut Fields, _: &mut Parts) -> Result<(), CoreError> {
+    Ok(())
+}
+
+/// Конфигурация «Склад» по умолчанию — та же, что в `config/` (тест в `ostov-meta` сверяет).
 pub fn warehouse() -> Result<Config, CoreError> {
+    Config::from_model(&warehouse_model())
+}
+
+/// Модель «Склада» в коде: для `LocalConnector` без загруженной конфигурации.
+pub fn warehouse_model() -> ostov_model::Config {
     let name = || FieldDef::new("name", FieldKind::Text);
     let date = || FieldDef::new("date", FieldKind::Date);
     let qty = || FieldDef::new("qty", FieldKind::Decimal { scale: 3 });
     let money = |n: &str| FieldDef::new(n, FieldKind::Decimal { scale: 2 });
+    let catalog = |name: &str, fields| CatalogDef {
+        name: name.to_owned(),
+        title: name.to_owned(),
+        fields,
+    };
+    let lines = |fields| TablePartDef {
+        name: "lines".to_owned(),
+        title: "lines".to_owned(),
+        fields,
+    };
+    let document = |name: &str, fields, part| DocumentDef {
+        name: name.to_owned(),
+        title: name.to_owned(),
+        fields,
+        table_parts: vec![part],
+        registers: vec![STOCK.to_owned()],
+    };
 
-    let catalogs = [
-        Catalog::new(
-            "goods",
-            vec![name(), FieldDef::new("unit", FieldKind::Text)],
-        )?,
-        Catalog::new("warehouses", vec![name()])?,
-        Catalog::new("suppliers", vec![name()])?,
-    ];
-
-    let receipt = DocumentKind::new(
-        "receipt",
-        vec![
-            date(),
-            FieldDef::reference("supplier", "suppliers"),
-            FieldDef::reference("warehouse", "warehouses"),
-            money("amount"),
+    ostov_model::Config {
+        name: "warehouse".to_owned(),
+        title: "Склад".to_owned(),
+        version: "0.1.0".to_owned(),
+        catalogs: vec![
+            catalog(
+                "goods",
+                vec![name(), FieldDef::new("unit", FieldKind::Text)],
+            ),
+            catalog("suppliers", vec![name()]),
+            catalog("warehouses", vec![name()]),
         ],
-        vec![TablePart::new(
-            "lines",
-            vec![
+        documents: vec![
+            document(
+                "issue",
+                vec![date(), FieldDef::reference("warehouse", "warehouses")],
+                lines(vec![FieldDef::reference("goods", "goods"), qty()]),
+            ),
+            document(
+                "receipt",
+                vec![
+                    date(),
+                    FieldDef::reference("supplier", "suppliers"),
+                    FieldDef::reference("warehouse", "warehouses"),
+                    money("amount"),
+                ],
+                lines(vec![
+                    FieldDef::reference("goods", "goods"),
+                    qty(),
+                    money("price"),
+                    money("amount"),
+                ]),
+            ),
+        ],
+        registers: vec![RegisterDef {
+            name: STOCK.to_owned(),
+            title: STOCK.to_owned(),
+            kind: RegisterKind::Accumulation,
+            dimensions: vec![
+                FieldDef::reference("warehouse", "warehouses"),
                 FieldDef::reference("goods", "goods"),
-                qty(),
-                money("price"),
-                money("amount"),
             ],
-        )?],
-    )?;
-    let issue = DocumentKind::new(
-        "issue",
-        vec![date(), FieldDef::reference("warehouse", "warehouses")],
-        vec![TablePart::new(
-            "lines",
-            vec![FieldDef::reference("goods", "goods"), qty()],
-        )?],
-    )?;
-    let stock = AccumulationRegister::new(
-        "stock",
-        vec![
-            FieldDef::reference("warehouse", "warehouses"),
-            FieldDef::reference("goods", "goods"),
-        ],
-        vec![qty()],
-    )?;
-
-    let documents = [
-        DocumentConfig {
-            kind: receipt,
-            rule: |doc| movements(doc, MovementKind::Receipt),
-            prepare: receipt_totals,
-        },
-        DocumentConfig {
-            kind: issue,
-            rule: |doc| movements(doc, MovementKind::Issue),
-            prepare: |_, _| Ok(()),
-        },
-    ];
-
-    Ok(Config {
-        name: "Склад (временная конфигурация)".to_owned(),
-        version: "0.1".to_owned(),
-        catalogs: catalogs
-            .into_iter()
-            .map(|c| (c.table().to_owned(), c))
-            .collect(),
-        documents: documents
-            .into_iter()
-            .map(|d| (d.kind.table().to_owned(), d))
-            .collect(),
-        stock,
-    })
+            resources: vec![qty()],
+        }],
+    }
 }
 
 /// Сумма строки = округление(количество × цена) до копеек, сумма документа — их итог (СТ-К15).

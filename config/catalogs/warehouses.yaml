@@ -1,0 +1,6 @@
+catalog: warehouses
+title: Склады
+fields:
+  - name: name
+    title: Наименование
+    type: text
