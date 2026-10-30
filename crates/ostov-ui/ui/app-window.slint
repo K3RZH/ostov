@@ -109,6 +109,15 @@ export component AppWindow inherits Window {
     callback tab-closed <=> main-page.tab-closed;
     callback tab-detached <=> main-page.tab-detached;
     callback tab-reordered <=> main-page.tab-reordered;
+    // Перетаскивание вкладок между окнами: код окон (src/windows.rs) двигает окно с вкладкой.
+    callback tab-drag-moved(int, length, length, bool);
+    callback tab-drag-ended(int, length, length, bool);
+    in property <bool> drop-target;
+    in property <int> insert-at: -1;
+    out property <length> strip-left: root.page == 4 ? host-tabs.strip-left : main-page.strip-left;
+    out property <length> strip-top: root.page == 4 ? host-tabs.strip-top : main-page.strip-top;
+    out property <length> strip-width: root.page == 4 ? host-tabs.strip-width : main-page.strip-width;
+    out property <length> strip-tab-width: root.page == 4 ? host-tabs.strip-tab-width : main-page.strip-tab-width;
     // Страница 4 (дополнительное окно с вкладками): вернуть вкладку в главное окно.
     callback tab-returned(int);
     // Страница 3 (окно документа): заголовок окна.
@@ -161,6 +170,10 @@ export component AppWindow inherits Window {
         height: root.height - root.chrome-height;
         visible: root.page == 2;
         maximized: root.maximized;
+        drop-target: root.drop-target;
+        insert-at: root.insert-at;
+        tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
+        tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
         minimize => { root.minimized = true; }
         toggle-maximize => { root.maximized = !root.maximized; }
         close-window => { root.close(); }
@@ -168,7 +181,8 @@ export component AppWindow inherits Window {
         user-add-clicked => { root.adding-user = true; }
     }
 
-    if root.page == 4 : TabHost {
+    host-tabs := TabHost {
+        visible: root.page == 4;
         x: 0px;
         y: root.chrome-height;
         width: root.width;
@@ -182,6 +196,10 @@ export component AppWindow inherits Window {
         tab-closed(i) => { root.tab-closed(i); }
         tab-detached(i) => { root.tab-detached(i); }
         tab-reordered(from, to) => { root.tab-reordered(from, to); }
+        tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
+        tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
+        drop-target: root.drop-target;
+        insert-at: root.insert-at;
         tab-returned(i) => { root.tab-returned(i); }
         user-add-clicked => { root.adding-user = true; }
         user-toggle(i) => { root.user-toggle(i); }

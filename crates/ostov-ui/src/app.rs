@@ -761,6 +761,53 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
+    app.on_tab_drag_moved({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            windows.drag_moved(
+                &app,
+                &shell,
+                crate::workspace::WindowRef::Main,
+                tab,
+                &app,
+                x,
+                y,
+                out,
+            );
+        }
+    });
+
+    app.on_tab_drag_ended({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            let main = crate::workspace::WindowRef::Main;
+            windows.set_active(main);
+            if windows.drag_ended(&app, &shell, main, tab, &app, x, y, out) || !out {
+                return;
+            }
+            // Запасной путь (чистый Wayland, документы): окно создаётся при отпускании.
+            let kind = shell
+                .borrow()
+                .tabs()
+                .get(tab)
+                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
+            match kind {
+                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
+                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
+                _ => {}
+            }
+        }
+    });
+
     app.on_tab_detached({
         let (app, shell, receipts, windows) = (
             app.as_weak(),

@@ -264,6 +264,56 @@ impl Workspace {
         })
     }
 
+    /// Открывает окно с копией вкладки на время перетаскивания: исходная вкладка остаётся на
+    /// месте, чтобы у исходного окна не пропал захват мыши.
+    pub fn open_extra(&mut self, tab: Tab) -> WindowId {
+        self.next += 1;
+        let id = self.next;
+        self.extra.push((id, TabList::single(tab)));
+        id
+    }
+
+    /// Вкладку отпустили вне окон: она остаётся в окне-копии, из исходного окна убирается.
+    pub fn finish_detach(
+        &mut self,
+        shell: &mut Shell,
+        from: WindowRef,
+        index: usize,
+        follower: WindowId,
+    ) -> Change {
+        self.take(shell, from, index);
+        self.active = WindowRef::Extra(follower);
+        Change {
+            opened: None,
+            closed: self.sweep(),
+        }
+    }
+
+    /// Вкладку бросили на панель другого окна: окно-копия закрывается, оригинал переезжает.
+    pub fn drop_on(
+        &mut self,
+        shell: &mut Shell,
+        follower: WindowId,
+        from: WindowRef,
+        index: usize,
+        to: WindowRef,
+        at: usize,
+    ) -> Option<Change> {
+        self.close_window(follower);
+        let mut change = self.move_tab(shell, from, index, to, at)?;
+        change.closed.push(follower);
+        Some(change)
+    }
+
+    /// Вкладку вернули в панель исходного окна: окно-копия закрывается.
+    pub fn cancel_detach(&mut self, follower: WindowId) -> Change {
+        self.close_window(follower);
+        Change {
+            opened: None,
+            closed: vec![follower],
+        }
+    }
+
     /// Закрывает окно целиком (крестиком): его вкладки закрываются вместе с ним.
     pub fn close_window(&mut self, id: WindowId) {
         self.extra.retain(|(i, _)| *i != id);
@@ -400,6 +450,62 @@ mod tests {
         let change = ws.close_tab(id, 0);
         assert_eq!(change.closed, [id]);
         assert_eq!(ws.active(), WindowRef::Main);
+    }
+
+    #[test]
+    fn dragged_copy_becomes_the_window_when_released_outside() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let before = shell.tabs().len();
+        let tab = shell.tabs()[2].clone();
+        let id = ws.open_extra(tab);
+        // Пока тащат, исходная вкладка на месте.
+        assert_eq!(shell.tabs().len(), before);
+        let change = ws.finish_detach(&mut shell, WindowRef::Main, 2, id);
+        assert!(change.closed.is_empty());
+        assert_eq!(shell.tabs().len(), before - 1);
+        assert_eq!(extra_titles(&ws, id), ["Поступление № 7"]);
+        assert_eq!(ws.active(), WindowRef::Extra(id));
+    }
+
+    #[test]
+    fn dragged_copy_dropped_on_another_window_moves_the_tab() {
+        let mut shell = shell_with_tabs();
+        shell.click(5);
+        let mut ws = Workspace::new();
+        let target = ws
+            .detach(&mut shell, WindowRef::Main, 1)
+            .unwrap()
+            .opened
+            .unwrap();
+        let before = shell.tabs().len();
+        let id = ws.open_extra(shell.tabs()[1].clone());
+        let change = ws
+            .drop_on(
+                &mut shell,
+                id,
+                WindowRef::Main,
+                1,
+                WindowRef::Extra(target),
+                1,
+            )
+            .unwrap();
+        assert!(change.closed.contains(&id));
+        assert_eq!(shell.tabs().len(), before - 1);
+        assert_eq!(extra_titles(&ws, target).len(), 2);
+        assert_eq!(ws.extra_ids(), [target]);
+    }
+
+    #[test]
+    fn cancelled_drag_changes_nothing() {
+        let shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let before = titles(&shell);
+        let id = ws.open_extra(shell.tabs()[1].clone());
+        let change = ws.cancel_detach(id);
+        assert_eq!(change.closed, [id]);
+        assert!(ws.extra_ids().is_empty());
+        assert_eq!(titles(&shell), before);
     }
 
     #[test]

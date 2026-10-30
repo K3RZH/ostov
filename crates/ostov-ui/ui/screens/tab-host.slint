@@ -25,7 +25,12 @@ component TabView inherits Rectangle {
 
     height: 40px;
     background: root.active ? Theme.bg : transparent;
-    opacity: root.lifted ? 0.35 : 1.0;
+    // Идущая за указателем вкладка поверх соседей, остальные плавно расступаются.
+    z: root.lifted ? 10 : 0;
+    drop-shadow-blur: root.lifted ? 10px : 0px;
+    drop-shadow-color: #00000040;
+    drop-shadow-offset-y: 2px;
+    animate x { duration: root.lifted ? 0ms : 160ms; easing: ease-out; }
 
     if root.active : Rectangle {
         y: 0px;
@@ -49,13 +54,15 @@ component TabView inherits Rectangle {
                 root.press-x = self.absolute-position.x + self.mouse-x;
                 root.press-y = self.absolute-position.y + self.mouse-y;
                 root.dragging = false;
-            } else if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
-                if (root.dragging) {
-                    root.drag-ended(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-                    root.dragging = false;
-                }
             } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
                 root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        // Конец перетаскивания надёжнее ловить по состоянию кнопки, а не по событию отпускания.
+        changed pressed => {
+            if (!self.pressed && root.dragging) {
+                root.dragging = false;
+                root.drag-ended(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
         moved => {
@@ -130,6 +137,17 @@ export component TabHost inherits VerticalLayout {
     callback tab-reordered(int, int);
     // Дополнительное окно: в меню вкладки есть «Вернуть в главное окно».
     in property <bool> extra;
+    // Перетаскивание вкладки для кода окон: индекс, положение указателя в окне, ушёл ли за панель.
+    callback tab-drag-moved(int, length, length, bool);
+    callback tab-drag-ended(int, length, length, bool);
+    // Куда падает вкладка из другого окна: подсветка панели и место вставки (-1: нет).
+    in property <bool> drop-target;
+    in property <int> insert-at: -1;
+    // Где в окне стоит панель вкладок (для поиска окна под указателем).
+    out property <length> strip-left: bar.absolute-position.x;
+    out property <length> strip-top: bar.absolute-position.y;
+    out property <length> strip-width: bar.width;
+    out property <length> strip-tab-width: root.tab-width;
 
     // Перетаскивание вкладки: какую тащат и где указатель относительно панели вкладок.
     private property <int> drag-index: -1;
@@ -137,8 +155,27 @@ export component TabHost inherits VerticalLayout {
     private property <length> drag-y;
     // Указатель ушёл от панели вверх или вниз: при отпускании вкладка станет отдельным окном.
     private property <bool> drag-out: root.drag-index >= 0 && (root.drag-y < -24px || root.drag-y > bar.height + 24px);
-    // Куда встанет вкладка внутри панели.
-    private property <int> drop-index: Math.max(0, Math.min(root.tabs.length - 1, Math.floor((root.drag-x - flick.content-x - Theme.space-8) / root.tab-width)));
+    // Где внутри вкладки взялись за неё (чтобы вкладка не прыгала под указателем).
+    private property <length> grab-dx;
+    // Положение идущей за указателем вкладки в содержимом панели (не выходит за края панели).
+    private property <length> dragged-x: Math.max(Theme.space-8, Math.min(Theme.space-8 + root.tab-width * (root.tabs.length - 1), root.drag-x - flick.content-x - root.grab-dx));
+    // Куда встанет вкладка: по середине идущей вкладки, как в браузере.
+    private property <int> drop-index: Math.max(0, Math.min(root.tabs.length - 1, Math.floor((root.dragged-x + root.tab-width / 2 - Theme.space-8) / root.tab-width)));
+
+    pure function slot-x(i: int) -> length {
+        Theme.space-8 + i * root.tab-width
+    }
+
+    // Где стоит вкладка i. При перетаскивании соседи сдвигаются на одно место, освобождая его
+    // (если вкладку вытащили за панель, соседи смыкаются).
+    pure function tab-x(i: int) -> length {
+        root.drag-index < 0 ? root.slot-x(i)
+        : i == root.drag-index ? root.dragged-x
+        : root.drag-out ? root.slot-x(i > root.drag-index ? i - 1 : i)
+        : (root.drop-index > root.drag-index && i > root.drag-index && i <= root.drop-index) ? root.slot-x(i - 1)
+        : (root.drop-index < root.drag-index && i >= root.drop-index && i < root.drag-index) ? root.slot-x(i + 1)
+        : root.slot-x(i)
+    }
 
     // Какие вкладки можно вынести в окно: документы и вкладки без своего состояния.
     pure function can-detach(index: int) -> bool {
@@ -179,7 +216,7 @@ export component TabHost inherits VerticalLayout {
                 // Вкладки: сжимаются до 140 px, дальше панель прокручивается колесом или стрелками.
                 bar := Rectangle {
                     height: 40px;
-                    background: Theme.surface-alt;
+                    background: root.drop-target ? Theme.accent-soft : Theme.surface-alt;
                     Rectangle {
                         y: parent.height - 1px;
                         height: 1px;
@@ -192,29 +229,33 @@ export component TabHost inherits VerticalLayout {
                         height: parent.height;
                         content-width: root.tabs-overflow ? root.tabs.length * root.tab-min + 16px : self.width;
                         content-height: self.height;
-                        HorizontalLayout {
+                        Rectangle {
                             width: flick.content-width;
                             height: parent.height;
-                            padding-left: Theme.space-8;
-                            alignment: start;
                             for tab[i] in root.tabs : TabView {
+                                x: root.tab-x(i);
+                                y: 0px;
                                 width: root.tab-width;
                                 tab: tab;
                                 active: i == root.active-tab;
+                                visible: !(i == root.drag-index && root.drag-out);
                                 selected => { root.tab-selected(i); }
                                 closed => { root.tab-closed(i); }
                                 lifted: i == root.drag-index;
                                 drag-moved(x, y) => {
-                                    root.drag-index = i;
+                                    if (root.drag-index != i) {
+                                        root.drag-index = i;
+                                        root.grab-dx = (x - bar.absolute-position.x) - flick.content-x - root.slot-x(i);
+                                    }
                                     root.drag-x = x - bar.absolute-position.x;
                                     root.drag-y = y - bar.absolute-position.y;
+                                    root.tab-drag-moved(i, x, y, root.drag-out);
                                 }
                                 drag-ended(x, y) => {
-                                    if (root.drag-out) {
-                                        root.tab-detached(i);
-                                    } else if (root.drop-index != i) {
+                                    if (!root.drag-out && root.drop-index != i) {
                                         root.tab-reordered(i, root.drop-index);
                                     }
+                                    root.tab-drag-ended(i, x, y, root.drag-out);
                                     root.drag-index = -1;
                                 }
                                 context(ax, ay) => {
@@ -227,26 +268,20 @@ export component TabHost inherits VerticalLayout {
                             }
                         }
                     }
-                    // Метка места вставки при перетаскивании внутри панели.
-                    if root.drag-index >= 0 && !root.drag-out && root.drop-index != root.drag-index : Rectangle {
-                        x: Theme.space-8 + flick.content-x + (root.drop-index + (root.drop-index > root.drag-index ? 1 : 0)) * root.tab-width - 1.5px;
-                        y: 6px;
-                        width: 3px;
-                        height: parent.height - 12px;
-                        border-radius: 1.5px;
-                        background: Theme.accent;
-                    }
-                    // «Призрак» вкладки идёт за указателем (внутри окна, пока указатель над ним).
-                    if root.drag-index >= 0 : Rectangle {
+                    // Вкладка вытащена за панель: за указателем идёт её «призрак», при отпускании откроется окно.
+                    if root.drag-index >= 0 && root.drag-out : Rectangle {
                         x: root.drag-x - root.tab-width / 2;
-                        y: root.drag-out ? root.drag-y - 20px : 0px;
+                        y: root.drag-y - 20px;
+                        z: 20;
                         width: root.tab-width;
                         height: 40px;
                         border-radius: 6px;
                         background: Theme.surface;
                         border-width: 1px;
-                        border-color: root.drag-out ? Theme.danger : Theme.accent;
-                        opacity: 0.92;
+                        border-color: Theme.accent;
+                        drop-shadow-blur: 12px;
+                        drop-shadow-color: #00000050;
+                        drop-shadow-offset-y: 3px;
                         Text {
                             text: root.tabs[root.drag-index].title;
                             font-size: Theme.font-body;
@@ -255,6 +290,14 @@ export component TabHost inherits VerticalLayout {
                             vertical-alignment: center;
                             overflow: elide;
                         }
+                    }
+                    if root.drop-target && root.insert-at >= 0 : Rectangle {
+                        x: Theme.space-8 + flick.content-x + root.insert-at * root.tab-width - 1.5px;
+                        y: 6px;
+                        width: 3px;
+                        height: parent.height - 12px;
+                        border-radius: 1.5px;
+                        background: Theme.accent;
                     }
                     if root.tabs-overflow : HorizontalLayout {
                         x: parent.width - 64px;

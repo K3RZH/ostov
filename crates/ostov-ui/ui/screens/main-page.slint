@@ -111,6 +111,14 @@ export component MainPage inherits Rectangle {
     callback tab-closed(int);
     callback tab-detached(int);
     callback tab-reordered(int, int);
+    callback tab-drag-moved(int, length, length, bool);
+    callback tab-drag-ended(int, length, length, bool);
+    in property <bool> drop-target;
+    in property <int> insert-at: -1;
+    out property <length> strip-left <=> tab-host.strip-left;
+    out property <length> strip-top <=> tab-host.strip-top;
+    out property <length> strip-width <=> tab-host.strip-width;
+    out property <length> strip-tab-width <=> tab-host.strip-tab-width;
     // Кнопки окна: свою панель окна здесь заменяет шапка.
     in property <bool> maximized;
     callback minimize();
@@ -279,7 +287,7 @@ export component MainPage inherits Rectangle {
                 }
             }
 
-            TabHost {
+            tab-host := TabHost {
                 tabs: root.tabs;
                 active-tab: root.active-tab;
                 users: root.users;
@@ -288,6 +296,10 @@ export component MainPage inherits Rectangle {
                 tab-closed(i) => { root.tab-closed(i); }
                 tab-detached(i) => { root.tab-detached(i); }
                 tab-reordered(from, to) => { root.tab-reordered(from, to); }
+                tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
+                tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
+                drop-target: root.drop-target;
+                insert-at: root.insert-at;
                 user-add-clicked => { root.user-add-clicked(); }
                 user-toggle(i) => { root.user-toggle(i); }
             }
