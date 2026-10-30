@@ -2,9 +2,9 @@ import { Theme, Shape } from "../theme.slint";
 import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { WindowControls } from "../components/window-controls.slint";
-import { UsersView, UserRow } from "users-view.slint";
-import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
-import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
+import { UserRow } from "users-view.slint";
+import { TabHost, TabItem } from "tab-host.slint";
+import { MenuAction } from "../components/context-menu.slint";
 
 // Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
 export struct NavRow {
@@ -18,7 +18,6 @@ export struct NavRow {
     favorite: bool,
 }
 
-export struct TabItem { title: string, icon: string, modified: bool, view: string, preview: bool }
 
 component NavRowView inherits Rectangle {
     in property <NavRow> entry;
@@ -85,96 +84,7 @@ component NavRowView inherits Rectangle {
     }
 }
 
-component TabView inherits Rectangle {
-    in property <TabItem> tab;
-    in property <bool> active;
-    callback selected();
-    callback closed();
-    // Правая кнопка: координаты нажатия в окне.
-    callback context(length, length);
-    // Вкладку потянули вниз или вверх от панели: вынести в отдельное окно.
-    callback detach();
 
-    // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
-    callback scrolled(length);
-
-    height: 40px;
-    background: root.active ? Theme.bg : transparent;
-
-    if root.active : Rectangle {
-        y: 0px;
-        height: 2px;
-        background: Theme.accent;
-    }
-
-    private property <length> press-y;
-    private property <bool> dragged;
-
-    TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.selected(); }
-        scroll-event(event) => {
-            root.scrolled(event.delta-y + event.delta-x);
-            accept
-        }
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                root.press-y = self.mouse-y;
-                root.dragged = false;
-            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
-                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-            }
-        }
-        moved => {
-            // Вытаскивание: вкладку увели от панели больше чем на 48 px по вертикали.
-            if (self.pressed && !root.dragged && abs(self.mouse-y - root.press-y) > 48px) {
-                root.dragged = true;
-                root.detach();
-            }
-        }
-    }
-
-    content := HorizontalLayout {
-        padding-left: Theme.space-12;
-        padding-right: Theme.space-8;
-        spacing: Theme.space-8;
-        VerticalLayout {
-            alignment: center;
-            Icon {
-                name: root.tab.icon;
-                tint: root.active ? Theme.accent-text : Theme.text-muted;
-            }
-        }
-        Text {
-            text: root.tab.title;
-            font-size: Theme.font-body;
-            font-weight: root.active ? 600 : 400;
-            // Курсив: вкладка предпросмотра, её заменит следующее открытие.
-            font-italic: root.tab.preview;
-            color: root.active ? Theme.text : Theme.text-muted;
-            vertical-alignment: center;
-            overflow: elide;
-            horizontal-stretch: 1;
-        }
-        if root.tab.modified : VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: Theme.accent-text;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            IconButton {
-                icon: "close";
-                control-size: 24px;
-                clicked => { root.closed(); }
-            }
-        }
-    }
-}
 
 component Separator inherits Rectangle {
     width: 1px;
@@ -207,34 +117,6 @@ export component MainPage inherits Rectangle {
     callback close-window();
     callback settings-clicked();
 
-    // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
-    private property <length> tab-menu-x;
-    private property <length> tab-menu-y;
-    private property <int> tab-menu-index: -1;
-
-    private property <length> tab-min: 140px;
-    private property <length> tab-max: 240px;
-    private property <bool> tabs-overflow: root.tabs.length * root.tab-min + 16px > bar.width;
-    private property <length> tab-width: root.tabs-overflow ? root.tab-min : min(root.tab-max, (bar.width - 16px) / max(1, root.tabs.length));
-
-    // Сдвиг панели вкладок: положительное число уводит вкладки вправо, отрицательное влево.
-    function scroll-tabs(delta: length) {
-        flick.content-x = min(0px, max(flick.width - flick.content-width, flick.content-x + delta));
-    }
-
-    // Активная вкладка всегда в видимой части панели.
-    function reveal(index: int) {
-        if (!root.tabs-overflow) {
-            flick.content-x = 0px;
-        } else if (Theme.space-8 + index * root.tab-min < -flick.content-x) {
-            flick.content-x = -(Theme.space-8 + index * root.tab-min);
-        } else if (Theme.space-8 + (index + 1) * root.tab-min > -flick.content-x + flick.width) {
-            flick.content-x = -(Theme.space-8 + (index + 1) * root.tab-min - flick.width);
-        }
-    }
-
-    changed active-tab => { root.reveal(root.active-tab); }
-    changed tabs => { root.reveal(root.active-tab); }
     // Вкладка «Пользователи и роли»
     in property <[UserRow]> users;
     in property <string> user-message;
@@ -396,83 +278,16 @@ export component MainPage inherits Rectangle {
                 }
             }
 
-            VerticalLayout {
-                // Вкладки: сжимаются до 140 px, дальше панель прокручивается колесом или стрелками.
-                bar := Rectangle {
-                    height: 40px;
-                    background: Theme.surface-alt;
-                    Rectangle {
-                        y: parent.height - 1px;
-                        height: 1px;
-                        background: Theme.border;
-                    }
-                    flick := Flickable {
-                        x: 0px;
-                        y: 0px;
-                        width: parent.width - (root.tabs-overflow ? 64px : 0px);
-                        height: parent.height;
-                        content-width: root.tabs-overflow ? root.tabs.length * root.tab-min + 16px : self.width;
-                        content-height: self.height;
-                        HorizontalLayout {
-                            width: flick.content-width;
-                            height: parent.height;
-                            padding-left: Theme.space-8;
-                            alignment: start;
-                            for tab[i] in root.tabs : TabView {
-                                width: root.tab-width;
-                                tab: tab;
-                                active: i == root.active-tab;
-                                selected => { root.tab-selected(i); }
-                                closed => { root.tab-closed(i); }
-                                detach => { root.tab-detached(i); }
-                                context(ax, ay) => {
-                                    root.tab-menu-index = i;
-                                    root.tab-menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
-                                    root.tab-menu-y = ay - root.absolute-position.y + 4px;
-                                    tab-menu.show();
-                                }
-                                scrolled(delta) => { root.scroll-tabs(delta); }
-                            }
-                        }
-                    }
-                    if root.tabs-overflow : HorizontalLayout {
-                        x: parent.width - 64px;
-                        width: 64px;
-                        padding: 6px;
-                        spacing: 4px;
-                        IconButton { icon: "chevrons-left"; control-size: 28px; clicked => { root.scroll-tabs(root.tab-min); } }
-                        IconButton { icon: "chevrons-right"; control-size: 28px; clicked => { root.scroll-tabs(-root.tab-min); } }
-                    }
-                }
-                // Содержимое вкладки
-                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "users" : UsersView {
-                    users: root.users;
-                    message: root.user-message;
-                    add-clicked => { root.user-add-clicked(); }
-                    toggle(i) => { root.user-toggle(i); }
-                }
-                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
-                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }
-                if root.tabs.length == 0 || (root.tabs[root.active-tab].view != "users" && root.tabs[root.active-tab].view != "receipts" && root.tabs[root.active-tab].view != "receipt") : Rectangle {
-                    background: Theme.bg;
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: Theme.space-8;
-                        Text {
-                            text: root.tabs.length > 0 ? root.tabs[root.active-tab].title : "Нет открытых вкладок";
-                            font-size: Theme.font-title;
-                            font-weight: 700;
-                            color: Theme.text;
-                            horizontal-alignment: center;
-                        }
-                        Text {
-                            text: "Содержимое появится после подключения ядра";
-                            font-size: Theme.font-body;
-                            color: Theme.text-muted;
-                            horizontal-alignment: center;
-                        }
-                    }
-                }
+            TabHost {
+                tabs: root.tabs;
+                active-tab: root.active-tab;
+                users: root.users;
+                user-message: root.user-message;
+                tab-selected(i) => { root.tab-selected(i); }
+                tab-closed(i) => { root.tab-closed(i); }
+                tab-detached(i) => { root.tab-detached(i); }
+                user-add-clicked => { root.user-add-clicked(); }
+                user-toggle(i) => { root.user-toggle(i); }
             }
         }
 
@@ -502,28 +317,5 @@ export component MainPage inherits Rectangle {
         }
     }
 
-    // Меню вкладки: вынести документ в отдельное окно (документы), закрыть.
-    tab-menu := PopupWindow {
-        x: root.tab-menu-x;
-        y: root.tab-menu-y;
-        width: MenuMetrics.width;
-        height: MenuMetrics.height(2);
-        close-policy: PopupClosePolicy.close-on-click-outside;
 
-        MenuPanel {
-            actions: [
-                { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
-                  enabled: root.tab-menu-index >= 0 && root.tab-menu-index < root.tabs.length && root.tabs[root.tab-menu-index].view == "receipt", divider: false },
-                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
-            ];
-            chosen(id) => {
-                if (id == "detach") {
-                    root.tab-detached(root.tab-menu-index);
-                } else if (id == "close") {
-                    root.tab-closed(root.tab-menu-index);
-                }
-                tab-menu.close();
-            }
-        }
-    }
 }
