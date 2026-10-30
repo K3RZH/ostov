@@ -3420,6 +3420,7 @@ dependencies = [
 name = "ostov-meta"
 version = "0.1.0"
 dependencies = [
+ "ostov-api",
  "ostov-core",
  "ostov-model",
  "serde",

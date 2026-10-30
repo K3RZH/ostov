@@ -22,7 +22,9 @@ impl Base {
     }
 
     fn create(&self) -> Arc<dyn Engine> {
-        LocalConnector.create_local(&self.path, None, None).unwrap()
+        LocalConnector::default()
+            .create_local(&self.path, None, None)
+            .unwrap()
     }
 }
 
@@ -239,24 +241,26 @@ fn opening_and_creating_bases() {
         let engine = base.create();
         add(&*engine, "goods", "Мука");
     }
-    let engine = LocalConnector.open_local(&base.path, None).unwrap();
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     assert_eq!(engine.list(&query("goods", 10)).unwrap().total, Some(1));
 
-    let err = LocalConnector
+    let err = LocalConnector::default()
         .create_local(&base.path, None, None)
         .err()
         .unwrap();
     assert_eq!(err.code, ErrorCode::Validation);
     let missing = format!("{}.missing", base.path);
     assert_eq!(
-        LocalConnector
+        LocalConnector::default()
             .open_local(&missing, None)
             .err()
             .unwrap()
             .code,
         ErrorCode::NotFound
     );
-    let err = LocalConnector
+    let err = LocalConnector::default()
         .open_local(&base.path, Some("secret"))
         .err()
         .unwrap();
@@ -265,7 +269,11 @@ fn opening_and_creating_bases() {
     let other = base.dir.join("other.db").to_string_lossy().into_owned();
     std::fs::write(&other, b"").unwrap();
     assert_eq!(
-        LocalConnector.open_local(&other, None).err().unwrap().code,
+        LocalConnector::default()
+            .open_local(&other, None)
+            .err()
+            .unwrap()
+            .code,
         ErrorCode::Incompatible
     );
 }
@@ -318,7 +326,9 @@ fn wrong_requests() {
 #[test]
 fn demo_base_has_data_to_scroll() {
     let base = Base::new("demo");
-    let engine = LocalConnector.create_demo(&base.path, 300).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 300)
+        .unwrap();
 
     let page = engine.list(&query("receipt", 50)).unwrap();
     assert_eq!(page.total, Some(300));
@@ -351,11 +361,16 @@ fn demo_base_has_data_to_scroll() {
 fn base_opens_only_once() {
     let base = Base::new("lock");
     let first = base.create();
-    let err = LocalConnector.open_local(&base.path, None).err().unwrap();
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
     assert_eq!(err.code, ErrorCode::AlreadyOpen);
 
     drop(first);
-    let again = LocalConnector.open_local(&base.path, None).unwrap();
+    let again = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     assert!(again.hello().is_ok());
 }
 
@@ -411,7 +426,9 @@ fn receipts_search_by_supplier_number_and_date() {
 #[test]
 fn receipts_sort_by_supplier_title_across_pages() {
     let base = Base::new("sort");
-    let engine = LocalConnector.create_demo(&base.path, 400).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 400)
+        .unwrap();
     for descending in [false, true] {
         let q = ListQuery {
             order: Some("supplier".into()),
@@ -612,7 +629,9 @@ fn stock_reports_by_date_and_period() {
 #[test]
 fn report_pages() {
     let base = Base::new("report-pages");
-    let engine = LocalConnector.create_demo(&base.path, 200).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 200)
+        .unwrap();
     let all = report(&*engine, "stock_balance", &[]);
     assert!(all.len() > 5, "{}", all.len());
 
@@ -641,7 +660,9 @@ fn old_base_gets_dates_in_movements() {
 
     let base = Base::new("upgrade");
     let before = {
-        let engine = LocalConnector.create_demo(&base.path, 120).unwrap();
+        let engine = LocalConnector::default()
+            .create_demo(&base.path, 120)
+            .unwrap();
         report(&*engine, "stock_balance", &[("date", date("2026-03-31"))])
     };
 
@@ -653,7 +674,9 @@ fn old_base_gets_dates_in_movements() {
             .unwrap();
     }
 
-    let engine = LocalConnector.open_local(&base.path, None).unwrap();
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     let after = report(&*engine, "stock_balance", &[("date", date("2026-03-31"))]);
     assert_eq!(after, before);
     drop(engine);
@@ -757,4 +780,70 @@ fn unposting_receipt_with_later_issue_is_rejected() {
         .unwrap();
     let err = engine.unpost("receipt", receipt_id).unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
+}
+
+#[test]
+fn connector_takes_model_from_outside() {
+    let base = Base::new("model");
+    let mut model = super::warehouse_model();
+    model.catalogs[0]
+        .fields
+        .push(crate::FieldDef::new("barcode", crate::FieldKind::Text));
+    let engine = LocalConnector::new(model.clone())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let id = engine
+        .save(
+            "goods",
+            &ObjectData {
+                fields: fields(&[("name", text("Мука")), ("barcode", text("460"))]),
+                ..ObjectData::default()
+            },
+            PostAction::Write,
+        )
+        .unwrap()
+        .id;
+    assert_eq!(
+        engine.get("goods", id).unwrap().fields["barcode"],
+        text("460")
+    );
+    drop(engine);
+
+    // Встроенный «Склад» про штрихкод не знает, переданная модель — знает.
+    let engine = LocalConnector::new(model)
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(
+        engine.get("goods", id).unwrap().fields["barcode"],
+        text("460")
+    );
+}
+
+#[test]
+fn model_without_rules_is_rejected() {
+    let config = |change: fn(&mut ostov_model::Config)| {
+        let mut model = super::warehouse_model();
+        change(&mut model);
+        super::Config::from_model(&model)
+            .err()
+            .map(|e| e.to_string())
+    };
+    assert_eq!(config(|_| ()), None);
+
+    let unknown_doc = config(|m| m.documents[0].name = "transfer".into()).unwrap();
+    assert!(unknown_doc.contains("transfer"), "{unknown_doc}");
+
+    let other_register = config(|m| m.documents[0].registers = vec!["sales".into()]).unwrap();
+    assert!(other_register.contains("sales"), "{other_register}");
+
+    assert!(config(|m| m.registers.clear()).is_some());
+
+    // Документ без движений правила не требует.
+    assert_eq!(
+        config(|m| {
+            m.documents[0].name = "order".into();
+            m.documents[0].registers.clear();
+        }),
+        None
+    );
 }

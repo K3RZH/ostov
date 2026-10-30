@@ -15,5 +15,6 @@ serde-saphyr = { version = "=2.0.0", default-features = false, features = ["dese
 ostov-model = { path = "../ostov-model" }
 
 [dev-dependencies]
-# Только тест: модель из YAML сверяется с конфигурацией, пока она ещё задана в коде ядра.
+# Только тесты: модель из YAML сверяется с «Складом» ядра и запускается в нём.
+ostov-api = { path = "../ostov-api" }
 ostov-core = { path = "../ostov-core" }

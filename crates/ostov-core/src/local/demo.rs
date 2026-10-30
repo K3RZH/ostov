@@ -37,7 +37,7 @@ impl LocalConnector {
     /// почти все проведены, каждое десятое нет, каждое тридцатое помечено на удаление;
     /// по части поступлений есть расходы.
     pub fn create_demo(&self, path: &str, receipts: usize) -> EngineResult<Arc<dyn Engine>> {
-        let (mut db, config, lock) = create_base(path)?;
+        let (mut db, config, lock) = create_base(path, self.config()?)?;
         in_transaction(&mut db, |db| fill(db, &config, receipts)).map_err(error)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
