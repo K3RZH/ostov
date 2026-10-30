@@ -213,7 +213,7 @@ fn stores_are_separate() {
     let lines = vec![w.line(flour, "1")];
     let i = w.doc(Issue, "bar", lines);
     let err = w.post(Issue, i).unwrap_err();
-    assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+    assert!(matches!(err, CoreError::NegativeBalance(_)), "{err}");
     assert_eq!(w.balance("kitchen", flour), (d("5"), d("250")));
     assert_eq!(w.balance("bar", flour), (d("0"), d("0")));
 }

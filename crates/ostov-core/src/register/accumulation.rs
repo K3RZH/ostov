@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use ostov_store::{Decimal, Dialect, Driver, Value};
 
 use crate::CoreError;
+use crate::error::Shortage;
 use crate::object::{
     FieldDef, FieldKind, Fields, check_fields, check_ident, column_defs, names, placeholders,
     to_scale, to_value,
@@ -546,6 +547,38 @@ impl AccumulationRegister {
     /// Остаток не должен уходить в минус на конец ни одного дня, начиная с `from`:
     /// иначе документ задним числом «съедает» товар, которого тогда ещё не было.
     /// Внутри дня порядок документов не важен — проверяем итог дня.
+    /// Документы, которые списывают по ключу в этот день, — их показываем человеку.
+    fn issues_on(
+        &self,
+        db: &mut dyn Driver,
+        key: &Key,
+        day: &str,
+    ) -> Result<Vec<(String, i64)>, CoreError> {
+        let sql = {
+            let d = db.dialect();
+            let (recorder, id) = (d.quote_ident("recorder"), d.quote_ident("recorder_id"));
+            format!(
+                "SELECT DISTINCT {recorder}, {id} FROM {} WHERE {} AND {} = -1 \
+                 AND COALESCE({}, '{NO_DATE}') = {} ORDER BY {recorder}, {id} LIMIT 5",
+                d.quote_ident(&self.name),
+                self.where_key(d, 1),
+                d.quote_ident("kind"),
+                d.quote_ident("period"),
+                d.placeholder(key.len() + 1),
+            )
+        };
+        let mut params = key.clone();
+        params.push(Value::Text(day.to_owned()));
+        Ok(db
+            .query(&sql, &params)?
+            .into_iter()
+            .filter_map(|row| match row.as_slice() {
+                [Value::Text(table), Value::Int(id)] => Some((table.clone(), *id)),
+                _ => None,
+            })
+            .collect())
+    }
+
     fn check_history(&self, db: &mut dyn Driver, key: &Key, from: &str) -> Result<(), CoreError> {
         let sql = {
             let d = db.dialect();
@@ -579,12 +612,19 @@ impl AccumulationRegister {
                 };
                 *total = total.checked_add(delta)?;
                 if day.as_str() >= from && total.is_negative() {
-                    return Err(CoreError::NegativeBalance {
+                    return Err(CoreError::NegativeBalance(Box::new(Shortage {
                         register: self.name.clone(),
                         resource: def.name.clone(),
                         balance: *total,
                         date: (day != NO_DATE).then(|| day.clone()),
-                    });
+                        dims: self
+                            .dims
+                            .iter()
+                            .map(|d| d.name.clone())
+                            .zip(key.iter().cloned())
+                            .collect(),
+                        blockers: self.issues_on(db, key, &day)?,
+                    })));
                 }
             }
         }

@@ -138,39 +138,43 @@ pub fn warehouse() -> Result<Config, CoreError> {
 
 /// Модель «Склада» в коде: для `LocalConnector` без загруженной конфигурации.
 pub fn warehouse_model() -> ostov_model::Config {
-    let name = || FieldDef::new("name", FieldKind::Text);
-    let date = || FieldDef::new("date", FieldKind::Date);
-    let qty = || FieldDef::new("qty", FieldKind::Decimal { scale: 3 });
-    let money = |n: &str| FieldDef::new(n, FieldKind::Decimal { scale: 2 });
+    let field = |name: &str, title: &str, kind| FieldDef::new(name, kind).with_title(title);
+    let reference =
+        |name: &str, title: &str, target: &str| FieldDef::reference(name, target).with_title(title);
+    let name = || field("name", "Наименование", FieldKind::Text);
+    let date = || field("date", "Дата", FieldKind::Date);
+    let qty = || field("qty", "Количество", FieldKind::Decimal { scale: 3 });
+    let warehouse = || reference("warehouse", "Склад", "warehouses");
+    let goods = || reference("goods", "Товар", "goods");
     // Сумму считает ядро.
     let total = || FieldDef {
         read_only: true,
-        ..money("amount")
+        ..field("amount", "Сумма", FieldKind::Decimal { scale: 2 })
+    };
+    let catalog = |name: &str, title: &str, icon: &str, fields| CatalogDef {
+        name: name.to_owned(),
+        title: title.to_owned(),
+        icon: Some(icon.to_owned()),
+        fields,
+    };
+    let lines = |fields| TablePartDef {
+        name: "lines".to_owned(),
+        title: "Товары".to_owned(),
+        fields,
+    };
+    let document = |name: &str, title: &str, icon: &str, fields, part| DocumentDef {
+        name: name.to_owned(),
+        title: title.to_owned(),
+        icon: Some(icon.to_owned()),
+        fields,
+        table_parts: vec![part],
+        registers: vec![STOCK.to_owned()],
     };
     let item = |object: &str| MenuItem {
         title: object.to_owned(),
         icon: None,
         object: Some(object.to_owned()),
         children: Vec::new(),
-    };
-    let catalog = |name: &str, icon: &str, fields| CatalogDef {
-        name: name.to_owned(),
-        title: name.to_owned(),
-        icon: Some(icon.to_owned()),
-        fields,
-    };
-    let lines = |fields| TablePartDef {
-        name: "lines".to_owned(),
-        title: "lines".to_owned(),
-        fields,
-    };
-    let document = |name: &str, icon: &str, fields, part| DocumentDef {
-        name: name.to_owned(),
-        title: name.to_owned(),
-        icon: Some(icon.to_owned()),
-        fields,
-        table_parts: vec![part],
-        registers: vec![STOCK.to_owned()],
     };
 
     ostov_model::Config {
@@ -180,44 +184,44 @@ pub fn warehouse_model() -> ostov_model::Config {
         catalogs: vec![
             catalog(
                 "goods",
+                "Товары",
                 "box",
-                vec![name(), FieldDef::new("unit", FieldKind::Text)],
+                vec![name(), field("unit", "Единица измерения", FieldKind::Text)],
             ),
-            catalog("suppliers", "users", vec![name()]),
-            catalog("warehouses", "warehouse", vec![name()]),
+            catalog("suppliers", "Поставщики", "users", vec![name()]),
+            catalog("warehouses", "Склады", "warehouse", vec![name()]),
         ],
         documents: vec![
             document(
                 "issue",
+                "Расход",
                 "stock-out",
-                vec![date(), FieldDef::reference("warehouse", "warehouses")],
-                lines(vec![FieldDef::reference("goods", "goods"), qty()]),
+                vec![date(), warehouse()],
+                lines(vec![goods(), qty()]),
             ),
             document(
                 "receipt",
+                "Поступление",
                 "stock-in",
                 vec![
                     date(),
-                    FieldDef::reference("supplier", "suppliers"),
-                    FieldDef::reference("warehouse", "warehouses"),
+                    reference("supplier", "Поставщик", "suppliers"),
+                    warehouse(),
                     total(),
                 ],
                 lines(vec![
-                    FieldDef::reference("goods", "goods"),
+                    goods(),
                     qty(),
-                    money("price"),
+                    field("price", "Цена", FieldKind::Decimal { scale: 2 }),
                     total(),
                 ]),
             ),
         ],
         registers: vec![RegisterDef {
             name: STOCK.to_owned(),
-            title: STOCK.to_owned(),
+            title: "Остатки товаров".to_owned(),
             kind: RegisterKind::Accumulation,
-            dimensions: vec![
-                FieldDef::reference("warehouse", "warehouses"),
-                FieldDef::reference("goods", "goods"),
-            ],
+            dimensions: vec![warehouse(), goods()],
             resources: vec![qty()],
         }],
         menu: vec![MenuItem {

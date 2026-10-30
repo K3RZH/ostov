@@ -420,7 +420,7 @@ impl LocalEngine {
                         }
                     }
                 };
-                saved_doc(&doc.map_err(error)?)
+                saved_doc(&doc.map_err(|e| self.explain(db, e))?)
             }
         };
         self.forget_lists();
@@ -453,7 +453,8 @@ impl LocalEngine {
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule).map_err(error)?;
+        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule)
+            .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -466,7 +467,8 @@ impl LocalEngine {
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id).map_err(error)?;
+        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id)
+            .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -647,6 +649,89 @@ impl LocalEngine {
             total: u64::try_from(total).ok(),
             token: q.report.clone(),
         })
+    }
+}
+
+impl LocalEngine {
+    /// Нехватка остатка — человеческим языком: что, где, на какой день и какие документы
+    /// списывают (вопрос интерфейса: «нет товара и документа, который мешает»).
+    /// Транзакция уже откачена: новый документ в базе не найдётся — он «этот документ».
+    fn explain(&self, db: &mut dyn Driver, e: crate::CoreError) -> EngineError {
+        let crate::CoreError::NegativeBalance(shortage) = &e else {
+            return error(e);
+        };
+        let crate::error::Shortage {
+            resource,
+            balance,
+            date,
+            dims,
+            blockers,
+            ..
+        } = &**shortage;
+        let stock = &self.config.stock;
+        let title = |defs: &[FieldDef], name: &str| {
+            defs.iter()
+                .find(|f| f.name == name)
+                .map_or_else(|| name.to_owned(), |f| f.title.clone())
+        };
+        let mut what = Vec::new();
+        for (name, value) in dims {
+            let def = stock.dims().iter().find(|f| &f.name == name);
+            let shown = match (value, def.and_then(|f| f.target.as_deref())) {
+                (Value::Int(id), Some(target)) => self
+                    .config
+                    .catalogs
+                    .get(target)
+                    .and_then(|c| c.titles(db, &[*id]).ok())
+                    .and_then(|mut t| t.remove(id))
+                    .unwrap_or_else(|| id.to_string()),
+                (Value::Int(n), None) => n.to_string(),
+                (Value::Text(s), _) => s.clone(),
+                _ => "—".to_owned(),
+            };
+            what.push(format!("{} «{shown}»", title(stock.dims(), name)));
+        }
+        let mut message = format!(
+            "Не хватает остатка{}: {} — {} стало бы {}.",
+            date.as_deref()
+                .map(|d| format!(" на {}", ru_date(d)))
+                .unwrap_or_default(),
+            what.join(", "),
+            title(stock.resources(), resource),
+            balance.to_string().replace('-', "−").replace('.', ","),
+        );
+        let docs: Vec<String> = blockers
+            .iter()
+            .map(|(table, id)| {
+                let doc = self.config.meta.objects.iter().find(|o| &o.name == table);
+                let kind = doc.map_or(table.as_str(), |o| o.title.as_str());
+                match self
+                    .config
+                    .documents
+                    .get(table)
+                    .and_then(|d| d.kind.get(db, *id).ok().flatten())
+                {
+                    Some(found) => format!("{kind} №{}", found.number),
+                    None => "этот документ".to_owned(),
+                }
+            })
+            .collect();
+        if !docs.is_empty() {
+            message.push_str(&format!(" Списывают в этот день: {}.", docs.join(", ")));
+        }
+        EngineError {
+            message,
+            ..error(e)
+        }
+    }
+}
+
+/// `2026-01-31` → `31.01.2026`.
+fn ru_date(iso: &str) -> String {
+    let mut parts = iso.split('-').rev();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(d), Some(m), Some(y)) => format!("{d}.{m}.{y}"),
+        _ => iso.to_owned(),
     }
 }
 

@@ -12,7 +12,7 @@ pub mod tx;
 #[cfg(test)]
 mod testing;
 
-pub use error::CoreError;
+pub use error::{CoreError, Shortage};
 pub use list::{ListPage, ListQuery, ListRow, ListSource, Milestones, list};
 pub use local::{LocalConnector, LocalEngine};
 pub use object::catalog::{Catalog, Element};

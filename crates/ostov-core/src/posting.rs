@@ -262,7 +262,7 @@ mod tests {
 
         let i = new_doc(&mut s, MovementKind::Issue, &[(1, "1"), (1, "1.5")]);
         let err = post_doc(&mut s, MovementKind::Issue, i).unwrap_err();
-        assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+        assert!(matches!(err, CoreError::NegativeBalance(_)), "{err}");
         assert_eq!(balance(&mut s, 1), q("2"));
         assert!(!s.issue.get(&mut s.db, i).unwrap().unwrap().posted);
     }
@@ -286,7 +286,7 @@ mod tests {
 
         // Отменить приход нельзя: по нему уже списали.
         let err = unpost(&mut s.db, &s.receipt, &s.stock, r).unwrap_err();
-        assert!(matches!(err, CoreError::NegativeBalance { .. }));
+        assert!(matches!(err, CoreError::NegativeBalance(_)));
         assert_eq!(balance(&mut s, 1), q("6"));
 
         unpost(&mut s.db, &s.issue, &s.stock, i).unwrap();
@@ -429,7 +429,7 @@ mod tests {
         let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
         doc.parts = lines(&[(1, "5")]);
         let err = save_receipt(&mut s, &doc, true).unwrap_err();
-        assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+        assert!(matches!(err, CoreError::NegativeBalance(_)), "{err}");
 
         let stored = s.receipt.get(&mut s.db, r).unwrap().unwrap();
         assert_eq!(stored.parts, lines(&[(1, "10")]));

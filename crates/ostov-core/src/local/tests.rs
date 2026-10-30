@@ -718,7 +718,10 @@ fn issue_before_receipt_is_rejected() {
         )
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
-    assert!(err.message.contains("2026-01-15"), "{}", err.message);
+    assert_eq!(
+        err.message,
+        "Не хватает остатка на 15.01.2026: Склад «Основной», Товар «Мука» — Количество стало бы −3,000. Списывают в этот день: этот документ."
+    );
     assert_eq!(engine.list(&query("issue", 10)).unwrap().total, Some(0));
 
     // В тот же день, что и приход, — можно: проверяется итог дня.
@@ -749,7 +752,10 @@ fn shrinking_old_receipt_below_later_issues_is_rejected() {
     }
     let err = engine.save("receipt", &doc, PostAction::Post).unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
-    assert!(err.message.contains("2026-02-10"), "{}", err.message);
+    assert_eq!(
+        err.message,
+        "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000. Списывают в этот день: Расход №1."
+    );
 
     // Перенос прихода на день позже расхода тоже ломает историю.
     let mut later = engine.get("receipt", receipt_id).unwrap();
