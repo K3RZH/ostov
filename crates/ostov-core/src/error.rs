@@ -19,6 +19,8 @@ pub enum CoreError {
         register: String,
         resource: String,
         balance: Decimal,
+        /// День, на конец которого остаток ушёл бы в минус (если у движений есть даты).
+        date: Option<String>,
     },
     Invalid(String),
 }
@@ -36,10 +38,17 @@ impl fmt::Display for CoreError {
                 register,
                 resource,
                 balance,
-            } => write!(
-                f,
-                "не хватает остатка: {resource} в {register} стал бы {balance}"
-            ),
+                date,
+            } => match date {
+                Some(date) => write!(
+                    f,
+                    "не хватает остатка на {date}: {resource} в {register} стал бы {balance}"
+                ),
+                None => write!(
+                    f,
+                    "не хватает остатка: {resource} в {register} стал бы {balance}"
+                ),
+            },
             Self::Invalid(msg) => write!(f, "{msg}"),
         }
     }

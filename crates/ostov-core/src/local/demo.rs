@@ -176,9 +176,13 @@ fn post(
     doc: &Document,
 ) -> Result<(), CoreError> {
     let movements = (cfg.rule)(doc)?;
-    config
-        .stock
-        .replace(db, cfg.kind.table(), doc.id, &movements)?;
+    config.stock.replace_dated(
+        db,
+        cfg.kind.table(),
+        doc.id,
+        crate::posting::period(doc).as_deref(),
+        &movements,
+    )?;
     cfg.kind.set_posted(db, doc.id, true)
 }
 

@@ -35,9 +35,9 @@ pub struct Movement {
 /// Итоги — кэш, их всегда можно пересчитать из движений (СТ-21).
 #[derive(Debug, Clone)]
 pub struct AccumulationRegister {
-    name: String,
-    dims: Vec<FieldDef>,
-    resources: Vec<FieldDef>,
+    pub(super) name: String,
+    pub(super) dims: Vec<FieldDef>,
+    pub(super) resources: Vec<FieldDef>,
     allow_negative: bool,
 }
 
@@ -54,6 +54,7 @@ impl AccumulationRegister {
             name.to_owned(),
             format!("{name}__totals"),
             format!("{name}__recorder"),
+            format!("{name}__period"),
         ] {
             check_ident(&ident)?;
         }
@@ -90,6 +91,14 @@ impl AccumulationRegister {
         })
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dims(&self) -> &[FieldDef] {
+        &self.dims
+    }
+
     /// Разрешить уход итогов в минус. По умолчанию запрещено.
     pub fn allow_negative(mut self) -> Self {
         self.allow_negative = true;
@@ -105,6 +114,8 @@ impl AccumulationRegister {
                 format!("{} TEXT NOT NULL", d.quote_ident("recorder")),
                 format!("{} BIGINT NOT NULL", d.quote_ident("recorder_id")),
                 format!("{} BIGINT NOT NULL", d.quote_ident("kind")),
+                // Дата документа-регистратора: по ней отчёты на дату и за период.
+                format!("{} TEXT", d.quote_ident("period")),
             ];
             movements.extend(column_defs(d, &self.dims));
             movements.extend(column_defs(d, &self.resources));
@@ -127,6 +138,7 @@ impl AccumulationRegister {
                     d.quote_ident("recorder"),
                     d.quote_ident("recorder_id"),
                 ),
+                self.period_index(d),
                 format!("CREATE TABLE {totals} ({})", totals_cols.join(", ")),
             ]
         };
@@ -164,11 +176,26 @@ impl AccumulationRegister {
         recorder_id: i64,
         movements: &[Movement],
     ) -> Result<(), CoreError> {
-        let mut touched: Vec<Key> = Vec::new();
+        self.replace_dated(db, recorder, recorder_id, None, movements)
+    }
 
-        for (sign, key, amounts) in self.recorded(db, recorder, recorder_id)? {
+    /// То же, что `replace`, с датой документа (`ГГГГ-ММ-ДД`) для отчётов по периодам.
+    pub fn replace_dated(
+        &self,
+        db: &mut dyn Driver,
+        recorder: &str,
+        recorder_id: i64,
+        period: Option<&str>,
+        movements: &[Movement],
+    ) -> Result<(), CoreError> {
+        let mut touched: Vec<Key> = Vec::new();
+        // Самый ранний день, который меняется: старая дата документа или новая.
+        let mut earliest = period.unwrap_or(NO_DATE).to_owned();
+
+        for (sign, key, amounts, old) in self.recorded(db, recorder, recorder_id)? {
             self.add(db, &key, &amounts, -sign)?;
             push_unique(&mut touched, key);
+            earliest = earliest.min(old);
         }
         let sql = {
             let d = db.dialect();
@@ -186,17 +213,83 @@ impl AccumulationRegister {
         for movement in movements {
             let key = self.key(&movement.dims)?;
             let amounts = self.amounts(movement)?;
-            self.insert_movement(db, recorder, recorder_id, movement.kind, &key, &amounts)?;
+            let place = (recorder, recorder_id, period);
+            self.insert_movement(db, place, movement.kind, &key, &amounts)?;
             self.add(db, &key, &amounts, movement.kind.sign())?;
             push_unique(&mut touched, key);
         }
 
         if !self.allow_negative {
             for key in &touched {
-                self.check_not_negative(db, key)?;
+                self.check_history(db, key, &earliest)?;
             }
         }
         Ok(())
+    }
+
+    /// Базы, созданные до появления дат в движениях: добавляет колонку `period`.
+    /// Возвращает `true`, если колонку пришлось добавить (тогда даты нужно заполнить).
+    pub fn upgrade(&self, db: &mut dyn Driver) -> Result<bool, CoreError> {
+        let probe = {
+            let d = db.dialect();
+            format!(
+                "SELECT {} FROM {} WHERE 1 = 0",
+                d.quote_ident("period"),
+                d.quote_ident(&self.name)
+            )
+        };
+        if db.query(&probe, &[]).is_ok() {
+            return Ok(false);
+        }
+        let statements = {
+            let d = db.dialect();
+            vec![
+                format!(
+                    "ALTER TABLE {} ADD COLUMN {} TEXT",
+                    d.quote_ident(&self.name),
+                    d.quote_ident("period")
+                ),
+                self.period_index(d),
+            ]
+        };
+        for sql in statements {
+            db.execute(&sql, &[])?;
+        }
+        Ok(true)
+    }
+
+    /// Проставляет движениям документов вида `recorder` дату из их поля `date_field`.
+    pub fn fill_periods(
+        &self,
+        db: &mut dyn Driver,
+        recorder: &str,
+        date_field: &str,
+    ) -> Result<usize, CoreError> {
+        let sql = {
+            let d = db.dialect();
+            let me = d.quote_ident(&self.name);
+            let doc = d.quote_ident(recorder);
+            format!(
+                "UPDATE {me} SET {period} = (SELECT {doc}.{date} FROM {doc} WHERE {doc}.{id} = {me}.{rid}) \
+                 WHERE {rec} = {p1} AND {period} IS NULL",
+                period = d.quote_ident("period"),
+                date = d.quote_ident(date_field),
+                id = d.quote_ident("id"),
+                rid = d.quote_ident("recorder_id"),
+                rec = d.quote_ident("recorder"),
+                p1 = d.placeholder(1),
+            )
+        };
+        Ok(db.execute(&sql, &[recorder.into()])?)
+    }
+
+    fn period_index(&self, d: &dyn Dialect) -> String {
+        format!(
+            "CREATE INDEX {} ON {} ({})",
+            d.quote_ident(&format!("{}__period", self.name)),
+            d.quote_ident(&self.name),
+            d.quote_ident("period"),
+        )
     }
 
     fn totals(&self) -> String {
@@ -334,15 +427,14 @@ impl AccumulationRegister {
     fn insert_movement(
         &self,
         db: &mut dyn Driver,
-        recorder: &str,
-        recorder_id: i64,
+        (recorder, recorder_id, period): (&str, i64, Option<&str>),
         kind: MovementKind,
         key: &Key,
         amounts: &[Decimal],
     ) -> Result<(), CoreError> {
         let sql = {
             let d = db.dialect();
-            let cols: Vec<String> = ["recorder", "recorder_id", "kind"]
+            let cols: Vec<String> = ["recorder", "recorder_id", "kind", "period"]
                 .iter()
                 .map(|c| d.quote_ident(c))
                 .chain(names(d, &self.dims))
@@ -359,6 +451,7 @@ impl AccumulationRegister {
             recorder.into(),
             Value::Int(recorder_id),
             Value::Int(kind.sign()),
+            period.map_or(Value::Null, |p| Value::Text(p.to_owned())),
         ];
         values.extend(key.iter().cloned());
         values.extend(amounts.iter().map(|a| Value::Int(a.units())));
@@ -371,12 +464,16 @@ impl AccumulationRegister {
         db: &mut dyn Driver,
         recorder: &str,
         recorder_id: i64,
-    ) -> Result<Vec<(i64, Key, Vec<Decimal>)>, CoreError> {
+    ) -> Result<Vec<Recorded>, CoreError> {
         let sql = {
             let d = db.dialect();
             let cols: Vec<String> = std::iter::once(d.quote_ident("kind"))
                 .chain(names(d, &self.dims))
                 .chain(names(d, &self.resources))
+                .chain(std::iter::once(format!(
+                    "COALESCE({}, '{NO_DATE}')",
+                    d.quote_ident("period")
+                )))
                 .collect();
             format!(
                 "SELECT {} FROM {} WHERE {} = {} AND {} = {}",
@@ -397,9 +494,13 @@ impl AccumulationRegister {
                         self.name
                     )));
                 };
+                let period = match row.pop() {
+                    Some(Value::Text(p)) => p,
+                    _ => NO_DATE.to_owned(),
+                };
                 let rest = row.split_off(1 + self.dims.len());
                 let key = row.split_off(1);
-                Ok((sign, key, self.decimals(rest)?))
+                Ok((sign, key, self.decimals(rest)?, period))
             })
             .collect()
     }
@@ -418,24 +519,62 @@ impl AccumulationRegister {
             .collect()
     }
 
-    fn check_not_negative(&self, db: &mut dyn Driver, key: &Key) -> Result<(), CoreError> {
-        let Some(amounts) = self.totals_row(db, key, false)? else {
-            return Ok(());
+    /// Остаток не должен уходить в минус на конец ни одного дня, начиная с `from`:
+    /// иначе документ задним числом «съедает» товар, которого тогда ещё не было.
+    /// Внутри дня порядок документов не важен — проверяем итог дня.
+    fn check_history(&self, db: &mut dyn Driver, key: &Key, from: &str) -> Result<(), CoreError> {
+        let sql = {
+            let d = db.dialect();
+            let period = format!("COALESCE({}, '{NO_DATE}')", d.quote_ident("period"));
+            let kind = d.quote_ident("kind");
+            let mut cols = vec![period.clone()];
+            for r in &self.resources {
+                cols.push(format!(
+                    "CAST(SUM({kind} * {}) AS BIGINT)",
+                    d.quote_ident(&r.name)
+                ));
+            }
+            format!(
+                "SELECT {} FROM {} WHERE {} GROUP BY {period} ORDER BY {period}",
+                cols.join(", "),
+                d.quote_ident(&self.name),
+                self.where_key(d, 1),
+            )
         };
-        for (def, amount) in self.resources.iter().zip(amounts) {
-            if amount.is_negative() {
-                return Err(CoreError::NegativeBalance {
-                    register: self.name.clone(),
-                    resource: def.name.clone(),
-                    balance: amount,
-                });
+        let mut running = self.zeros()?;
+        for row in db.query(&sql, key)? {
+            let mut values = row.into_iter();
+            let day = match values.next() {
+                Some(Value::Text(day)) => day,
+                _ => NO_DATE.to_owned(),
+            };
+            for ((def, total), value) in self.resources.iter().zip(running.iter_mut()).zip(values) {
+                let delta = match value {
+                    Value::Int(units) => Decimal::new(units, scale(def))?,
+                    _ => Decimal::zero(scale(def))?,
+                };
+                *total = total.checked_add(delta)?;
+                if day.as_str() >= from && total.is_negative() {
+                    return Err(CoreError::NegativeBalance {
+                        register: self.name.clone(),
+                        resource: def.name.clone(),
+                        balance: *total,
+                        date: (day != NO_DATE).then(|| day.clone()),
+                    });
+                }
             }
         }
         Ok(())
     }
 }
 
-fn scale(def: &FieldDef) -> u8 {
+/// Движения без даты (документ без поля даты) считаем самыми ранними.
+pub(super) const NO_DATE: &str = "0000-00-00";
+
+/// Движение документа: знак, ключ измерений, ресурсы, день.
+type Recorded = (i64, Key, Vec<Decimal>, String);
+
+pub(super) fn scale(def: &FieldDef) -> u8 {
     match def.kind {
         FieldKind::Decimal { scale } => scale,
         _ => 0,
