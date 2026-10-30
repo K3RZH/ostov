@@ -24,8 +24,7 @@ pub struct Turnover {
 /// Остаток по набору измерений: измерения и значения ресурсов.
 pub type Balance = (Fields, BTreeMap<String, Decimal>);
 
-// Движения без даты (документ без поля даты) считаем самыми ранними.
-const NO_DATE: &str = "0000-00-00";
+use super::accumulation::NO_DATE;
 const NO_END: &str = "9999-12-31";
 
 impl AccumulationRegister {

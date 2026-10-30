@@ -664,3 +664,97 @@ fn old_base_gets_dates_in_movements() {
         .unwrap();
     assert_eq!(empty, vec![vec![ostov_store::Value::Int(0)]]);
 }
+
+/// Склад с мукой: приход 10 кг 1 февраля.
+fn stocked(base: &Base) -> (Arc<dyn Engine>, i64, i64, i64) {
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let r = engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 10_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    (engine, flour, main, r.id)
+}
+
+#[test]
+fn issue_before_receipt_is_rejected() {
+    let base = Base::new("backdated");
+    let (engine, flour, main, _) = stocked(&base);
+
+    // Сейчас муки 10 кг, но 15 января её ещё не было.
+    let err = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 3_000), "2026-01-15"),
+            PostAction::Post,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("2026-01-15"), "{}", err.message);
+    assert_eq!(engine.list(&query("issue", 10)).unwrap().total, Some(0));
+
+    // В тот же день, что и приход, — можно: проверяется итог дня.
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 3_000), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+}
+
+#[test]
+fn shrinking_old_receipt_below_later_issues_is_rejected() {
+    let base = Base::new("shrink");
+    let (engine, flour, main, receipt_id) = stocked(&base);
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 6_000), "2026-02-10"),
+            PostAction::Post,
+        )
+        .unwrap();
+
+    let mut doc = engine.get("receipt", receipt_id).unwrap();
+    if let Some(line) = doc.tables.get_mut("lines").and_then(|l| l.first_mut()) {
+        line.insert("qty".into(), dec(4_000, 3));
+    }
+    let err = engine.save("receipt", &doc, PostAction::Post).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("2026-02-10"), "{}", err.message);
+
+    // Перенос прихода на день позже расхода тоже ломает историю.
+    let mut later = engine.get("receipt", receipt_id).unwrap();
+    later.fields.insert("date".into(), date("2026-02-20"));
+    assert_eq!(
+        engine
+            .save("receipt", &later, PostAction::Post)
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+
+    // Ничего не изменилось.
+    let balance = report(&*engine, "stock_balance", &[("date", date("2026-02-10"))]);
+    assert_eq!(balance[0]["qty"], dec(4_000, 3));
+}
+
+#[test]
+fn unposting_receipt_with_later_issue_is_rejected() {
+    let base = Base::new("unpost-history");
+    let (engine, flour, main, receipt_id) = stocked(&base);
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    let err = engine.unpost("receipt", receipt_id).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+}
