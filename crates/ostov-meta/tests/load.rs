@@ -2,60 +2,12 @@
 
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use std::fs;
-use std::path::{Path, PathBuf};
 
+use common::{MANIFEST, TempConfig, assert_error, repo_config, single};
 use ostov_meta::{Error, FieldType, RegisterKind, load};
-
-const MANIFEST: &str = "name: test\ntitle: Тест\nversion: 0.1.0\nformat: 1\n";
-
-/// Временная папка конфигурации; удаляется после теста.
-struct TempConfig {
-    dir: PathBuf,
-}
-
-impl TempConfig {
-    fn new(test: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ostov-meta-{test}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let config = Self { dir };
-        config.write("ostov.yaml", MANIFEST);
-        config
-    }
-
-    fn write(&self, path: &str, text: &str) -> &Self {
-        let path = self.dir.join(path);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, text).unwrap();
-        self
-    }
-
-    fn errors(&self) -> Vec<Error> {
-        load(&self.dir).unwrap_err()
-    }
-}
-
-impl Drop for TempConfig {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
-fn single(errors: Vec<Error>) -> Error {
-    assert_eq!(errors.len(), 1, "ожидалась одна ошибка: {errors:#?}");
-    errors.into_iter().next().unwrap()
-}
-
-fn assert_error(error: &Error, file: &str, line: Option<u64>, reason_part: &str) {
-    assert!(error.file.ends_with(file), "файл: {error}");
-    assert_eq!(error.line, line, "строка: {error}");
-    assert!(error.reason.contains(reason_part), "причина: {error}");
-}
-
-fn repo_config() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
-}
 
 #[test]
 fn warehouse_config_loads() {

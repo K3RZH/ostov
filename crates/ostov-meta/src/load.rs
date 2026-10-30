@@ -51,6 +51,21 @@ pub fn load(dir: &Path) -> Result<Config, Vec<Error>> {
     })
 }
 
+/// Читает и проверяет конфигурацию — то, что делает `ostov check`.
+///
+/// # Errors
+/// Сначала ошибки разбора: пока файл не разобран, ссылки на его объекты проверять нельзя.
+/// Если разбор прошёл — все ошибки [`crate::check`].
+pub fn load_checked(dir: &Path) -> Result<Config, Vec<Error>> {
+    let config = load(dir)?;
+    let errors = crate::check(&config);
+    if errors.is_empty() {
+        Ok(config)
+    } else {
+        Err(errors)
+    }
+}
+
 /// Только версия формата: её читаем раньше строгого разбора, чтобы файл нового формата
 /// дал понятную ошибку о версии, а не «неизвестный ключ».
 #[derive(Deserialize)]
@@ -157,6 +172,27 @@ fn reason(error: &serde_saphyr::Error) -> String {
         } => format!("вложенность глубже {MAX_DEPTH} уровней"),
         serde_saphyr::Error::IOError { cause } if cause.kind() == ErrorKind::FileTooLarge => {
             format!("файл больше {} МБ", MAX_FILE_BYTES / (1024 * 1024))
+        }
+        serde_saphyr::Error::SerdeUnknownField {
+            field, expected, ..
+        } => format!(
+            "неизвестный ключ «{field}»: допустимы {}",
+            expected.join(", ")
+        ),
+        serde_saphyr::Error::SerdeMissingField { field, .. } => {
+            format!("нет обязательного ключа «{field}»")
+        }
+        serde_saphyr::Error::SerdeUnknownVariant {
+            variant, expected, ..
+        } => format!(
+            "неизвестное значение «{variant}»: допустимо {}",
+            expected.join(", ")
+        ),
+        serde_saphyr::Error::DuplicateMappingKey { key: Some(key), .. } => {
+            format!("ключ «{key}» повторяется")
+        }
+        serde_saphyr::Error::UnknownAnchor { .. } => {
+            "алиас ссылается на неизвестный якорь; якоря и алиасы запрещены".into()
         }
         _ => {
             let mut options = RenderOptions::default();
