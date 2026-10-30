@@ -28,7 +28,7 @@ const STATUS: usize = 5;
 const NEW_DOC_DATE: (u16, u8, u8) = (2026, 10, 29);
 
 /// Объект списка в ядре и поля сортировки по колонкам (порядок как у `receipts::COLUMNS`).
-/// Ссылочные колонки ядро пока сортирует по id, а не по названию.
+/// Ссылочные колонки ядро сортирует по названию.
 const OBJECT: &str = "receipt";
 const COLUMN_FIELDS: [&str; 6] = [
     "number",
@@ -126,7 +126,7 @@ struct State {
     /// Номер запроса списка: ответ на устаревший запрос (успели сменить сортировку или поиск)
     /// отбрасывается.
     generation: u64,
-    /// Строк в списке без поиска (для подписи «Показано N из M»).
+    /// Сколько строк в списке по текущему запросу (для подписи «Показано N из M»).
     total_all: usize,
     next_number: u32,
     docs: HashMap<u32, DocState>,
@@ -250,19 +250,19 @@ impl Catalog {
 }
 
 impl State {
-    /// Показанные строки: порядок задало ядро, поиск делаем здесь по загруженным строкам
-    /// (поиск ядра работает только по текстовым полям самого объекта, а у поступления их нет).
+    /// Показанные строки: и порядок, и поиск делает ядро.
     fn visible(&self) -> Vec<&Receipt> {
-        receipts::filter(&self.all, &self.query)
+        self.all.iter().collect()
     }
 
-    /// Запрос списка по текущей сортировке.
+    /// Запрос списка по текущей сортировке и тексту поиска.
     fn request(&self) -> ListRequest {
         ListRequest {
             order: self
                 .sort
                 .map(|(column, _)| COLUMN_FIELDS[column].to_owned()),
             descending: self.sort.is_some_and(|(_, descending)| descending),
+            search: Some(self.query.trim().to_owned()).filter(|text| !text.is_empty()),
         }
     }
 }
@@ -272,6 +272,7 @@ impl State {
 struct ListRequest {
     order: Option<String>,
     descending: bool,
+    search: Option<String>,
 }
 
 /// Число из десятичного значения ядра в копейках (деньги в ядре: 2 знака; другое
@@ -336,7 +337,7 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
             object: OBJECT.to_owned(),
             order: request.order.clone(),
             descending: request.descending,
-            search: None,
+            search: request.search.clone(),
             after_key: after_key.take(),
             size: PAGE_SIZE,
         })?;
@@ -1165,14 +1166,24 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         move || *snapshot.borrow_mut() = None
     });
 
+    // Поиск уходит в ядро; пока человек печатает, запрос ждёт паузы.
     data.on_query_changed({
         let (app, state) = (app.as_weak(), state.clone());
+        let pause = slint::Timer::default();
         move |query| {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            state.query = query.to_string();
-            app.global::<ReceiptsData>().set_selected_row(-1);
-            refresh_list(&app, &state);
+            let Some(window) = app.upgrade() else { return };
+            state.borrow_mut().query = query.to_string();
+            window.global::<ReceiptsData>().set_selected_row(-1);
+            let (app, state) = (app.clone(), state.clone());
+            pause.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(250),
+                move || {
+                    if let Some(window) = app.upgrade() {
+                        reload(&window, &state, false);
+                    }
+                },
+            );
         }
     });
 
@@ -1697,9 +1708,46 @@ mod tests {
         let descending = ListRequest {
             order: Some("number".to_owned()),
             descending: true,
+            ..ListRequest::default()
         };
         let (rows, _) = fetch_receipts(&*engine, &descending).unwrap();
         assert!(rows.windows(2).all(|pair| pair[0].number > pair[1].number));
+
+        for (field, name) in [
+            (
+                "supplier",
+                (|r: &Receipt| r.supplier.clone()) as fn(&Receipt) -> String,
+            ),
+            ("warehouse", |r: &Receipt| r.warehouse.clone()),
+        ] {
+            let request = ListRequest {
+                order: Some(field.to_owned()),
+                ..ListRequest::default()
+            };
+            let (rows, _) = fetch_receipts(&*engine, &request).unwrap();
+            assert!(rows.windows(2).all(|pair| name(&pair[0]) <= name(&pair[1])));
+        }
+
+        let supplier = all[0].supplier.clone();
+        let by_supplier = ListRequest {
+            search: Some(supplier.to_uppercase()),
+            ..ListRequest::default()
+        };
+        let (found, total) = fetch_receipts(&*engine, &by_supplier).unwrap();
+        assert!(!found.is_empty() && found.len() as u64 == total);
+        assert!(
+            found
+                .iter()
+                .all(|r| r.supplier.to_lowercase() == supplier.to_lowercase())
+        );
+
+        let number = all[0].number;
+        let by_number = ListRequest {
+            search: Some(number.to_string()),
+            ..ListRequest::default()
+        };
+        let (found, _) = fetch_receipts(&*engine, &by_number).unwrap();
+        assert!(found.iter().any(|r| r.number == number));
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

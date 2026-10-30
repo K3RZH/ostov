@@ -134,15 +134,6 @@ impl Receipt {
             self.status().to_owned(),
         ]
     }
-
-    fn matches(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        query.is_empty()
-            || self
-                .cells()
-                .iter()
-                .any(|cell| cell.to_lowercase().contains(&query))
-    }
 }
 
 /// Сортирует по колонке; при равенстве порядок сохраняется (сортировка устойчивая).
@@ -158,11 +149,6 @@ pub fn sort(receipts: &mut [Receipt], column: Column, descending: bool) {
         };
         if descending { order.reverse() } else { order }
     });
-}
-
-/// Документы, подходящие под строку поиска (по любой ячейке, без учёта регистра).
-pub fn filter<'a>(receipts: &'a [Receipt], query: &str) -> Vec<&'a Receipt> {
-    receipts.iter().filter(|r| r.matches(query)).collect()
 }
 
 /// Разбирает дату «дд.мм.гггг»; неверный текст: `None`.
