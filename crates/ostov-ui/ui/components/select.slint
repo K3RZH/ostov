@@ -1,0 +1,101 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { ListView } from "std-widgets.slint";
+
+// Выпадающий список для значений из справочника или перечисления (склад, поставщик, товар).
+// Поле как у TextField, список раскрывается под ним; выбранное значение попадает в `text`.
+export component Select inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder: "Выберите…";
+    in property <[string]> options;
+    in property <bool> enabled: true;
+    in-out property <string> text;
+    callback selected(string);
+
+    spacing: Theme.space-4;
+
+    if root.label != "" : Text {
+        text: root.label;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: root.enabled ? Theme.text : Theme.disabled-text;
+    }
+
+    field := Rectangle {
+        height: Theme.control-md;
+        border-radius: Shape.control-radius;
+        border-width: touch.has-hover && root.enabled ? 2px : 1px;
+        border-color: !root.enabled ? transparent : touch.has-hover ? Theme.focus : Theme.border-strong;
+        background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+        HorizontalLayout {
+            padding-left: Theme.space-12;
+            padding-right: Theme.space-8;
+            spacing: Theme.space-8;
+            Text {
+                text: root.text != "" ? root.text : root.placeholder;
+                font-size: Theme.font-body;
+                color: !root.enabled ? Theme.disabled-text : root.text != "" ? Theme.text : Theme.text-muted;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                Icon { name: "chevron-down"; tint: Theme.text-muted; width: 16px; height: 16px; }
+            }
+        }
+
+        touch := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { popup.show(); }
+        }
+
+        popup := PopupWindow {
+            x: 0px;
+            y: field.height + 2px;
+            width: field.width;
+            height: min(240px, root.options.length * 32px + 8px);
+            close-policy: PopupClosePolicy.close-on-click-outside;
+
+            Rectangle {
+                border-radius: Shape.control-radius;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                background: Theme.surface;
+
+                ListView {
+                    for option in root.options : Rectangle {
+                        height: 32px;
+                        background: option-touch.has-hover ? Theme.accent-soft : transparent;
+                        HorizontalLayout {
+                            padding-left: Theme.space-12;
+                            padding-right: Theme.space-12;
+                            Text {
+                                text: option;
+                                font-size: Theme.font-body;
+                                font-weight: option == root.text ? 600 : 400;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            if option == root.text : VerticalLayout {
+                                alignment: center;
+                                Icon { name: "check"; tint: Theme.accent-text; width: 16px; height: 16px; }
+                            }
+                        }
+                        option-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.text = option;
+                                root.selected(option);
+                                popup.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

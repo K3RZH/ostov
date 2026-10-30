@@ -1,0 +1,30 @@
+import { Theme, Shape } from "../theme.slint";
+
+// Сегмент переключателя: ряд сегментов выбирает одно значение (тема, скругление, роль).
+export component Segment inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback chosen();
+
+    horizontal-stretch: 1;
+    min-width: label.preferred-width + 2 * Theme.space-12;
+    height: Theme.control-md;
+    border-radius: Shape.control-radius;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Theme.accent-text : Theme.border-strong;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : Theme.surface;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? 600 : 400;
+        color: Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

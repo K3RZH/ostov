@@ -1,0 +1,225 @@
+import { Theme } from "theme.slint";
+import { StartPage, RecentDb } from "screens/start-page.slint";
+import { LoginPage } from "screens/login-page.slint";
+import { MainPage, NavRow, TabItem } from "screens/main-page.slint";
+import { CreateDialog } from "screens/create-dialog.slint";
+import { AddDialog } from "screens/add-dialog.slint";
+import { SettingsDialog } from "screens/settings-dialog.slint";
+import { UserDialog } from "screens/user-dialog.slint";
+import { UserRow } from "screens/users-view.slint";
+
+// Единственное окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная).
+// Раньше было три окна, которые прятали и показывали по очереди: на GNOME/Wayland после этого
+// оставались невидимые окна. Размер окна при смене страницы задаёт Rust (src/app.rs).
+export component AppWindow inherits Window {
+    in-out property <int> page: 0;
+    in property <string> config-name: "Управление складом";
+    in property <string> config-info: "Конфигурация · версия 1.2.0";
+
+    // Выбор базы
+    in-out property <int> selected-recent <=> start-page.selected-recent;
+    in-out property <[RecentDb]> recent <=> start-page.recent;
+    callback open <=> start-page.open;
+
+    // Окно «Создать базу»: состояние формы живёт здесь, окно показывается поверх выбора базы.
+    in-out property <bool> creating;
+    in-out property <bool> create-server;
+    in-out property <string> new-name;
+    in-out property <string> new-folder: "~/Ostov";
+    in-out property <string> new-address;
+    in-out property <string> new-admin-login;
+    in-out property <string> new-admin-password;
+    in-out property <string> new-admin-repeat;
+    in-out property <string> new-password;
+    in-out property <string> new-password-repeat;
+    in-out property <bool> new-protect-password;
+    in-out property <bool> new-protect-users;
+    callback create-confirmed();
+    callback choose-folder();
+
+    // Окно «Добавить существующую базу».
+    in-out property <bool> adding;
+    in-out property <bool> add-server;
+    in-out property <string> add-file;
+    in-out property <string> add-address;
+    in-out property <string> add-name;
+    callback add-confirmed();
+    callback choose-file();
+
+    // Окно «Новый пользователь».
+    in-out property <bool> adding-user;
+    in property <[string]> roles;
+    in property <string> user-error;
+    in-out property <string> nu-login;
+    in-out property <string> nu-name;
+    in-out property <int> nu-role;
+    in-out property <string> nu-password;
+    in-out property <string> nu-repeat;
+    callback user-add-confirmed();
+
+    // Настройки интерфейса: выбранные значения хранит Rust (src/settings.rs).
+    in-out property <bool> settings-open;
+    in-out property <bool> dark-theme;
+    in-out property <int> radius-mode: 1;
+    in-out property <int> density-mode: 1;
+    in-out property <int> font-mode: 1;
+    callback theme-chosen(bool);
+    callback radius-chosen(int);
+    callback density-chosen(int);
+    callback font-chosen(int);
+
+    // Вход
+    in property <string> heading <=> login-page.heading;
+    in property <string> source-name <=> login-page.source-name;
+    in property <string> source-detail <=> login-page.source-detail;
+    in property <bool> is-server <=> login-page.is-server;
+    in property <string> change-text <=> login-page.change-text;
+    in property <bool> show-login <=> login-page.show-login;
+    in property <string> hint <=> login-page.hint;
+    in property <string> remember-text <=> login-page.remember-text;
+    in property <string> button-text <=> login-page.button-text;
+    in property <string> error <=> login-page.error;
+    in property <bool> locked <=> login-page.locked;
+    in property <bool> show-repeat <=> login-page.show-repeat;
+    in property <string> login-label <=> login-page.login-label;
+    in property <string> password-label <=> login-page.password-label;
+    in-out property <string> repeat <=> login-page.repeat;
+    in-out property <string> login <=> login-page.login;
+    in-out property <string> password <=> login-page.password;
+    callback submit <=> login-page.submit;
+    callback change-source <=> login-page.change-source;
+    callback back <=> login-page.back;
+
+    // Главная
+    in property <string> base-name <=> main-page.base-name;
+    in property <string> database-name <=> main-page.database-name;
+    in property <string> mode-text <=> main-page.mode-text;
+    in property <[NavRow]> nav <=> main-page.nav;
+    in property <[TabItem]> tabs <=> main-page.tabs;
+    in property <int> active-tab <=> main-page.active-tab;
+    in property <[UserRow]> users <=> main-page.users;
+    in property <string> user-message <=> main-page.user-message;
+    callback user-toggle <=> main-page.user-toggle;
+    callback nav-clicked <=> main-page.nav-clicked;
+    callback tab-selected <=> main-page.tab-selected;
+    callback tab-closed <=> main-page.tab-closed;
+
+    title: root.page == 0 ? "Ostov — Выбор базы"
+        : root.page == 1 ? "Ostov — " + login-page.heading
+        : "Ostov — " + main-page.base-name;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    min-width: root.page == 2 ? 1000px : 960px;
+    min-height: root.page == 0 ? 720px : 600px;
+    default-font-family: "Open Sans";
+    background: Theme.bg;
+
+    start-page := StartPage {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        visible: root.page == 0;
+        config-name: root.config-name;
+        config-info: root.config-info;
+        create-database => { root.creating = true; }
+        add-existing => { root.adding = true; }
+    }
+
+    login-page := LoginPage {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        visible: root.page == 1;
+        config-name: root.config-name;
+        config-info: root.config-info;
+    }
+
+    main-page := MainPage {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        visible: root.page == 2;
+        settings-clicked => { root.settings-open = true; }
+        user-add-clicked => { root.adding-user = true; }
+    }
+
+    if root.creating && root.page == 0 : CreateDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        server <=> root.create-server;
+        db-name <=> root.new-name;
+        folder <=> root.new-folder;
+        address <=> root.new-address;
+        admin-login <=> root.new-admin-login;
+        admin-password <=> root.new-admin-password;
+        admin-repeat <=> root.new-admin-repeat;
+        password <=> root.new-password;
+        password-repeat <=> root.new-password-repeat;
+        protect-password <=> root.new-protect-password;
+        protect-users <=> root.new-protect-users;
+        confirmed => { root.create-confirmed(); }
+        choose-folder => { root.choose-folder(); }
+        cancelled => {
+            root.creating = false;
+            root.new-password = "";
+            root.new-password-repeat = "";
+            root.new-admin-password = "";
+            root.new-admin-repeat = "";
+        }
+    }
+
+    if root.adding && root.page == 0 : AddDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        server <=> root.add-server;
+        file <=> root.add-file;
+        address <=> root.add-address;
+        db-name <=> root.add-name;
+        confirmed => { root.add-confirmed(); }
+        cancelled => { root.adding = false; }
+        choose-file => { root.choose-file(); }
+    }
+
+    if root.settings-open : SettingsDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        dark: root.dark-theme;
+        radius-mode: root.radius-mode;
+        density-mode: root.density-mode;
+        font-mode: root.font-mode;
+        theme-chosen(dark) => { root.theme-chosen(dark); }
+        radius-chosen(mode) => { root.radius-chosen(mode); }
+        density-chosen(mode) => { root.density-chosen(mode); }
+        font-chosen(mode) => { root.font-chosen(mode); }
+        closed => { root.settings-open = false; }
+    }
+
+    if root.adding-user : UserDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        roles: root.roles;
+        error: root.user-error;
+        login <=> root.nu-login;
+        user-name <=> root.nu-name;
+        role <=> root.nu-role;
+        password <=> root.nu-password;
+        repeat <=> root.nu-repeat;
+        confirmed => { root.user-add-confirmed(); }
+        cancelled => {
+            root.adding-user = false;
+            root.nu-password = "";
+            root.nu-repeat = "";
+        }
+    }
+}

@@ -1,0 +1,90 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { Segment } from "../components/segment.slint";
+
+// Окно «Новый пользователь»: логин, имя, роль, пароль с повтором.
+export component UserDialog inherits Rectangle {
+    in property <[string]> roles;
+    in property <string> error;
+    in-out property <string> login;
+    in-out property <string> user-name;
+    in-out property <int> role;
+    in-out property <string> password;
+    in-out property <string> repeat;
+    callback confirmed();
+    callback cancelled();
+
+    private property <bool> mismatch: root.repeat != "" && root.password != root.repeat;
+    private property <bool> valid: root.login != "" && root.password != "" && root.password == root.repeat;
+
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(640px, root.width - 2 * Theme.space-24);
+        height: min(root.height - 2 * Theme.space-24, content.preferred-height);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Новый пользователь";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            TextField { label: "Логин"; text <=> root.login; }
+            TextField { label: "Имя"; text <=> root.user-name; }
+            VerticalLayout {
+                spacing: Theme.space-8;
+                Text { text: "Роль"; font-size: Theme.font-caption; font-weight: 600; color: Theme.text; }
+                HorizontalLayout {
+                    spacing: Theme.space-8;
+                    for r[i] in root.roles : Segment {
+                        text: r;
+                        selected: root.role == i;
+                        chosen => { root.role = i; }
+                    }
+                }
+            }
+            TextField { label: "Пароль"; password: true; text <=> root.password; }
+            TextField {
+                label: "Повторите пароль";
+                password: true;
+                text <=> root.repeat;
+                error: root.mismatch ? "!" : "";
+            }
+            if root.mismatch : Text {
+                text: "Пароли не совпадают.";
+                font-size: Theme.font-caption;
+                color: Theme.danger;
+            }
+            if root.error != "" : Text {
+                text: root.error;
+                font-size: Theme.font-caption;
+                color: Theme.danger;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                Button {
+                    text: "Добавить";
+                    kind: ButtonKind.primary;
+                    enabled: root.valid;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}

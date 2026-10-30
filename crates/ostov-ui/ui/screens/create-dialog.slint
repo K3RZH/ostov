@@ -1,0 +1,251 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { Checkbox } from "../components/choice.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component ModeOption inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+    in property <image> icon;
+    in property <bool> selected;
+    callback chosen();
+
+    horizontal-stretch: 1;
+    border-radius: Shape.surface-radius;
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Theme.accent-text : Theme.border;
+    background: root.selected ? Theme.accent-soft : Theme.surface;
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.chosen(); }
+    }
+
+    VerticalLayout {
+        padding: Theme.space-16;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            VerticalLayout {
+                alignment: center;
+                Image {
+                    source: root.icon;
+                    colorize: root.selected ? Theme.accent-text : Theme.text;
+                    width: 20px;
+                    height: 20px;
+                }
+            }
+            Text {
+                text: root.title;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.hint;
+            font-size: Theme.font-caption;
+            color: Theme.text-muted;
+            wrap: word-wrap;
+        }
+    }
+}
+
+// Окно «Создать базу» поверх затемнения: сначала выбор, где будет жить база (файл или сервер).
+// Занимает всю страницу; пока открыто, клики под ним не проходят. Поля прокручиваются,
+// кнопки закреплены внизу: с паролем и администратором окно выше экрана.
+export component CreateDialog inherits Rectangle {
+    in-out property <bool> server;
+    in-out property <string> db-name;
+    in-out property <string> folder;
+    in-out property <string> address;
+    in-out property <string> admin-login;
+    in-out property <string> admin-password;
+    in-out property <string> admin-repeat;
+    in-out property <string> password;
+    in-out property <string> password-repeat;
+    in-out property <bool> protect-password;
+    in-out property <bool> protect-users;
+    callback confirmed();
+    callback cancelled();
+    callback choose-folder();
+
+    // Администратор нужен серверу всегда (СТ-36) и локальной базе, если включены пользователи.
+    private property <bool> need-admin: root.server || root.protect-users;
+    private property <bool> file-mismatch: root.password-repeat != "" && root.password != root.password-repeat;
+    private property <bool> admin-mismatch: root.admin-repeat != "" && root.admin-password != root.admin-repeat;
+    private property <bool> file-ok: !root.protect-password || (root.password != "" && root.password == root.password-repeat);
+    private property <bool> admin-ok: !root.need-admin
+        || (root.admin-login != "" && root.admin-password != "" && root.admin-password == root.admin-repeat);
+    private property <bool> valid: root.db-name != ""
+        && root.admin-ok
+        && (root.server ? root.address != "" : root.folder != "" && root.file-ok);
+
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.space-24);
+        height: min(root.height - 2 * Theme.space-24, content.preferred-height);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Создать базу";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                preferred-height: fields.preferred-height;
+
+                fields := VerticalLayout {
+                    spacing: Theme.space-16;
+                    padding-right: Theme.space-12;
+
+                    Text {
+                        text: "Где будет храниться база";
+                        font-size: Theme.font-body;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.space-12;
+                        ModeOption {
+                            title: "Локально";
+                            hint: "Файл на этом компьютере";
+                            icon: @image-url("../../assets/icons/database.svg");
+                            selected: !root.server;
+                            chosen => { root.server = false; }
+                        }
+                        ModeOption {
+                            title: "Сервер";
+                            hint: "Общая база на сервере";
+                            icon: @image-url("../../assets/icons/server.svg");
+                            selected: root.server;
+                            chosen => { root.server = true; }
+                        }
+                    }
+
+                    if root.server : TextField {
+                        label: "Адрес сервера";
+                        placeholder: "kafe-srv.local:7443";
+                        text <=> root.address;
+                    }
+                    TextField {
+                        label: "Название базы";
+                        text <=> root.db-name;
+                    }
+                    if !root.server : HorizontalLayout {
+                        spacing: Theme.space-8;
+                        TextField {
+                            label: "Папка";
+                            text <=> root.folder;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            width: 112px;
+                            alignment: end;
+                            Button { text: "Выбрать…"; clicked => { root.choose-folder(); } }
+                        }
+                    }
+                    if !root.server : VerticalLayout {
+                        spacing: Theme.space-8;
+                        Text {
+                            text: "Защита базы";
+                            font-size: Theme.font-body;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        Checkbox { text: "Защитить паролем"; checked <=> root.protect-password; }
+                        Checkbox { text: "Включить пользователей"; checked <=> root.protect-users; }
+                        if root.protect-password : TextField {
+                            label: "Пароль базы";
+                            password: true;
+                            text <=> root.password;
+                        }
+                        if root.protect-password : TextField {
+                            label: "Повторите пароль базы";
+                            password: true;
+                            text <=> root.password-repeat;
+                            error: root.file-mismatch ? "!" : "";
+                        }
+                        if root.protect-password && root.file-mismatch : Text {
+                            text: "Пароли не совпадают.";
+                            font-size: Theme.font-caption;
+                            color: Theme.danger;
+                        }
+                        Text {
+                            text: "Пароль шифрует файл базы: без него открыть её нельзя. Пользователи нужны, чтобы знать, кто что делал, и ограничивать права; это не шифрование.";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if root.need-admin : VerticalLayout {
+                        spacing: Theme.space-8;
+                        Text {
+                            text: "Администратор базы";
+                            font-size: Theme.font-body;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        TextField {
+                            label: "Логин администратора";
+                            text <=> root.admin-login;
+                        }
+                        TextField {
+                            label: "Пароль администратора";
+                            password: true;
+                            text <=> root.admin-password;
+                        }
+                        TextField {
+                            label: "Повторите пароль администратора";
+                            password: true;
+                            text <=> root.admin-repeat;
+                            error: root.admin-mismatch ? "!" : "";
+                        }
+                        if root.admin-mismatch : Text {
+                            text: "Пароли не совпадают.";
+                            font-size: Theme.font-caption;
+                            color: Theme.danger;
+                        }
+                        Text {
+                            text: root.server
+                                ? "Соединение защищено (TLS). Администратор нужен для первой настройки базы, паролей по умолчанию нет."
+                                : "Администратор управляет пользователями и ролями. Паролей по умолчанию нет: учётная запись создаётся сейчас.";
+                            font-size: Theme.font-caption;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                Button {
+                    text: "Создать";
+                    kind: ButtonKind.primary;
+                    enabled: root.valid;
+                    clicked => { root.confirmed(); }
+                }
+            }
+        }
+    }
+}

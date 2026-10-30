@@ -1,0 +1,95 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Segment } from "../components/segment.slint";
+
+// Базовые настройки интерфейса: тема и скругление. Применяются сразу, сохраняет Rust.
+export component SettingsDialog inherits Rectangle {
+    in property <bool> dark;
+    in property <int> radius-mode;
+    in property <int> density-mode;
+    in property <int> font-mode;
+    callback theme-chosen(bool);
+    callback radius-chosen(int);
+    callback density-chosen(int);
+    callback font-chosen(int);
+    callback closed();
+
+    background: Theme.scrim;
+
+    TouchArea { clicked => { root.closed(); } }
+
+    card := Rectangle {
+        width: min(480px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        // Клики по самому окну не должны закрывать его.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Настройки интерфейса";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            VerticalLayout {
+                spacing: Theme.space-8;
+                Text { text: "Тема"; font-size: Theme.font-body; font-weight: 600; color: Theme.text; }
+                HorizontalLayout {
+                    spacing: Theme.space-8;
+                    Segment { text: "Светлая"; selected: !root.dark; chosen => { root.theme-chosen(false); } }
+                    Segment { text: "Тёмная"; selected: root.dark; chosen => { root.theme-chosen(true); } }
+                }
+            }
+            VerticalLayout {
+                spacing: Theme.space-8;
+                Text { text: "Скругление"; font-size: Theme.font-body; font-weight: 600; color: Theme.text; }
+                HorizontalLayout {
+                    spacing: Theme.space-8;
+                    Segment { text: "Строгое"; selected: root.radius-mode == 0; chosen => { root.radius-chosen(0); } }
+                    Segment { text: "Обычное"; selected: root.radius-mode == 1; chosen => { root.radius-chosen(1); } }
+                    Segment { text: "Мягкое"; selected: root.radius-mode == 2; chosen => { root.radius-chosen(2); } }
+                    Segment { text: "Капсула"; selected: root.radius-mode == 3; chosen => { root.radius-chosen(3); } }
+                }
+            }
+            VerticalLayout {
+                spacing: Theme.space-8;
+                Text { text: "Плотность строк таблицы"; font-size: Theme.font-body; font-weight: 600; color: Theme.text; }
+                HorizontalLayout {
+                    spacing: Theme.space-8;
+                    Segment { text: "Плотная"; selected: root.density-mode == 0; chosen => { root.density-chosen(0); } }
+                    Segment { text: "Обычная"; selected: root.density-mode == 1; chosen => { root.density-chosen(1); } }
+                    Segment { text: "Просторная"; selected: root.density-mode == 2; chosen => { root.density-chosen(2); } }
+                }
+            }
+            VerticalLayout {
+                spacing: Theme.space-8;
+                Text { text: "Размер шрифта"; font-size: Theme.font-body; font-weight: 600; color: Theme.text; }
+                HorizontalLayout {
+                    spacing: Theme.space-8;
+                    Segment { text: "Мелкий"; selected: root.font-mode == 0; chosen => { root.font-chosen(0); } }
+                    Segment { text: "Обычный"; selected: root.font-mode == 1; chosen => { root.font-chosen(1); } }
+                    Segment { text: "Крупный"; selected: root.font-mode == 2; chosen => { root.font-chosen(2); } }
+                }
+            }
+            Text {
+                text: "Настройки применяются сразу и сохраняются.";
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+            }
+            HorizontalLayout {
+                alignment: end;
+                Button { text: "Готово"; kind: ButtonKind.primary; clicked => { root.closed(); } }
+            }
+        }
+    }
+}

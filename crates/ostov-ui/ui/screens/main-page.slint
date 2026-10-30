@@ -1,6 +1,8 @@
 import { Theme, Shape } from "../theme.slint";
 import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
+import { UsersView, UserRow } from "users-view.slint";
+import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
 
 // Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
 export struct NavRow {
@@ -14,7 +16,7 @@ export struct NavRow {
     favorite: bool,
 }
 
-export struct TabItem { title: string, icon: string, modified: bool }
+export struct TabItem { title: string, icon: string, modified: bool, view: string, preview: bool }
 
 component NavRowView inherits Rectangle {
     in property <NavRow> entry;
@@ -44,7 +46,19 @@ component NavRowView inherits Rectangle {
                 width: 16px;
                 height: 16px;
             }
-            if !root.entry.is-group : Rectangle { width: 16px; height: 16px; }
+            // Полоска перед значком отделяет элементы от групп.
+            if !root.entry.is-group : Rectangle {
+                width: 16px;
+                height: 16px;
+                Rectangle {
+                    x: 7px;
+                    y: 1px;
+                    width: 2px;
+                    height: 14px;
+                    border-radius: 1px;
+                    background: root.entry.selected ? Theme.accent-text : Theme.border-strong;
+                }
+            }
         }
         VerticalLayout {
             alignment: center;
@@ -75,8 +89,10 @@ component TabView inherits Rectangle {
     callback selected();
     callback closed();
 
+    // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
+    callback scrolled(length);
+
     height: 40px;
-    min-width: content.preferred-width;
     background: root.active ? Theme.bg : transparent;
 
     if root.active : Rectangle {
@@ -88,6 +104,10 @@ component TabView inherits Rectangle {
     TouchArea {
         mouse-cursor: pointer;
         clicked => { root.selected(); }
+        scroll-event(event) => {
+            root.scrolled(event.delta-y + event.delta-x);
+            accept
+        }
     }
 
     content := HorizontalLayout {
@@ -105,8 +125,12 @@ component TabView inherits Rectangle {
             text: root.tab.title;
             font-size: Theme.font-body;
             font-weight: root.active ? 600 : 400;
+            // Курсив: вкладка предпросмотра, её заменит следующее открытие.
+            font-italic: root.tab.preview;
             color: root.active ? Theme.text : Theme.text-muted;
             vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
         }
         if root.tab.modified : VerticalLayout {
             alignment: center;
@@ -134,9 +158,9 @@ component Separator inherits Rectangle {
     background: Theme.border;
 }
 
-// Главное окно: шапка, навигация, вкладки, содержимое, строка состояния.
+// Главная страница: шапка, навигация, вкладки, содержимое, строка состояния.
 // Сейчас заглушка: данные примерные, содержимое вкладок появится вместе с ядром.
-export component MainWindow inherits Window {
+export component MainPage inherits Rectangle {
     in property <string> base-name: "Кафе-2026";
     in property <string> database-name: "Кафе-2026.sqlite";
     in property <string> mode-text: "Режим: локально";
@@ -151,13 +175,37 @@ export component MainWindow inherits Window {
     callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
+    callback settings-clicked();
 
-    title: "Ostov — " + root.base-name;
-    preferred-width: 1440px;
-    preferred-height: 900px;
-    min-width: 1000px;
-    min-height: 600px;
-    default-font-family: "Open Sans";
+    private property <length> tab-min: 140px;
+    private property <length> tab-max: 240px;
+    private property <bool> tabs-overflow: root.tabs.length * root.tab-min + 16px > bar.width;
+    private property <length> tab-width: root.tabs-overflow ? root.tab-min : min(root.tab-max, (bar.width - 16px) / max(1, root.tabs.length));
+
+    // Сдвиг панели вкладок: положительное число уводит вкладки вправо, отрицательное влево.
+    function scroll-tabs(delta: length) {
+        flick.content-x = min(0px, max(flick.width - flick.content-width, flick.content-x + delta));
+    }
+
+    // Активная вкладка всегда в видимой части панели.
+    function reveal(index: int) {
+        if (!root.tabs-overflow) {
+            flick.content-x = 0px;
+        } else if (Theme.space-8 + index * root.tab-min < -flick.content-x) {
+            flick.content-x = -(Theme.space-8 + index * root.tab-min);
+        } else if (Theme.space-8 + (index + 1) * root.tab-min > -flick.content-x + flick.width) {
+            flick.content-x = -(Theme.space-8 + (index + 1) * root.tab-min - flick.width);
+        }
+    }
+
+    changed active-tab => { root.reveal(root.active-tab); }
+    changed tabs => { root.reveal(root.active-tab); }
+    // Вкладка «Пользователи и роли»
+    in property <[UserRow]> users;
+    in property <string> user-message;
+    callback user-add-clicked();
+    callback user-toggle(int);
+
     background: Theme.bg;
 
     VerticalLayout {
@@ -239,7 +287,7 @@ export component MainWindow inherits Window {
                 VerticalLayout { alignment: center; IconButton { icon: "plus"; } }
                 VerticalLayout { alignment: center; IconButton { icon: "bell"; } }
                 VerticalLayout { alignment: center; IconButton { icon: "help"; } }
-                VerticalLayout { alignment: center; IconButton { icon: "settings"; } }
+                VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
                     Rectangle {
@@ -299,8 +347,8 @@ export component MainWindow inherits Window {
             }
 
             VerticalLayout {
-                // Вкладки
-                Rectangle {
+                // Вкладки: сжимаются до 140 px, дальше панель прокручивается колесом или стрелками.
+                bar := Rectangle {
                     height: 40px;
                     background: Theme.surface-alt;
                     Rectangle {
@@ -308,19 +356,47 @@ export component MainWindow inherits Window {
                         height: 1px;
                         background: Theme.border;
                     }
-                    HorizontalLayout {
-                        padding-left: Theme.space-8;
-                        alignment: start;
-                        for tab[i] in root.tabs : TabView {
-                            tab: tab;
-                            active: i == root.active-tab;
-                            selected => { root.tab-selected(i); }
-                            closed => { root.tab-closed(i); }
+                    flick := Flickable {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width - (root.tabs-overflow ? 64px : 0px);
+                        height: parent.height;
+                        content-width: root.tabs-overflow ? root.tabs.length * root.tab-min + 16px : self.width;
+                        content-height: self.height;
+                        HorizontalLayout {
+                            width: flick.content-width;
+                            height: parent.height;
+                            padding-left: Theme.space-8;
+                            alignment: start;
+                            for tab[i] in root.tabs : TabView {
+                                width: root.tab-width;
+                                tab: tab;
+                                active: i == root.active-tab;
+                                selected => { root.tab-selected(i); }
+                                closed => { root.tab-closed(i); }
+                                scrolled(delta) => { root.scroll-tabs(delta); }
+                            }
                         }
+                    }
+                    if root.tabs-overflow : HorizontalLayout {
+                        x: parent.width - 64px;
+                        width: 64px;
+                        padding: 6px;
+                        spacing: 4px;
+                        IconButton { icon: "chevrons-left"; control-size: 28px; clicked => { root.scroll-tabs(root.tab-min); } }
+                        IconButton { icon: "chevrons-right"; control-size: 28px; clicked => { root.scroll-tabs(-root.tab-min); } }
                     }
                 }
                 // Содержимое вкладки
-                Rectangle {
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "users" : UsersView {
+                    users: root.users;
+                    message: root.user-message;
+                    add-clicked => { root.user-add-clicked(); }
+                    toggle(i) => { root.user-toggle(i); }
+                }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }
+                if root.tabs.length == 0 || (root.tabs[root.active-tab].view != "users" && root.tabs[root.active-tab].view != "receipts" && root.tabs[root.active-tab].view != "receipt") : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {
                         alignment: center;
@@ -357,7 +433,6 @@ export component MainWindow inherits Window {
                 spacing: Theme.space-12;
                 VerticalLayout { alignment: center; Icon { name: "database"; tint: Theme.text-muted; width: 14px; height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.database-name; font-size: Theme.font-caption; color: Theme.text-muted; } }
-                VerticalLayout { alignment: center; Separator { height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.mode-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
                 Rectangle { horizontal-stretch: 1; }
                 VerticalLayout { alignment: center; Icon { name: "success"; tint: Theme.accent-text; width: 14px; height: 14px; } }
@@ -365,7 +440,6 @@ export component MainWindow inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 VerticalLayout { alignment: center; Icon { name: "user"; tint: Theme.text-muted; width: 14px; height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.user-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
-                VerticalLayout { alignment: center; Separator { height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.app-version; font-size: Theme.font-caption; color: Theme.text-muted; } }
             }
         }

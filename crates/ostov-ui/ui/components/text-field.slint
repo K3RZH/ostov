@@ -55,7 +55,8 @@ export component TextField inherits VerticalLayout {
             Rectangle {
                 input := TextInput {
                     x: 0;
-                    width: parent.width;
+                    // 2 px запаса справа: иначе каретка у правого края (числа вправо) обрезается.
+                    width: parent.width - 2px;
                     height: parent.height;
                     single-line: true;
                     input-type: root.password ? InputType.password : InputType.text;

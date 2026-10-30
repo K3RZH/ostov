@@ -4,9 +4,9 @@ import { TextField } from "../components/text-field.slint";
 import { Checkbox } from "../components/choice.slint";
 import { BrandPanel } from "brand-panel.slint";
 
-// Окно входа: на сервер, в локальную базу с пользователями, пароль зашифрованной базы.
+// Страница входа: на сервер, в локальную базу с пользователями, пароль зашифрованной базы.
 // Различаются свойствами: заголовок, источник, нужен ли логин, текст кнопки, ошибка.
-export component LoginWindow inherits Window {
+export component LoginPage inherits Rectangle {
     in property <string> heading: "Вход на сервер";
     in property <string> source-name: "kafe-srv.local:7443";
     in property <string> source-detail: "Соединение защищено (TLS)";
@@ -18,6 +18,13 @@ export component LoginWindow inherits Window {
     in property <string> remember-text: "Запомнить сервер";
     in property <string> button-text: "Войти";
     in property <string> error;
+    // Идёт задержка после неудач: кнопка недоступна, пока не закончится отсчёт.
+    in property <bool> locked;
+    // Первая настройка сервера: создание администратора (логин, пароль и его повтор).
+    in property <bool> show-repeat;
+    in property <string> login-label: "Логин";
+    in property <string> password-label: "Пароль";
+    in-out property <string> repeat;
     in property <string> config-name: "Управление складом";
     in property <string> config-info: "Конфигурация · версия 1.2.0";
     in-out property <string> login;
@@ -27,12 +34,6 @@ export component LoginWindow inherits Window {
     callback change-source();
     callback back();
 
-    title: "Ostov — " + root.heading;
-    preferred-width: 1200px;
-    preferred-height: 760px;
-    min-width: 960px;
-    min-height: 600px;
-    default-font-family: "Open Sans";
     background: Theme.bg;
 
     HorizontalLayout {
@@ -108,14 +109,19 @@ export component LoginWindow inherits Window {
                         wrap: word-wrap;
                     }
                     if root.show-login : TextField {
-                        label: "Логин";
+                        label: root.login-label;
                         text <=> root.login;
                     }
                     TextField {
-                        label: "Пароль";
+                        label: root.password-label;
                         password: true;
                         text <=> root.password;
                         error: root.error == "" ? "" : "!";
+                    }
+                    if root.show-repeat : TextField {
+                        label: "Повторите пароль";
+                        password: true;
+                        text <=> root.repeat;
                     }
                     if root.error != "" : Rectangle {
                         height: banner.preferred-height;
@@ -151,13 +157,13 @@ export component LoginWindow inherits Window {
                         text: root.button-text;
                         kind: ButtonKind.primary;
                         control-height: Theme.control-lg;
-                        enabled: root.error == "";
+                        enabled: !root.locked;
                         clicked => { root.submit(); }
                     }
                     HorizontalLayout {
                         alignment: center;
                         Button {
-                            text: "Назад к выбору режима";
+                            text: "Назад к выбору базы";
                             kind: ButtonKind.text;
                             clicked => { root.back(); }
                         }

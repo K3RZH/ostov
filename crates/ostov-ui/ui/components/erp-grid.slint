@@ -1,0 +1,329 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { Chip, ChipKind } from "chip.slint";
+import { ListView } from "std-widgets.slint";
+
+// flex: главная колонка, забирает свободную ширину (у неё width это минимум).
+// right: числа и суммы выравниваются вправо. status: значение показывается чипом статуса.
+export struct GridColumn { title: string, width: length, right: bool, flex: bool, status: bool }
+// muted: строка приглушена (например помечена на удаление).
+export struct GridRow { cells: [string], muted: bool }
+
+// Ширина полосы прокрутки: шапка и строки отступают на неё поровну, чтобы колонки совпадали.
+global GridMetrics {
+    out property <length> track-width: 14px;
+}
+
+component HeaderCell inherits Rectangle {
+    in property <GridColumn> spec;
+    in property <bool> sorted;
+    in property <bool> desc;
+    // У последней колонки ручки нет: её правый край это край таблицы.
+    in property <bool> resizable: true;
+    // Колонка, ручку которой тянут сейчас (подсвечивается).
+    in property <bool> dragging;
+    callback clicked();
+    // Ручку тянут: начало, смещение мыши от точки нажатия (точное, ручка при этом не
+    // движется), конец. Ширина меняется сразу, на каждом движении.
+    callback drag-start();
+    callback drag-move(length);
+    callback drag-end();
+
+    horizontal-stretch: root.spec.flex ? 1 : 0;
+    min-width: root.spec.width;
+    max-width: root.spec.flex ? 100000px : root.spec.width;
+    background: root.dragging ? Theme.accent-soft : touch.has-hover ? Theme.border : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-12;
+        padding-right: Theme.space-12;
+        spacing: Theme.space-4;
+        if root.spec.right : Rectangle { }
+        Text {
+            text: root.spec.title;
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.sorted : VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "chevron-down";
+                tint: Theme.accent-text;
+                width: 16px;
+                height: 16px;
+                transform-rotation: root.desc ? 0deg : 180deg;
+            }
+        }
+    }
+
+    private property <bool> grabbed;
+    private property <length> grab-x;
+    private property <length> press-x;
+
+    // Ручка-разделитель: черта 1 px, при наведении область 10 px и черта 2 px акцентом.
+    // Пока ручку тянут, она стоит на месте (левый край колонки не двигается, а правый уезжает
+    // за мышью): иначе её координаты мыши отстают на кадр и колонка дёргается.
+    handle := TouchArea {
+        x: root.grabbed ? root.grab-x : parent.width - 10px;
+        width: 10px;
+        enabled: root.resizable;
+        mouse-cursor: root.resizable ? MouseCursor.col-resize : MouseCursor.default;
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.grab-x = root.width - 10px;
+                root.grabbed = true;
+                root.press-x = self.mouse-x;
+                root.drag-start();
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                root.grabbed = false;
+                root.drag-end();
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.drag-move(self.mouse-x - root.press-x);
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width - (handle.has-hover || root.dragging ? 2px : 1px);
+        y: (parent.height - self.height) / 2;
+        width: handle.has-hover || root.dragging ? 2px : 1px;
+        height: handle.has-hover || root.dragging ? parent.height : 20px;
+        background: handle.has-hover || root.dragging ? Theme.accent-text : Theme.border-strong;
+    }
+}
+
+component GridRowView inherits Rectangle {
+    in property <GridRow> item;
+    in property <[GridColumn]> columns;
+    in property <bool> selected;
+    callback clicked();
+    callback activated();
+
+    height: Theme.row-height;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.activated(); }
+    }
+
+    HorizontalLayout {
+        for col[i] in root.columns : Rectangle {
+            horizontal-stretch: col.flex ? 1 : 0;
+            min-width: col.width;
+            max-width: col.flex ? 100000px : col.width;
+            if !col.status : Text {
+                x: Theme.space-12;
+                width: parent.width - 2 * Theme.space-12;
+                height: parent.height;
+                text: root.item.cells[i];
+                font-size: Theme.font-body;
+                font-weight: root.selected ? 600 : 400;
+                color: root.item.muted ? Theme.disabled-text : Theme.text;
+                horizontal-alignment: col.right ? right : left;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if col.status : Chip {
+                x: Theme.space-12;
+                y: (parent.height - self.height) / 2;
+                text: root.item.cells[i];
+                kind: root.item.cells[i] == "Проведён" ? ChipKind.posted
+                    : root.item.cells[i] == "Черновик" ? ChipKind.draft
+                    : ChipKind.neutral;
+            }
+        }
+    }
+}
+
+// Таблица ErpGrid по макету: шапка с сортировкой и ручками колонок, строки без вертикальных
+// линий, внешний контур скруглён, строки и шапка с прямыми углами, главная колонка гибкая.
+// Полоса прокрутки своя: ползунок, отметки-вехи (ADR-014) и подсказка «Строка N из M».
+// Данные и сортировку ведёт Rust; ширины колонок меняются здесь, перетаскиванием.
+export component ErpGrid inherits Rectangle {
+    in property <[GridColumn]> columns;
+    in property <[GridRow]> rows;
+    in property <string> empty-text: "Нет данных";
+    in property <int> sort-column: -1;
+    in property <bool> sort-desc;
+    // Шаг вех в строках (0: без вех). Для длинных списков задаёт вызывающий.
+    in property <int> milestone-step: 0;
+    in-out property <int> selected-row: -1;
+    callback sort-clicked(int);
+    callback row-activated(int);
+    // Ширина колонки меняется на каждом движении ручки: начало, смещение от точки нажатия
+    // (колонка, смещение, ширина области колонок), конец. Ширины пересчитывает вызывающий
+    // (src/grid.rs) от ширин на момент начала, поэтому ошибки не накапливаются.
+    callback resize-begin();
+    callback resize-column(int, length, length);
+    callback resize-end();
+
+    border-radius: Shape.surface-radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    clip: true;
+
+    // Какая колонка меняет ширину сейчас (подсвечивается).
+    private property <int> drag-index: -1;
+
+    VerticalLayout {
+        Rectangle {
+            height: 36px;
+            background: Theme.surface-alt;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                padding-right: GridMetrics.track-width;
+                for col[i] in root.columns : HeaderCell {
+                    spec: col;
+                    sorted: i == root.sort-column;
+                    desc: root.sort-desc;
+                    resizable: i < root.columns.length - 1;
+                    dragging: i == root.drag-index;
+                    clicked => { root.sort-clicked(i); }
+                    drag-start => {
+                        root.drag-index = i;
+                        root.resize-begin();
+                    }
+                    drag-move(offset) => {
+                        root.resize-column(i, offset, root.width - GridMetrics.track-width - 2px);
+                    }
+                    drag-end => {
+                        root.drag-index = -1;
+                        root.resize-end();
+                    }
+                }
+            }
+        }
+        if root.rows.length == 0 : Rectangle {
+            Text {
+                text: root.empty-text;
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.rows.length > 0 : Rectangle {
+            list := ListView {
+                x: 0px;
+                width: parent.width - GridMetrics.track-width;
+                height: parent.height;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                for row[i] in root.rows : GridRowView {
+                    item: row;
+                    columns: root.columns;
+                    selected: i == root.selected-row;
+                    clicked => { root.selected-row = i; }
+                    activated => { root.row-activated(i); }
+                }
+            }
+
+            // Полоса прокрутки
+            track := Rectangle {
+                x: parent.width - GridMetrics.track-width;
+                width: GridMetrics.track-width;
+                height: parent.height;
+                background: Theme.surface-alt;
+
+                private property <length> total: list.content-height;
+                private property <length> view-h: list.visible-height;
+                private property <length> scroll-range: max(0px, self.total - self.view-h);
+                private property <length> thumb-height: max(28px, self.height * self.view-h / max(1px, self.total));
+                private property <length> thumb-free: max(1px, self.height - self.thumb-height);
+                private property <length> thumb-y: self.scroll-range > 0 ? (-list.content-y / self.scroll-range) * self.thumb-free : 0px;
+                private property <length> drag-start-y;
+                private property <length> drag-start-offset;
+
+                Rectangle {
+                    x: 0px;
+                    width: 1px;
+                    background: Theme.border;
+                }
+
+                // Вехи: отметки через равные промежутки строк, по ним удобно прыгать ползунком.
+                if root.milestone-step > 0 && track.scroll-range > 0 : Rectangle {
+                    for k in Math.floor(root.rows.length / root.milestone-step) : Rectangle {
+                        x: 2px;
+                        y: ((k + 1) * root.milestone-step / root.rows.length) * track.height;
+                        width: 6px;
+                        height: 1px;
+                        background: Theme.border-strong;
+                    }
+                }
+
+                // Клик по полосе: ползунок прыгает к этому месту.
+                TouchArea {
+                    enabled: track.scroll-range > 0;
+                    clicked => {
+                        list.content-y = -min(track.scroll-range, max(0px, (self.mouse-y - track.thumb-height / 2) / track.thumb-free * track.scroll-range));
+                    }
+                }
+
+                if track.scroll-range > 0 : thumb := Rectangle {
+                    x: 3px;
+                    y: track.thumb-y;
+                    width: parent.width - 6px;
+                    height: track.thumb-height;
+                    border-radius: 4px;
+                    background: thumb-touch.pressed ? Theme.accent-text : thumb-touch.has-hover ? Theme.text-muted : Theme.border-strong;
+
+                    thumb-touch := TouchArea {
+                        mouse-cursor: MouseCursor.pointer;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                track.drag-start-y = self.absolute-position.y + self.mouse-y;
+                                track.drag-start-offset = list.content-y;
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                list.content-y = -min(track.scroll-range, max(0px, -track.drag-start-offset
+                                    + (self.absolute-position.y + self.mouse-y - track.drag-start-y) / track.thumb-free * track.scroll-range));
+                            }
+                        }
+                    }
+
+                    // Подсказка при наведении на ползунок: где мы в списке.
+                    if thumb-touch.has-hover || thumb-touch.pressed : Rectangle {
+                        width: tip.preferred-width + 16px;
+                        height: 24px;
+                        x: -self.width - 6px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: Shape.control-radius;
+                        background: Theme.text;
+                        tip := Text {
+                            text: "Строка " + (Math.round(-list.content-y / Theme.row-height) + 1) + " из " + root.rows.length;
+                            font-size: Theme.font-caption;
+                            color: Theme.bg;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+            }
+        }
+    }
+
+}

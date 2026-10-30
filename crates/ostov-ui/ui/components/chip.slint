@@ -1,4 +1,4 @@
-import { Theme } from "../theme.slint";
+import { Theme, Shape } from "../theme.slint";
 
 export enum ChipKind { neutral, posted, draft, error }
 
@@ -7,10 +7,11 @@ export component Chip inherits Rectangle {
     in property <string> text;
     in property <ChipKind> kind: ChipKind.neutral;
 
+    // Чип по ширине текста везде, в том числе в ячейке таблицы, где раскладки нет.
+    width: label.preferred-width + 16px;
     height: 20px;
-    min-width: label.preferred-width + 16px;
-    max-width: label.preferred-width + 16px;
-    border-radius: 4px;
+    // Скругление по настройке пользователя, но не больше половины высоты (капсула).
+    border-radius: min(Shape.control-radius, self.height / 2);
     background: root.kind == ChipKind.posted ? (Theme.dark ? #24392A : #E5F3E6)
         : root.kind == ChipKind.draft ? (Theme.dark ? #403018 : #FFF3D6)
         : root.kind == ChipKind.error ? Theme.danger-soft

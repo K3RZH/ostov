@@ -6,7 +6,14 @@
 slint::include_modules!();
 
 pub mod app;
+pub mod engine;
+pub mod grid;
+pub mod login;
+pub mod receipts;
+pub mod receipts_ui;
+pub mod settings;
 pub mod shell;
+pub mod users;
 
 /// Имя крейта (проверка, что каркас собран).
 pub const NAME: &str = env!("CARGO_PKG_NAME");
