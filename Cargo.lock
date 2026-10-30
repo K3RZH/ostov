@@ -3412,6 +3412,7 @@ name = "ostov-core"
 version = "0.1.0"
 dependencies = [
  "ostov-api",
+ "ostov-model",
  "ostov-store",
 ]
 
@@ -3419,9 +3420,15 @@ dependencies = [
 name = "ostov-meta"
 version = "0.1.0"
 dependencies = [
+ "ostov-core",
+ "ostov-model",
  "serde",
  "serde-saphyr",
 ]
+
+[[package]]
+name = "ostov-model"
+version = "0.1.0"
 
 [[package]]
 name = "ostov-store"

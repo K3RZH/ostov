@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ostov_meta::{Error, load, load_checked};
+use ostov_meta::{Error, load, parse};
 
 pub const MANIFEST: &str = "name: test\ntitle: Тест\nversion: 0.1.0\nformat: 1\n";
 
@@ -34,12 +34,12 @@ impl TempConfig {
 
     /// Ошибки разбора.
     pub fn errors(&self) -> Vec<Error> {
-        load(&self.dir).unwrap_err()
+        parse(&self.dir).unwrap_err()
     }
 
     /// Ошибки разбора или проверки — то, что покажет `ostov check`.
     pub fn check_errors(&self) -> Vec<Error> {
-        load_checked(&self.dir).unwrap_err()
+        load(&self.dir).unwrap_err()
     }
 }
 

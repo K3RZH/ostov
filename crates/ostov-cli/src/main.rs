@@ -27,7 +27,7 @@ fn main() -> ExitCode {
 
 /// Проверка без базы: печатает все ошибки как «файл:строка — причина».
 fn check(dir: &Path) -> ExitCode {
-    match ostov_meta::load_checked(dir) {
+    match ostov_meta::load(dir) {
         Ok(config) => {
             println!(
                 "{}: ошибок нет. Справочников: {}, документов: {}, регистров: {}.",

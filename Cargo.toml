@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ostov-store", "crates/ostov-core", "crates/ostov-api", "crates/ostov-meta", "crates/ostov-cli", "crates/ostov-ui"]
+members = ["crates/ostov-model", "crates/ostov-store", "crates/ostov-core", "crates/ostov-api", "crates/ostov-meta", "crates/ostov-cli", "crates/ostov-ui"]
 
 [workspace.package]
 version = "0.1.0"

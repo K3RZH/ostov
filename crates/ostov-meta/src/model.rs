@@ -9,9 +9,9 @@ use serde_saphyr::Spanned;
 
 use crate::FieldType;
 
-/// Вся конфигурация, прочитанная из папки.
+/// Вся конфигурация, как она записана в файлах.
 #[derive(Debug)]
-pub struct Config {
+pub struct ConfigFiles {
     pub manifest: Located<Manifest>,
     pub catalogs: Vec<Located<Catalog>>,
     pub documents: Vec<Located<Document>>,

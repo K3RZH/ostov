@@ -5,7 +5,7 @@
 mod common;
 
 use common::{TempConfig, assert_error, repo_config, single};
-use ostov_meta::load_checked;
+use ostov_meta::load;
 
 /// Справочник с одним полем; поле на строке 4, его тип — на строке 6.
 fn catalog(name: &str, field: &str, kind: &str) -> String {
@@ -35,7 +35,7 @@ fn register(dimensions: &[(&str, &str)], resources: &[(&str, &str)]) -> String {
 
 #[test]
 fn warehouse_config_passes_check() {
-    load_checked(&repo_config()).unwrap();
+    load(&repo_config()).unwrap();
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn same_field_name_in_header_and_table_part_is_fine() {
             "document: receipt\ntitle: П\nfields:\n  - name: amount\n    title: С\n    type: decimal(2)\n\
              tables:\n  - name: lines\n    title: Т\n    fields:\n      - name: amount\n        title: С\n        type: decimal(2)\n",
         );
-    load_checked(&config.dir).unwrap();
+    load(&config.dir).unwrap();
 }
 
 #[test]

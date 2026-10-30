@@ -13,15 +13,15 @@ use serde_saphyr::{
     Spanned, UserMessageFormatter,
 };
 
-use crate::{Config, Error, Located};
+use crate::{ConfigFiles, Error, Located};
 
 /// Версия формата файлов, которую читает эта сборка. Другая версия отвергается (СТ-07).
 pub const FORMAT_VERSION: u32 = 1;
 
-const MANIFEST_FILE: &str = "ostov.yaml";
-const CATALOGS_DIR: &str = "catalogs";
-const DOCUMENTS_DIR: &str = "documents";
-const REGISTERS_DIR: &str = "registers";
+pub(crate) const MANIFEST_FILE: &str = "ostov.yaml";
+pub(crate) const CATALOGS_DIR: &str = "catalogs";
+pub(crate) const DOCUMENTS_DIR: &str = "documents";
+pub(crate) const REGISTERS_DIR: &str = "registers";
 const EXTENSION: &str = "yaml";
 
 /// Файл описывает один объект: даже большой справочник занимает килобайты, 1 МБ — с огромным запасом.
@@ -29,41 +29,78 @@ const MAX_FILE_BYTES: usize = 1024 * 1024;
 /// Самая глубокая вложенность формата — поле табличной части документа, 5 уровней; запас втрое.
 const MAX_DEPTH: usize = 16;
 
-/// Читает конфигурацию из папки `dir`.
+/// Читает и проверяет конфигурацию из папки `dir` и отдаёт модель для ядра.
 ///
 /// # Errors
-/// Все найденные ошибки разбора сразу, у каждой файл, строка и причина. При ошибке в манифесте
-/// остальные файлы не читаются: без верной версии формата их нельзя разобрать.
-pub fn load(dir: &Path) -> Result<Config, Vec<Error>> {
-    let manifest = load_manifest(&dir.join(MANIFEST_FILE)).map_err(|error| vec![error])?;
+/// Сначала ошибки разбора: пока файл не разобран, ссылки на его объекты проверять нельзя.
+/// Если разбор прошёл — все ошибки [`crate::check`]. У каждой ошибки файл, строка и причина.
+pub fn load(dir: &Path) -> Result<ostov_model::Config, Vec<Error>> {
+    checked(parse(dir)?).map(crate::convert::into_model)
+}
+
+/// Читает папку `dir` как есть, с номерами строк, без проверки ссылок и имён.
+///
+/// # Errors
+/// Все ошибки разбора сразу. При ошибке в манифесте остальные файлы не читаются:
+/// без верной версии формата их нельзя разобрать.
+pub fn parse(dir: &Path) -> Result<ConfigFiles, Vec<Error>> {
     let mut errors = Vec::new();
-    let catalogs = load_folder(&dir.join(CATALOGS_DIR), &mut errors);
-    let documents = load_folder(&dir.join(DOCUMENTS_DIR), &mut errors);
-    let registers = load_folder(&dir.join(REGISTERS_DIR), &mut errors);
+    let sources = Sources {
+        manifest: Source::file(dir.join(MANIFEST_FILE)),
+        catalogs: folder_sources(&dir.join(CATALOGS_DIR), &mut errors),
+        documents: folder_sources(&dir.join(DOCUMENTS_DIR), &mut errors),
+        registers: folder_sources(&dir.join(REGISTERS_DIR), &mut errors),
+    };
+    parse_sources(&sources, errors)
+}
+
+pub(crate) fn checked(files: ConfigFiles) -> Result<ConfigFiles, Vec<Error>> {
+    let errors = crate::check(&files);
+    if errors.is_empty() {
+        Ok(files)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Файл конфигурации: на диске или встроенный в программу (`demo()`).
+pub(crate) struct Source {
+    pub(crate) path: PathBuf,
+    /// Текст встроенного файла; `None` — читать с диска по `path`.
+    pub(crate) text: Option<&'static str>,
+}
+
+impl Source {
+    fn file(path: PathBuf) -> Self {
+        Self { path, text: None }
+    }
+}
+
+pub(crate) struct Sources {
+    pub(crate) manifest: Source,
+    pub(crate) catalogs: Vec<Source>,
+    pub(crate) documents: Vec<Source>,
+    pub(crate) registers: Vec<Source>,
+}
+
+/// Разбирает манифест, затем все файлы объектов; `errors` — уже найденные ошибки чтения папок.
+pub(crate) fn parse_sources(
+    sources: &Sources,
+    mut errors: Vec<Error>,
+) -> Result<ConfigFiles, Vec<Error>> {
+    let manifest = parse_manifest(&sources.manifest).map_err(|error| vec![error])?;
+    let catalogs = parse_all(&sources.catalogs, &mut errors);
+    let documents = parse_all(&sources.documents, &mut errors);
+    let registers = parse_all(&sources.registers, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(Config {
+    Ok(ConfigFiles {
         manifest,
         catalogs,
         documents,
         registers,
     })
-}
-
-/// Читает и проверяет конфигурацию — то, что делает `ostov check`.
-///
-/// # Errors
-/// Сначала ошибки разбора: пока файл не разобран, ссылки на его объекты проверять нельзя.
-/// Если разбор прошёл — все ошибки [`crate::check`].
-pub fn load_checked(dir: &Path) -> Result<Config, Vec<Error>> {
-    let config = load(dir)?;
-    let errors = crate::check(&config);
-    if errors.is_empty() {
-        Ok(config)
-    } else {
-        Err(errors)
-    }
 }
 
 /// Только версия формата: её читаем раньше строгого разбора, чтобы файл нового формата
@@ -73,11 +110,12 @@ struct FormatVersion {
     format: Spanned<u32>,
 }
 
-fn load_manifest(path: &Path) -> Result<Located<crate::Manifest>, Error> {
-    if !path.is_file() {
+fn parse_manifest(source: &Source) -> Result<Located<crate::Manifest>, Error> {
+    let path = &source.path;
+    if source.text.is_none() && !path.is_file() {
         return Err(Error::new(path, None, "нет манифеста конфигурации"));
     }
-    let version: FormatVersion = parse_file(path)?;
+    let version: FormatVersion = parse_source(source)?;
     if version.format.value != FORMAT_VERSION {
         return Err(Error::new(
             path,
@@ -89,35 +127,41 @@ fn load_manifest(path: &Path) -> Result<Located<crate::Manifest>, Error> {
         ));
     }
     Ok(Located {
-        file: path.to_owned(),
-        value: parse_file(path)?,
+        file: path.clone(),
+        value: parse_source(source)?,
     })
 }
 
-/// Читает все `*.yaml` папки по алфавиту. Папки нет — объектов этого вида нет.
-fn load_folder<T: DeserializeOwned>(dir: &Path, errors: &mut Vec<Error>) -> Vec<Located<T>> {
+fn parse_all<T: DeserializeOwned>(sources: &[Source], errors: &mut Vec<Error>) -> Vec<Located<T>> {
+    let mut objects = Vec::new();
+    for source in sources {
+        match parse_source(source) {
+            Ok(value) => objects.push(Located {
+                file: source.path.clone(),
+                value,
+            }),
+            Err(error) => errors.push(error),
+        }
+    }
+    objects
+}
+
+/// Все `*.yaml` папки по алфавиту. Папки нет — объектов этого вида нет.
+fn folder_sources(dir: &Path, errors: &mut Vec<Error>) -> Vec<Source> {
     if !dir.exists() {
         return Vec::new();
     }
-    let files = match yaml_files(dir) {
-        Ok(files) => files,
+    match yaml_files(dir) {
+        Ok(files) => files.into_iter().map(Source::file).collect(),
         Err(error) => {
             errors.push(Error::new(
                 dir,
                 None,
                 format!("не удалось прочитать папку: {error}"),
             ));
-            return Vec::new();
-        }
-    };
-    let mut objects = Vec::new();
-    for file in files {
-        match parse_file(&file) {
-            Ok(value) => objects.push(Located { file, value }),
-            Err(error) => errors.push(error),
+            Vec::new()
         }
     }
-    objects
 }
 
 fn yaml_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -132,11 +176,19 @@ fn yaml_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn parse_file<T: DeserializeOwned>(path: &Path) -> Result<T, Error> {
-    let file = File::open(path)
-        .map_err(|error| Error::new(path, None, format!("не удалось открыть файл: {error}")))?;
-    serde_saphyr::from_reader_with_options(file, strict_options())
-        .map_err(|error| yaml_error(path, &error))
+fn parse_source<T: DeserializeOwned>(source: &Source) -> Result<T, Error> {
+    let path = &source.path;
+    let parsed = match source.text {
+        // Встроенный текст — наш собственный файл, лимит размера для него не нужен.
+        Some(text) => serde_saphyr::from_str_with_options(text, strict_options()),
+        None => {
+            let file = File::open(path).map_err(|error| {
+                Error::new(path, None, format!("не удалось открыть файл: {error}"))
+            })?;
+            serde_saphyr::from_reader_with_options(file, strict_options())
+        }
+    };
+    parsed.map_err(|error| yaml_error(path, &error))
 }
 
 fn strict_options() -> Options {

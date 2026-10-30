@@ -12,3 +12,8 @@ workspace = true
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }
 serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+ostov-model = { path = "../ostov-model" }
+
+[dev-dependencies]
+# Только тест: модель из YAML сверяется с конфигурацией, пока она ещё задана в коде ядра.
+ostov-core = { path = "../ostov-core" }

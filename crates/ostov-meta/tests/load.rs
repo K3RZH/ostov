@@ -7,11 +7,11 @@ mod common;
 use std::fs;
 
 use common::{MANIFEST, TempConfig, assert_error, repo_config, single};
-use ostov_meta::{Error, FieldType, RegisterKind, load};
+use ostov_meta::{Error, FieldType, RegisterKind, parse};
 
 #[test]
 fn warehouse_config_loads() {
-    let config = load(&repo_config()).unwrap();
+    let config = parse(&repo_config()).unwrap();
     assert_eq!(config.manifest.value.name.value, "warehouse");
     assert_eq!(
         config.manifest.value.format.value,
@@ -53,7 +53,7 @@ fn warehouse_config_loads() {
 #[test]
 fn missing_object_folders_mean_no_objects() {
     let config = TempConfig::new("empty");
-    let loaded = load(&config.dir).unwrap();
+    let loaded = parse(&config.dir).unwrap();
     assert!(
         loaded.catalogs.is_empty() && loaded.documents.is_empty() && loaded.registers.is_empty()
     );

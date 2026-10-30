@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_saphyr::Spanned;
 
-use crate::{Config, Document, Error, Field, FieldType, Register};
+use crate::{ConfigFiles, Document, Error, Field, FieldType, Register};
 
 /// Лимит идентификатора PostgreSQL: из имён делаются таблицы и колонки (ADR-025).
 pub const MAX_NAME_LEN: usize = 63;
@@ -27,7 +27,7 @@ pub const RESERVED_NAMES: [&str; 11] = [
 ];
 
 /// Проверяет прочитанную конфигурацию и возвращает все ошибки, по файлам и строкам.
-pub fn check(config: &Config) -> Vec<Error> {
+pub fn check(config: &ConfigFiles) -> Vec<Error> {
     let mut errors = Vec::new();
     let mut objects = Names::new("объект");
     let catalogs = config.catalogs.iter().map(|c| (&c.file, &c.value.name));
