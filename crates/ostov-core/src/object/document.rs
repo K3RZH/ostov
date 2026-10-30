@@ -6,6 +6,7 @@ use super::{
     FieldDef, Fields, check_fields, check_ident, column_defs, names, placeholders, read_fields,
     returned_id, set_flag, to_values,
 };
+use crate::closing::check_open;
 use crate::{CoreError, in_transaction};
 
 /// Табличная часть документа, например «Товары» в поступлении.
@@ -86,6 +87,7 @@ impl DocumentKind {
     }
 
     pub fn create_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
+        crate::closing::create_table(db)?;
         let mut statements = Vec::new();
         {
             let d = db.dialect();
@@ -102,28 +104,38 @@ impl DocumentKind {
                 d.quote_ident(&self.table),
                 columns.join(", ")
             ));
-
-            for part in &self.parts {
-                let mut columns = vec![
-                    format!("{} {}", d.quote_ident("id"), d.id_column()),
-                    format!(
-                        "{} BIGINT NOT NULL REFERENCES {}",
-                        d.quote_ident("doc_id"),
-                        d.quote_ident(&self.table)
-                    ),
-                    format!("{} BIGINT NOT NULL", d.quote_ident("line_no")),
-                ];
-                columns.extend(column_defs(d, &part.fields));
-                statements.push(format!(
-                    "CREATE TABLE {} ({})",
-                    d.quote_ident(&self.part_table(part)),
-                    columns.join(", ")
-                ));
-            }
         }
         for sql in statements {
             db.execute(&sql, &[])?;
         }
+        for part in &self.parts {
+            self.create_part_table(db, part)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn create_part_table(
+        &self,
+        db: &mut dyn Driver,
+        part: &TablePart,
+    ) -> Result<(), CoreError> {
+        let d = db.dialect();
+        let mut columns = vec![
+            format!("{} {}", d.quote_ident("id"), d.id_column()),
+            format!(
+                "{} BIGINT NOT NULL REFERENCES {}",
+                d.quote_ident("doc_id"),
+                d.quote_ident(&self.table)
+            ),
+            format!("{} BIGINT NOT NULL", d.quote_ident("line_no")),
+        ];
+        columns.extend(column_defs(d, &part.fields));
+        let sql = format!(
+            "CREATE TABLE {} ({})",
+            d.quote_ident(&self.part_table(part)),
+            columns.join(", ")
+        );
+        db.execute(&sql, &[])?;
         Ok(())
     }
 
@@ -158,6 +170,7 @@ impl DocumentKind {
         parts: &BTreeMap<String, Vec<Fields>>,
     ) -> Result<Document, CoreError> {
         self.check_parts(parts)?;
+        check_open(db, header)?;
         let number = self.next_number(db)?;
         let mut values = vec![
             Value::Int(1),
@@ -253,6 +266,7 @@ impl DocumentKind {
     ) -> Result<Document, CoreError> {
         in_transaction(db, |db| {
             let doc = self.get(db, id)?.ok_or_else(|| self.not_found(id))?;
+            check_open(db, &doc.header)?;
             if deleted && doc.posted {
                 return Err(CoreError::Invalid(format!(
                     "документ {} проведён: сначала отмените проведение",
@@ -311,6 +325,11 @@ impl DocumentKind {
     /// Перезаписывает шапку и строки с проверкой версии; без своей транзакции.
     pub(crate) fn write(&self, db: &mut dyn Driver, doc: &Document) -> Result<Document, CoreError> {
         self.check_parts(&doc.parts)?;
+        // Нельзя ни менять документ закрытого периода, ни переносить документ в закрытый период.
+        if let Some(stored) = self.get(db, doc.id)? {
+            check_open(db, &stored.header)?;
+        }
+        check_open(db, &doc.header)?;
         let mut values = to_values(&self.table, &self.header, &doc.header)?;
         let n = values.len();
 
@@ -384,7 +403,7 @@ impl DocumentKind {
         }
     }
 
-    fn part_table(&self, part: &TablePart) -> String {
+    pub(crate) fn part_table(&self, part: &TablePart) -> String {
         format!("{}__{}", self.table, part.name)
     }
 

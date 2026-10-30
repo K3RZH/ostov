@@ -4,6 +4,7 @@
 mod config;
 mod convert;
 mod demo;
+mod schema;
 #[cfg(test)]
 mod tests;
 
@@ -20,7 +21,7 @@ use ostov_api::{
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
-pub use config::{Config, DocumentConfig, warehouse};
+pub use config::{Config, DocumentConfig, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid};
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
@@ -419,7 +420,7 @@ impl LocalEngine {
                         }
                     }
                 };
-                saved_doc(&doc.map_err(error)?)
+                saved_doc(&doc.map_err(|e| self.explain(db, e))?)
             }
         };
         self.forget_lists();
@@ -452,7 +453,8 @@ impl LocalEngine {
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule).map_err(error)?;
+        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule)
+            .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -465,7 +467,8 @@ impl LocalEngine {
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id).map_err(error)?;
+        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id)
+            .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -519,6 +522,22 @@ impl Engine for LocalEngine {
 
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
         self.guarded("RunReport", || self.run_run_report(query))
+    }
+
+    fn get_meta(&self) -> EngineResult<ostov_api::Meta> {
+        Ok(self.config.meta.clone())
+    }
+
+    fn closing_date(&self) -> EngineResult<Option<String>> {
+        self.guarded("GetClosingDate", || {
+            crate::closing::closing_date(&mut **self.db()).map_err(error)
+        })
+    }
+
+    fn set_closing_date(&self, date: Option<&str>) -> EngineResult<()> {
+        self.guarded("SetClosingDate", || {
+            crate::closing::set_closing_date(&mut **self.db(), date).map_err(error)
+        })
     }
 }
 
@@ -633,6 +652,89 @@ impl LocalEngine {
     }
 }
 
+impl LocalEngine {
+    /// Нехватка остатка — человеческим языком: что, где, на какой день и какие документы
+    /// списывают (вопрос интерфейса: «нет товара и документа, который мешает»).
+    /// Транзакция уже откачена: новый документ в базе не найдётся — он «этот документ».
+    fn explain(&self, db: &mut dyn Driver, e: crate::CoreError) -> EngineError {
+        let crate::CoreError::NegativeBalance(shortage) = &e else {
+            return error(e);
+        };
+        let crate::error::Shortage {
+            resource,
+            balance,
+            date,
+            dims,
+            blockers,
+            ..
+        } = &**shortage;
+        let stock = &self.config.stock;
+        let title = |defs: &[FieldDef], name: &str| {
+            defs.iter()
+                .find(|f| f.name == name)
+                .map_or_else(|| name.to_owned(), |f| f.title.clone())
+        };
+        let mut what = Vec::new();
+        for (name, value) in dims {
+            let def = stock.dims().iter().find(|f| &f.name == name);
+            let shown = match (value, def.and_then(|f| f.target.as_deref())) {
+                (Value::Int(id), Some(target)) => self
+                    .config
+                    .catalogs
+                    .get(target)
+                    .and_then(|c| c.titles(db, &[*id]).ok())
+                    .and_then(|mut t| t.remove(id))
+                    .unwrap_or_else(|| id.to_string()),
+                (Value::Int(n), None) => n.to_string(),
+                (Value::Text(s), _) => s.clone(),
+                _ => "—".to_owned(),
+            };
+            what.push(format!("{} «{shown}»", title(stock.dims(), name)));
+        }
+        let mut message = format!(
+            "Не хватает остатка{}: {} — {} стало бы {}.",
+            date.as_deref()
+                .map(|d| format!(" на {}", ru_date(d)))
+                .unwrap_or_default(),
+            what.join(", "),
+            title(stock.resources(), resource),
+            balance.to_string().replace('-', "−").replace('.', ","),
+        );
+        let docs: Vec<String> = blockers
+            .iter()
+            .map(|(table, id)| {
+                let doc = self.config.meta.objects.iter().find(|o| &o.name == table);
+                let kind = doc.map_or(table.as_str(), |o| o.title.as_str());
+                match self
+                    .config
+                    .documents
+                    .get(table)
+                    .and_then(|d| d.kind.get(db, *id).ok().flatten())
+                {
+                    Some(found) => format!("{kind} №{}", found.number),
+                    None => "этот документ".to_owned(),
+                }
+            })
+            .collect();
+        if !docs.is_empty() {
+            message.push_str(&format!(" Списывают в этот день: {}.", docs.join(", ")));
+        }
+        EngineError {
+            message,
+            ..error(e)
+        }
+    }
+}
+
+/// `2026-01-31` → `31.01.2026`.
+fn ru_date(iso: &str) -> String {
+    let mut parts = iso.split('-').rev();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(d), Some(m), Some(y)) => format!("{d}.{m}.{y}"),
+        _ => iso.to_owned(),
+    }
+}
+
 fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
     ostov_api::Value::Decimal {
         units: d.units(),
@@ -640,9 +742,28 @@ fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
     }
 }
 
-/// Открывает и создаёт локальные базы (режим 1) с временной конфигурацией «Склад».
-#[derive(Debug, Default, Clone, Copy)]
-pub struct LocalConnector;
+/// Открывает и создаёт локальные базы (режим 1).
+///
+/// Конфигурацию передаёт приложение: `LocalConnector::new(ostov_meta::load("config")?)`.
+/// `LocalConnector::default()` — встроенный «Склад» из кода.
+#[derive(Debug, Default, Clone)]
+pub struct LocalConnector {
+    model: Option<ostov_model::Config>,
+}
+
+impl LocalConnector {
+    pub fn new(model: ostov_model::Config) -> Self {
+        Self { model: Some(model) }
+    }
+
+    fn config(&self) -> EngineResult<Config> {
+        match &self.model {
+            Some(model) => Config::from_model(model),
+            None => warehouse(),
+        }
+        .map_err(error)
+    }
+}
 
 // Служебная таблица: по ней видно, что файл — база Ostov.
 const BASE_TABLE: &str = "ostov_base";
@@ -665,7 +786,7 @@ impl Connector for LocalConnector {
                 format!("{path} — не база Ostov"),
             ));
         }
-        let config = warehouse().map_err(error)?;
+        let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
@@ -679,7 +800,7 @@ impl Connector for LocalConnector {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
-        let (db, config, lock) = create_base(path)?;
+        let (db, config, lock) = create_base(path, self.config()?)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
         ))
@@ -687,14 +808,13 @@ impl Connector for LocalConnector {
 }
 
 /// Новый файл базы со служебной таблицей и таблицами конфигурации.
-fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
+fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config, File)> {
     if Path::new(path).exists() {
         return Err(invalid(format!(
             "файл {path} уже есть: выберите другое имя"
         )));
     }
     let lock = lock_base(path)?;
-    let config = warehouse().map_err(error)?;
     let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
     in_transaction(&mut db, |db| {
         db.execute(
@@ -705,7 +825,8 @@ fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
             &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
             &[Value::Text(config.name.clone())],
         )?;
-        config.create_tables(db)
+        config.create_tables(db)?;
+        schema::record(db, &config)
     })
     .map_err(error)?;
     Ok((db, config, lock))
@@ -714,6 +835,12 @@ fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    crate::closing::create_table(db)?;
+    if !schema::recorded(db)? {
+        // Базы до реструктуризации создавались только под встроенный «Склад».
+        schema::record(db, &warehouse()?)?;
+    }
+    schema::restructure(db, config)?;
     if config.stock.upgrade(db)? {
         for (table, doc) in &config.documents {
             if doc.kind.header().iter().any(|f| f.name == "date") {

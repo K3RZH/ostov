@@ -22,7 +22,9 @@ impl Base {
     }
 
     fn create(&self) -> Arc<dyn Engine> {
-        LocalConnector.create_local(&self.path, None, None).unwrap()
+        LocalConnector::default()
+            .create_local(&self.path, None, None)
+            .unwrap()
     }
 }
 
@@ -239,24 +241,26 @@ fn opening_and_creating_bases() {
         let engine = base.create();
         add(&*engine, "goods", "Мука");
     }
-    let engine = LocalConnector.open_local(&base.path, None).unwrap();
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     assert_eq!(engine.list(&query("goods", 10)).unwrap().total, Some(1));
 
-    let err = LocalConnector
+    let err = LocalConnector::default()
         .create_local(&base.path, None, None)
         .err()
         .unwrap();
     assert_eq!(err.code, ErrorCode::Validation);
     let missing = format!("{}.missing", base.path);
     assert_eq!(
-        LocalConnector
+        LocalConnector::default()
             .open_local(&missing, None)
             .err()
             .unwrap()
             .code,
         ErrorCode::NotFound
     );
-    let err = LocalConnector
+    let err = LocalConnector::default()
         .open_local(&base.path, Some("secret"))
         .err()
         .unwrap();
@@ -265,7 +269,11 @@ fn opening_and_creating_bases() {
     let other = base.dir.join("other.db").to_string_lossy().into_owned();
     std::fs::write(&other, b"").unwrap();
     assert_eq!(
-        LocalConnector.open_local(&other, None).err().unwrap().code,
+        LocalConnector::default()
+            .open_local(&other, None)
+            .err()
+            .unwrap()
+            .code,
         ErrorCode::Incompatible
     );
 }
@@ -318,7 +326,9 @@ fn wrong_requests() {
 #[test]
 fn demo_base_has_data_to_scroll() {
     let base = Base::new("demo");
-    let engine = LocalConnector.create_demo(&base.path, 300).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 300)
+        .unwrap();
 
     let page = engine.list(&query("receipt", 50)).unwrap();
     assert_eq!(page.total, Some(300));
@@ -351,11 +361,16 @@ fn demo_base_has_data_to_scroll() {
 fn base_opens_only_once() {
     let base = Base::new("lock");
     let first = base.create();
-    let err = LocalConnector.open_local(&base.path, None).err().unwrap();
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
     assert_eq!(err.code, ErrorCode::AlreadyOpen);
 
     drop(first);
-    let again = LocalConnector.open_local(&base.path, None).unwrap();
+    let again = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     assert!(again.hello().is_ok());
 }
 
@@ -411,7 +426,9 @@ fn receipts_search_by_supplier_number_and_date() {
 #[test]
 fn receipts_sort_by_supplier_title_across_pages() {
     let base = Base::new("sort");
-    let engine = LocalConnector.create_demo(&base.path, 400).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 400)
+        .unwrap();
     for descending in [false, true] {
         let q = ListQuery {
             order: Some("supplier".into()),
@@ -612,7 +629,9 @@ fn stock_reports_by_date_and_period() {
 #[test]
 fn report_pages() {
     let base = Base::new("report-pages");
-    let engine = LocalConnector.create_demo(&base.path, 200).unwrap();
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 200)
+        .unwrap();
     let all = report(&*engine, "stock_balance", &[]);
     assert!(all.len() > 5, "{}", all.len());
 
@@ -641,7 +660,9 @@ fn old_base_gets_dates_in_movements() {
 
     let base = Base::new("upgrade");
     let before = {
-        let engine = LocalConnector.create_demo(&base.path, 120).unwrap();
+        let engine = LocalConnector::default()
+            .create_demo(&base.path, 120)
+            .unwrap();
         report(&*engine, "stock_balance", &[("date", date("2026-03-31"))])
     };
 
@@ -653,7 +674,9 @@ fn old_base_gets_dates_in_movements() {
             .unwrap();
     }
 
-    let engine = LocalConnector.open_local(&base.path, None).unwrap();
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
     let after = report(&*engine, "stock_balance", &[("date", date("2026-03-31"))]);
     assert_eq!(after, before);
     drop(engine);
@@ -695,7 +718,10 @@ fn issue_before_receipt_is_rejected() {
         )
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
-    assert!(err.message.contains("2026-01-15"), "{}", err.message);
+    assert_eq!(
+        err.message,
+        "Не хватает остатка на 15.01.2026: Склад «Основной», Товар «Мука» — Количество стало бы −3,000. Списывают в этот день: этот документ."
+    );
     assert_eq!(engine.list(&query("issue", 10)).unwrap().total, Some(0));
 
     // В тот же день, что и приход, — можно: проверяется итог дня.
@@ -726,7 +752,10 @@ fn shrinking_old_receipt_below_later_issues_is_rejected() {
     }
     let err = engine.save("receipt", &doc, PostAction::Post).unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
-    assert!(err.message.contains("2026-02-10"), "{}", err.message);
+    assert_eq!(
+        err.message,
+        "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000. Списывают в этот день: Расход №1."
+    );
 
     // Перенос прихода на день позже расхода тоже ломает историю.
     let mut later = engine.get("receipt", receipt_id).unwrap();
@@ -757,4 +786,348 @@ fn unposting_receipt_with_later_issue_is_rejected() {
         .unwrap();
     let err = engine.unpost("receipt", receipt_id).unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
+}
+
+#[test]
+fn connector_takes_model_from_outside() {
+    let base = Base::new("model");
+    let mut model = super::warehouse_model();
+    model.catalogs[0]
+        .fields
+        .push(crate::FieldDef::new("barcode", crate::FieldKind::Text));
+    let engine = LocalConnector::new(model.clone())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let id = engine
+        .save(
+            "goods",
+            &ObjectData {
+                fields: fields(&[("name", text("Мука")), ("barcode", text("460"))]),
+                ..ObjectData::default()
+            },
+            PostAction::Write,
+        )
+        .unwrap()
+        .id;
+    assert_eq!(
+        engine.get("goods", id).unwrap().fields["barcode"],
+        text("460")
+    );
+    drop(engine);
+
+    // Встроенный «Склад» про штрихкод не знает, переданная модель — знает.
+    let engine = LocalConnector::new(model)
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(
+        engine.get("goods", id).unwrap().fields["barcode"],
+        text("460")
+    );
+}
+
+#[test]
+fn model_without_rules_is_rejected() {
+    let config = |change: fn(&mut ostov_model::Config)| {
+        let mut model = super::warehouse_model();
+        change(&mut model);
+        super::Config::from_model(&model)
+            .err()
+            .map(|e| e.to_string())
+    };
+    assert_eq!(config(|_| ()), None);
+
+    let unknown_doc = config(|m| m.documents[0].name = "transfer".into()).unwrap();
+    assert!(unknown_doc.contains("transfer"), "{unknown_doc}");
+
+    let other_register = config(|m| m.documents[0].registers = vec!["sales".into()]).unwrap();
+    assert!(other_register.contains("sales"), "{other_register}");
+
+    assert!(config(|m| m.registers.clear()).is_some());
+
+    // Документ без движений правила не требует.
+    assert_eq!(
+        config(|m| {
+            m.documents[0].name = "order".into();
+            m.documents[0].registers.clear();
+        }),
+        None
+    );
+}
+
+#[test]
+fn closed_period_freezes_documents() {
+    let base = Base::new("closing");
+    let (engine, flour, main, receipt_id) = stocked(&base);
+    let issue_id = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap()
+        .id;
+    engine.set_closing_date(Some("2026-02-28")).unwrap();
+    assert_eq!(
+        engine.closing_date().unwrap().as_deref(),
+        Some("2026-02-28")
+    );
+
+    let closed = |r: ostov_api::EngineResult<ostov_api::Saved>| {
+        assert_eq!(r.unwrap_err().code, ErrorCode::PeriodClosed);
+    };
+    // Февральское поступление: ни записать, ни провести, ни отменить, ни пометить.
+    let receipt = engine.get("receipt", receipt_id).unwrap();
+    closed(engine.save("receipt", &receipt, PostAction::Post));
+    closed(engine.unpost("receipt", receipt_id));
+    closed(engine.post("receipt", receipt_id));
+    closed(engine.mark_deleted("receipt", receipt_id, receipt.version, true));
+    // Новый документ задним числом и перенос мартовского в февраль.
+    closed(engine.save(
+        "issue",
+        &dated(issue(main, flour, 1_000), "2026-02-15"),
+        PostAction::Write,
+    ));
+    let mut moved = engine.get("issue", issue_id).unwrap();
+    moved.fields.insert("date".into(), date("2026-02-20"));
+    closed(engine.save("issue", &moved, PostAction::Post));
+
+    // Март открыт.
+    engine.unpost("issue", issue_id).unwrap();
+    engine.post("issue", issue_id).unwrap();
+
+    // Закрытие хранится в базе.
+    drop(engine);
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(
+        engine.closing_date().unwrap().as_deref(),
+        Some("2026-02-28")
+    );
+    closed(engine.unpost("receipt", receipt_id));
+
+    engine.set_closing_date(None).unwrap();
+    engine.unpost("issue", issue_id).unwrap();
+    engine.unpost("receipt", receipt_id).unwrap();
+    assert_eq!(
+        engine
+            .set_closing_date(Some("28.02.2026"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+}
+
+#[test]
+fn old_base_gets_closing_table() {
+    let base = Base::new("closing-upgrade");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        ostov_store::Driver::execute(&mut db, "DROP TABLE ostov_closing", &[]).unwrap();
+    }
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(engine.closing_date().unwrap(), None);
+    engine.set_closing_date(Some("2026-01-31")).unwrap();
+}
+
+fn changed_model(change: impl FnOnce(&mut ostov_model::Config)) -> LocalConnector {
+    let mut model = super::warehouse_model();
+    change(&mut model);
+    LocalConnector::new(model)
+}
+
+#[test]
+fn base_follows_config_changes() {
+    let base = Base::new("restructure");
+    let (engine, flour, main, _) = stocked(&base);
+    drop(engine);
+
+    let connector = changed_model(|m| {
+        use crate::{FieldDef, FieldKind};
+        m.catalogs[0]
+            .fields
+            .push(FieldDef::new("barcode", FieldKind::Text));
+        m.catalogs.push(ostov_model::CatalogDef {
+            name: "units".into(),
+            title: "Единицы".into(),
+            icon: None,
+            fields: vec![FieldDef::new("name", FieldKind::Text)],
+        });
+        let receipt = &mut m.documents[1];
+        receipt
+            .fields
+            .push(FieldDef::new("comment", FieldKind::Text));
+        receipt.table_parts.push(ostov_model::TablePartDef {
+            name: "costs".into(),
+            title: "Расходы".into(),
+            fields: vec![FieldDef::new("amount", FieldKind::Decimal { scale: 2 })],
+        });
+        m.registers[0]
+            .resources
+            .push(FieldDef::new("weight", FieldKind::Decimal { scale: 3 }));
+    });
+    let engine = connector.open_local(&base.path, None).unwrap();
+
+    // Старые данные на месте, новые поля пустые и записываются.
+    let mut goods = engine.get("goods", flour).unwrap();
+    assert_eq!(goods.fields["barcode"], Value::Null);
+    goods.fields.insert("barcode".into(), text("460"));
+    engine.save("goods", &goods, PostAction::Write).unwrap();
+    add(&*engine, "units", "кг");
+    let balance = report(&*engine, "stock_balance", &[("warehouse", refer(main))]);
+    assert_eq!(balance[0]["qty"], dec(10_000, 3));
+    assert_eq!(balance[0]["weight"], dec(0, 3));
+    drop(engine);
+
+    // Повторное открытие ничего не меняет.
+    let engine = connector.open_local(&base.path, None).unwrap();
+    assert_eq!(
+        engine.get("goods", flour).unwrap().fields["barcode"],
+        text("460")
+    );
+    drop(engine);
+
+    // Старая конфигурация убрала бы ресурс weight с данными — её база не примет.
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+}
+
+#[test]
+fn config_that_loses_data_is_refused() {
+    let base = Base::new("restructure-refused");
+    drop(stocked(&base).0);
+
+    let refused = |connector: LocalConnector| {
+        let err = connector.open_local(&base.path, None).err().unwrap();
+        assert_eq!(err.code, ErrorCode::Incompatible, "{}", err.message);
+        err.message
+    };
+    let unit = refused(changed_model(|m| {
+        m.catalogs[0].fields[1].kind = crate::FieldKind::Int;
+    }));
+    assert!(unit.contains("unit"), "{unit}");
+    refused(changed_model(|m| {
+        m.documents[1].table_parts[0].fields[1].kind = crate::FieldKind::Decimal { scale: 2 };
+    }));
+    // В регистре есть движения: новое измерение не добавить.
+    refused(changed_model(|m| {
+        m.registers[0]
+            .dimensions
+            .push(crate::FieldDef::new("batch", crate::FieldKind::Text));
+    }));
+
+    // После отказа база цела и открывается как раньше.
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(report(&*engine, "stock_balance", &[]).len(), 1);
+}
+
+#[test]
+fn empty_register_is_rebuilt() {
+    let base = Base::new("restructure-register");
+    drop(base.create());
+    let engine = changed_model(|m| {
+        m.registers[0]
+            .dimensions
+            .push(crate::FieldDef::new("batch", crate::FieldKind::Text));
+    })
+    .open_local(&base.path, None)
+    .unwrap();
+    assert!(report(&*engine, "stock_balance", &[]).is_empty());
+}
+
+#[test]
+fn base_before_restructuring_is_adopted() {
+    let base = Base::new("restructure-old");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        use ostov_store::Driver;
+        db.execute("DROP TABLE ostov_schema", &[]).unwrap();
+        db.execute("DELETE FROM ostov_base WHERE key = 'schema'", &[])
+            .unwrap();
+    }
+    let engine = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("barcode", crate::FieldKind::Text));
+    })
+    .open_local(&base.path, None)
+    .unwrap();
+    add(&*engine, "goods", "Соль");
+}
+
+#[test]
+fn meta_describes_objects_and_menu() {
+    let base = Base::new("meta");
+    let meta = base.create().get_meta().unwrap();
+    let receipt = meta.objects.iter().find(|o| o.name == "receipt").unwrap();
+    assert_eq!(receipt.kind, ostov_api::ObjectKind::Document);
+    assert_eq!(receipt.icon.as_deref(), Some("stock-in"));
+    assert!(
+        receipt
+            .fields
+            .iter()
+            .any(|f| f.name == "amount" && f.read_only)
+    );
+    assert_eq!(receipt.table_parts[0].name, "lines");
+    let supplier = receipt
+        .fields
+        .iter()
+        .find(|f| f.name == "supplier")
+        .unwrap();
+    assert_eq!(supplier.target.as_deref(), Some("suppliers"));
+    assert!(receipt.rights.post);
+
+    let [section] = meta.menu.as_slice() else {
+        panic!("{:?}", meta.menu);
+    };
+    assert_eq!(section.object, None);
+    assert_eq!(section.children.len(), 5);
+}
+
+#[test]
+fn required_fields_must_be_filled() {
+    let base = Base::new("required");
+    let engine = changed_model(|m| {
+        m.catalogs[0].fields[0].required = true;
+        m.catalogs[0].fields[0].title = "Наименование".into();
+        m.documents[1].fields[0].required = true;
+    })
+    .create_local(&base.path, None, None)
+    .unwrap();
+
+    for name in [Value::Null, text("  ")] {
+        let data = ObjectData {
+            fields: fields(&[("name", name), ("unit", text("кг"))]),
+            ..ObjectData::default()
+        };
+        let err = engine.save("goods", &data, PostAction::Write).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Validation);
+        assert!(err.message.contains("Наименование"), "{}", err.message);
+    }
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+
+    // Поступление без даты не записать; с датой — можно.
+    let mut no_date = receipt(main, mill, &[(flour, 1_000, 100)]);
+    no_date.fields.remove("date");
+    assert_eq!(
+        engine
+            .save("receipt", &no_date, PostAction::Write)
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+    engine
+        .save("receipt", &dated(no_date, "2026-02-01"), PostAction::Post)
+        .unwrap();
 }

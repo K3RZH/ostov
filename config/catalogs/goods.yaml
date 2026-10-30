@@ -1,0 +1,10 @@
+catalog: goods
+title: Товары
+icon: box
+fields:
+  - name: name
+    title: Наименование
+    type: text
+  - name: unit
+    title: Единица измерения
+    type: text

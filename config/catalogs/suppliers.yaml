@@ -1,0 +1,7 @@
+catalog: suppliers
+title: Поставщики
+icon: users
+fields:
+  - name: name
+    title: Наименование
+    type: text

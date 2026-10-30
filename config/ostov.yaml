@@ -1,0 +1,7 @@
+# Манифест конфигурации. format — версия формата файлов: ostov отвергает несовпадающую.
+name: warehouse
+title: Склад
+version: 0.1.0
+format: 1
+menu:
+  - warehouse
