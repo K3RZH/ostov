@@ -92,8 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
-        "receipts" | "receipts-large" | "receipts-marks" | "receipts-sorted" | "doc-window"
-        | "doc-dock" | "doc-close" | "receipt-form" | "tabs-many" => {
+        "receipts" | "receipts-large" | "receipts-marks" | "receipts-sorted"
+        | "receipts-notice" | "doc-window" | "doc-dock" | "doc-close" | "receipt-form"
+        | "tabs-many" => {
             use std::cell::RefCell;
             use std::rc::Rc;
 
@@ -106,6 +107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut shell = shell.borrow_mut();
                 shell.click(2);
                 shell.click(3);
+            }
+            if screen == "receipts-notice" {
+                // Ошибка ядра под списком (например, пометка проведённого документа).
+                window
+                    .global::<ostov_ui::ReceiptsData>()
+                    .set_notice("Сначала отмените проведение документа".into());
             }
             if screen == "receipts-large" {
                 window

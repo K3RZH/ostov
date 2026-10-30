@@ -148,6 +148,7 @@ component ReceiptList inherits VerticalLayout {
         row-activated(i) => { ReceiptsData.open(i); }
     }
     HorizontalLayout {
+        alignment: start;
         spacing: Theme.space-16;
         Text {
             text: "Показано " + ReceiptsData.rows.length + " из " + ReceiptsData.total;
@@ -158,6 +159,7 @@ component ReceiptList inherits VerticalLayout {
             text: ReceiptsData.notice;
             font-size: Theme.font-caption;
             color: Theme.danger;
+            horizontal-alignment: left;
             overflow: elide;
         }
     }
