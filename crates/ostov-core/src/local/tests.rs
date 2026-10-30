@@ -847,3 +847,82 @@ fn model_without_rules_is_rejected() {
         None
     );
 }
+
+#[test]
+fn closed_period_freezes_documents() {
+    let base = Base::new("closing");
+    let (engine, flour, main, receipt_id) = stocked(&base);
+    let issue_id = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap()
+        .id;
+    engine.set_closing_date(Some("2026-02-28")).unwrap();
+    assert_eq!(
+        engine.closing_date().unwrap().as_deref(),
+        Some("2026-02-28")
+    );
+
+    let closed = |r: ostov_api::EngineResult<ostov_api::Saved>| {
+        assert_eq!(r.unwrap_err().code, ErrorCode::PeriodClosed);
+    };
+    // Февральское поступление: ни записать, ни провести, ни отменить, ни пометить.
+    let receipt = engine.get("receipt", receipt_id).unwrap();
+    closed(engine.save("receipt", &receipt, PostAction::Post));
+    closed(engine.unpost("receipt", receipt_id));
+    closed(engine.post("receipt", receipt_id));
+    closed(engine.mark_deleted("receipt", receipt_id, receipt.version, true));
+    // Новый документ задним числом и перенос мартовского в февраль.
+    closed(engine.save(
+        "issue",
+        &dated(issue(main, flour, 1_000), "2026-02-15"),
+        PostAction::Write,
+    ));
+    let mut moved = engine.get("issue", issue_id).unwrap();
+    moved.fields.insert("date".into(), date("2026-02-20"));
+    closed(engine.save("issue", &moved, PostAction::Post));
+
+    // Март открыт.
+    engine.unpost("issue", issue_id).unwrap();
+    engine.post("issue", issue_id).unwrap();
+
+    // Закрытие хранится в базе.
+    drop(engine);
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(
+        engine.closing_date().unwrap().as_deref(),
+        Some("2026-02-28")
+    );
+    closed(engine.unpost("receipt", receipt_id));
+
+    engine.set_closing_date(None).unwrap();
+    engine.unpost("issue", issue_id).unwrap();
+    engine.unpost("receipt", receipt_id).unwrap();
+    assert_eq!(
+        engine
+            .set_closing_date(Some("28.02.2026"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+}
+
+#[test]
+fn old_base_gets_closing_table() {
+    let base = Base::new("closing-upgrade");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        ostov_store::Driver::execute(&mut db, "DROP TABLE ostov_closing", &[]).unwrap();
+    }
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(engine.closing_date().unwrap(), None);
+    engine.set_closing_date(Some("2026-01-31")).unwrap();
+}

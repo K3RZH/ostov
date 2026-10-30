@@ -58,6 +58,7 @@ pub fn error(e: CoreError) -> EngineError {
     let code = match &e {
         CoreError::VersionConflict { .. } => ErrorCode::VersionConflict,
         CoreError::NotFound { .. } => ErrorCode::NotFound,
+        CoreError::PeriodClosed { .. } => ErrorCode::PeriodClosed,
         CoreError::NegativeBalance { .. } | CoreError::Invalid(_) => ErrorCode::Validation,
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.

@@ -22,6 +22,11 @@ pub enum CoreError {
         /// День, на конец которого остаток ушёл бы в минус (если у движений есть даты).
         date: Option<String>,
     },
+    /// Дата документа попадает в закрытый период (СТ-24).
+    PeriodClosed {
+        date: String,
+        closed_through: String,
+    },
     Invalid(String),
 }
 
@@ -49,6 +54,13 @@ impl fmt::Display for CoreError {
                     "не хватает остатка: {resource} в {register} стал бы {balance}"
                 ),
             },
+            Self::PeriodClosed {
+                date,
+                closed_through,
+            } => write!(
+                f,
+                "период по {closed_through} закрыт: документ от {date} менять нельзя"
+            ),
             Self::Invalid(msg) => write!(f, "{msg}"),
         }
     }

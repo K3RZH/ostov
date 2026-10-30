@@ -1,5 +1,6 @@
 //! Ядро: объекты, транзакции, проведение, регистры.
 
+pub mod closing;
 pub mod error;
 pub mod list;
 pub mod local;

@@ -520,6 +520,18 @@ impl Engine for LocalEngine {
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
         self.guarded("RunReport", || self.run_run_report(query))
     }
+
+    fn closing_date(&self) -> EngineResult<Option<String>> {
+        self.guarded("GetClosingDate", || {
+            crate::closing::closing_date(&mut **self.db()).map_err(error)
+        })
+    }
+
+    fn set_closing_date(&self, date: Option<&str>) -> EngineResult<()> {
+        self.guarded("SetClosingDate", || {
+            crate::closing::set_closing_date(&mut **self.db(), date).map_err(error)
+        })
+    }
 }
 
 /// Отчёты по остаткам:
@@ -732,6 +744,7 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    crate::closing::create_table(db)?;
     if config.stock.upgrade(db)? {
         for (table, doc) in &config.documents {
             if doc.kind.header().iter().any(|f| f.name == "date") {

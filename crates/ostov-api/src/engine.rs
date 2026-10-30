@@ -95,6 +95,15 @@ pub trait Engine: Send + Sync {
     fn admin_backup(&self, _target: &str) -> EngineResult<JobId> {
         Err(EngineError::not_implemented("AdminBackup"))
     }
+
+    /// Дата закрытия периода (СТ-24): документы по эту дату включительно не меняются.
+    fn closing_date(&self) -> EngineResult<Option<String>> {
+        Err(EngineError::not_implemented("GetClosingDate"))
+    }
+    /// `None` — открыть период. Потом — только с правом «установка даты закрытия» (СТ-30).
+    fn set_closing_date(&self, _date: Option<&str>) -> EngineResult<()> {
+        Err(EngineError::not_implemented("SetClosingDate"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

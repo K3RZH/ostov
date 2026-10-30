@@ -2,6 +2,7 @@
 
 use ostov_store::Driver;
 
+use crate::closing::check_open;
 use crate::object::document::{Document, DocumentKind};
 use crate::register::{AccumulationRegister, Movement};
 use crate::{CoreError, in_transaction};
@@ -17,6 +18,7 @@ pub fn post(
 ) -> Result<(), CoreError> {
     in_transaction(db, |db| {
         let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        check_open(db, &doc.header)?;
         check_not_deleted(&doc)?;
         let movements = rule(&doc)?;
         register.replace_dated(db, kind.table(), id, period(&doc).as_deref(), &movements)?;
@@ -106,7 +108,8 @@ pub fn unpost(
     id: i64,
 ) -> Result<(), CoreError> {
     in_transaction(db, |db| {
-        kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        check_open(db, &doc.header)?;
         register.replace(db, kind.table(), id, &[])?;
         kind.set_posted(db, id, false)
     })

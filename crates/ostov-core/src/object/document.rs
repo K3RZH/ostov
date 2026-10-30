@@ -6,6 +6,7 @@ use super::{
     FieldDef, Fields, check_fields, check_ident, column_defs, names, placeholders, read_fields,
     returned_id, set_flag, to_values,
 };
+use crate::closing::check_open;
 use crate::{CoreError, in_transaction};
 
 /// Табличная часть документа, например «Товары» в поступлении.
@@ -86,6 +87,7 @@ impl DocumentKind {
     }
 
     pub fn create_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
+        crate::closing::create_table(db)?;
         let mut statements = Vec::new();
         {
             let d = db.dialect();
@@ -158,6 +160,7 @@ impl DocumentKind {
         parts: &BTreeMap<String, Vec<Fields>>,
     ) -> Result<Document, CoreError> {
         self.check_parts(parts)?;
+        check_open(db, header)?;
         let number = self.next_number(db)?;
         let mut values = vec![
             Value::Int(1),
@@ -253,6 +256,7 @@ impl DocumentKind {
     ) -> Result<Document, CoreError> {
         in_transaction(db, |db| {
             let doc = self.get(db, id)?.ok_or_else(|| self.not_found(id))?;
+            check_open(db, &doc.header)?;
             if deleted && doc.posted {
                 return Err(CoreError::Invalid(format!(
                     "документ {} проведён: сначала отмените проведение",
@@ -311,6 +315,11 @@ impl DocumentKind {
     /// Перезаписывает шапку и строки с проверкой версии; без своей транзакции.
     pub(crate) fn write(&self, db: &mut dyn Driver, doc: &Document) -> Result<Document, CoreError> {
         self.check_parts(&doc.parts)?;
+        // Нельзя ни менять документ закрытого периода, ни переносить документ в закрытый период.
+        if let Some(stored) = self.get(db, doc.id)? {
+            check_open(db, &stored.header)?;
+        }
+        check_open(db, &doc.header)?;
         let mut values = to_values(&self.table, &self.header, &doc.header)?;
         let n = values.len();
 
