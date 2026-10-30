@@ -303,6 +303,23 @@ impl Shell {
         }
     }
 
+    /// Забирает вкладку из окна (для переноса в другое окно); активная вкладка выбирается как при закрытии.
+    pub fn take_tab(&mut self, index: usize) -> Option<Tab> {
+        let tab = self.tabs.get(index)?.clone();
+        self.close_tab(index);
+        Some(tab)
+    }
+
+    /// Вставляет перенесённую вкладку и делает её активной. Перенос это осознанное действие,
+    /// поэтому вкладка закреплена: следующее открытие её не заменит.
+    pub fn insert_tab(&mut self, at: usize, mut tab: Tab) -> usize {
+        tab.preview = false;
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+        at
+    }
+
     pub fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
