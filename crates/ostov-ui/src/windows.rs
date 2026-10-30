@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, Model, ModelRc, PhysicalPosition, VecModel};
+use slint::{ComponentHandle, Model, PhysicalPosition};
 
 use crate::AppWindow;
-use crate::app::{current_settings, prepare_host_window, refresh, tab_items};
+use crate::app::{current_settings, prepare_host_window, refresh, set_tabs, tab_items};
 use crate::shell::{Shell, Tab};
 use crate::workspace::{Change, WindowId, WindowRef, Workspace};
 
@@ -368,7 +368,7 @@ impl Windows {
         let (Some(window), Some(list)) = (inner.hosts.get(&id), inner.workspace.list(id)) else {
             return;
         };
-        window.set_tabs(ModelRc::new(VecModel::from(tab_items(list.tabs()))));
+        set_tabs(window, tab_items(list.tabs()));
         window.set_active_tab(i32::try_from(list.active()).unwrap_or_default());
         let title = list
             .tabs()

@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::login::{delay_secs, verify};
 use crate::settings::Settings;
@@ -178,6 +178,28 @@ pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
         .collect()
 }
 
+/// Обновляет вкладки окна на месте: строки модели не пересоздаются, поэтому вкладка, которую
+/// сейчас тащат, не теряет захват мыши (замена всей модели пересоздаёт все вкладки).
+pub fn set_tabs(window: &AppWindow, items: Vec<TabItem>) {
+    let model = window.get_tabs();
+    if let Some(vec) = model.as_any().downcast_ref::<VecModel<TabItem>>() {
+        for (i, item) in items.iter().enumerate() {
+            if i < vec.row_count() {
+                if vec.row_data(i).as_ref() != Some(item) {
+                    vec.set_row_data(i, item.clone());
+                }
+            } else {
+                vec.push(item.clone());
+            }
+        }
+        while vec.row_count() > items.len() {
+            vec.remove(vec.row_count() - 1);
+        }
+        return;
+    }
+    window.set_tabs(ModelRc::new(VecModel::from(items)));
+}
+
 pub fn refresh(window: &AppWindow, shell: &Shell) {
     let rows: Vec<NavRow> = shell
         .nav_rows()
@@ -195,7 +217,7 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
         .collect();
     let tabs = tab_items(shell.tabs());
     window.set_nav(ModelRc::new(VecModel::from(rows)));
-    window.set_tabs(ModelRc::new(VecModel::from(tabs)));
+    set_tabs(window, tabs);
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }
 

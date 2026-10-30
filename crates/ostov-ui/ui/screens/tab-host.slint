@@ -24,7 +24,8 @@ component TabView inherits Rectangle {
     callback scrolled(length);
 
     height: 40px;
-    background: root.active ? Theme.bg : transparent;
+    // Поднятая вкладка непрозрачная: иначе под тенью виден серый прямоугольник.
+    background: root.lifted ? Theme.surface : root.active ? Theme.bg : transparent;
     // Идущая за указателем вкладка поверх соседей, остальные плавно расступаются.
     z: root.lifted ? 10 : 0;
     drop-shadow-blur: root.lifted ? 10px : 0px;
