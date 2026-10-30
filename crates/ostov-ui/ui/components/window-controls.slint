@@ -1,0 +1,63 @@
+import { Theme } from "../theme.slint";
+
+// Кнопка панели окна: свернуть, развернуть, закрыть.
+component CaptionButton inherits Rectangle {
+    in property <bool> danger;
+    out property <bool> hovered: touch.has-hover;
+    callback clicked();
+    width: 46px;
+    background: touch.has-hover ? (root.danger ? Theme.danger : Theme.surface-alt) : transparent;
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    @children
+}
+
+// Три кнопки окна на месте системных. Размер окна и состояние хранит само окно (`minimized`,
+// `maximized`), поэтому логика в обработчиках окна, а не здесь.
+export component WindowControls inherits HorizontalLayout {
+    in property <bool> maximized;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
+    CaptionButton {
+        clicked => { root.minimize(); }
+        Rectangle {
+            width: 10px;
+            height: 1px;
+            background: Theme.text;
+        }
+    }
+    CaptionButton {
+        clicked => { root.toggle-maximize(); }
+        if !root.maximized : Rectangle {
+            width: 10px;
+            height: 10px;
+            border-width: 1px;
+            border-color: Theme.text;
+        }
+        if root.maximized : Path {
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            stroke: Theme.text;
+            stroke-width: 1px;
+            commands: "M 2 0 L 9 0 L 9 7 M 0 2 L 7 2 L 7 9 L 0 9 Z";
+        }
+    }
+    close-button := CaptionButton {
+        danger: true;
+        clicked => { root.close-window(); }
+        Path {
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            stroke: close-button.hovered ? #FFFFFF : Theme.text;
+            stroke-width: 1px;
+            commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+        }
+    }
+}

@@ -8,6 +8,7 @@ import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { ReceiptFormView } from "screens/receipts-view.slint";
+import { WindowBar } from "components/window-bar.slint";
 
 // Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 3 это
 // отдельное окно документа, вынесенного из вкладки: только форма, остальное не создаётся.
@@ -109,6 +110,12 @@ export component AppWindow inherits Window {
     // Страница 3 (окно документа): заголовок окна.
     in property <string> doc-title;
 
+    // Своя панель окна вместо системной: на главной странице её роль играет шапка, на остальных
+    // тонкая полоса `WindowBar`. Края окна тянутся за `resize-border-width`.
+    no-frame: true;
+    resize-border-width: 6px;
+    private property <length> chrome-height: root.page == 2 ? 0px : 36px;
+
     title: root.page == 0 ? "Ostov — Выбор базы"
         : root.page == 1 ? "Ostov — " + login-page.heading
         : root.page == 3 ? root.doc-title + " — Ostov"
@@ -122,9 +129,9 @@ export component AppWindow inherits Window {
 
     start-page := StartPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 0;
         config-name: root.config-name;
         config-info: root.config-info;
@@ -134,9 +141,9 @@ export component AppWindow inherits Window {
 
     login-page := LoginPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 1;
         config-name: root.config-name;
         config-info: root.config-info;
@@ -144,26 +151,30 @@ export component AppWindow inherits Window {
 
     main-page := MainPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 2;
+        maximized: root.maximized;
+        minimize => { root.minimized = true; }
+        toggle-maximize => { root.maximized = !root.maximized; }
+        close-window => { root.close(); }
         settings-clicked => { root.settings-open = true; }
         user-add-clicked => { root.adding-user = true; }
     }
 
     if root.page == 3 : ReceiptFormView {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
     }
 
     if root.creating && root.page == 0 : CreateDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         server <=> root.create-server;
         db-name <=> root.new-name;
         folder <=> root.new-folder;
@@ -188,9 +199,9 @@ export component AppWindow inherits Window {
 
     if root.adding && root.page == 0 : AddDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         server <=> root.add-server;
         file <=> root.add-file;
         address <=> root.add-address;
@@ -202,9 +213,9 @@ export component AppWindow inherits Window {
 
     if root.settings-open : SettingsDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         dark: root.dark-theme;
         radius-mode: root.radius-mode;
         density-mode: root.density-mode;
@@ -218,9 +229,9 @@ export component AppWindow inherits Window {
 
     if root.adding-user : UserDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         roles: root.roles;
         error: root.user-error;
         login <=> root.nu-login;
@@ -234,5 +245,24 @@ export component AppWindow inherits Window {
             root.nu-password = "";
             root.nu-repeat = "";
         }
+    }
+
+    if root.page != 2 : WindowBar {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.chrome-height;
+        title: root.title;
+        maximized: root.maximized;
+        minimize => { root.minimized = true; }
+        toggle-maximize => { root.maximized = !root.maximized; }
+        close-window => { root.close(); }
+    }
+
+    // Без системной рамки у окна нет границы: рисуем свою (пропускает события, ничего не ловит).
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        visible: !root.maximized;
     }
 }

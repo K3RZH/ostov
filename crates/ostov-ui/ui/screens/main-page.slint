@@ -1,6 +1,7 @@
 import { Theme, Shape } from "../theme.slint";
 import { Icon } from "../components/icon.slint";
 import { IconButton } from "../components/icon-button.slint";
+import { WindowControls } from "../components/window-controls.slint";
 import { UsersView, UserRow } from "users-view.slint";
 import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
 import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
@@ -199,6 +200,11 @@ export component MainPage inherits Rectangle {
     callback tab-selected(int);
     callback tab-closed(int);
     callback tab-detached(int);
+    // Кнопки окна: свою панель окна здесь заменяет шапка.
+    in property <bool> maximized;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
     callback settings-clicked();
 
     // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
@@ -247,9 +253,24 @@ export component MainPage inherits Rectangle {
                 height: 1px;
                 background: Theme.border;
             }
+            // Пустые места шапки двигают окно, двойной клик разворачивает.
+            WindowMoveArea {
+                TouchArea {
+                    double-clicked => { root.toggle-maximize(); }
+                }
+            }
+            WindowControls {
+                x: parent.width - 3 * 46px;
+                width: 3 * 46px;
+                height: parent.height;
+                maximized: root.maximized;
+                minimize => { root.minimize(); }
+                toggle-maximize => { root.toggle-maximize(); }
+                close-window => { root.close-window(); }
+            }
             HorizontalLayout {
                 padding-left: Theme.space-12;
-                padding-right: Theme.space-12;
+                padding-right: Theme.space-12 + 3 * 46px;
                 spacing: Theme.space-12;
                 VerticalLayout {
                     alignment: center;
