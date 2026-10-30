@@ -1,0 +1,31 @@
+document: receipt
+title: Поступление
+fields:
+  - name: date
+    title: Дата
+    type: date
+  - name: supplier
+    title: Поставщик
+    type: ref(suppliers)
+  - name: warehouse
+    title: Склад
+    type: ref(warehouses)
+  - name: amount
+    title: Сумма
+    type: decimal(2)
+tables:
+  - name: lines
+    title: Товары
+    fields:
+      - name: goods
+        title: Товар
+        type: ref(goods)
+      - name: qty
+        title: Количество
+        type: decimal(3)
+      - name: price
+        title: Цена
+        type: decimal(2)
+      - name: amount
+        title: Сумма
+        type: decimal(2)

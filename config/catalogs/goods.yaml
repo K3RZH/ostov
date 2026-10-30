@@ -1,0 +1,9 @@
+catalog: goods
+title: Товары
+fields:
+  - name: name
+    title: Наименование
+    type: text
+  - name: unit
+    title: Единица измерения
+    type: text
