@@ -157,7 +157,7 @@ export component TabHost inherits VerticalLayout {
     private property <length> drag-x;
     private property <length> drag-y;
     // Указатель ушёл от панели вверх или вниз: при отпускании вкладка станет отдельным окном.
-    private property <bool> drag-out: root.drag-index >= 0 && (root.drag-y < -24px || root.drag-y > bar.height + 24px);
+    private property <bool> drag-out: root.drag-index >= 0 && root.can-detach(root.drag-index) && (root.drag-y < -24px || root.drag-y > bar.height + 24px);
     // Где внутри вкладки взялись за неё (чтобы вкладка не прыгала под указателем).
     private property <length> grab-dx;
     // Положение идущей за указателем вкладки в содержимом панели (не выходит за края панели).

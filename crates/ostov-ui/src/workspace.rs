@@ -300,7 +300,11 @@ impl Workspace {
         at: usize,
     ) -> Option<Change> {
         self.close_window(follower);
-        let mut change = self.move_tab(shell, from, index, to, at)?;
+        // Окно-копия закрывается в любом случае, иначе оно осталось бы на экране без модели.
+        let mut change = self.move_tab(shell, from, index, to, at).unwrap_or(Change {
+            opened: None,
+            closed: Vec::new(),
+        });
         change.closed.push(follower);
         Some(change)
     }

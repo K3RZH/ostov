@@ -29,6 +29,31 @@ struct Inner {
     drag: Option<DragState>,
 }
 
+/// Журнал перетаскивания для разбора странностей в живых окнах: включается переменной
+/// `OSTOV_DEBUG_DRAG=1`, пишет в `~/.local/state/ostov/drag.log`.
+fn drag_log(text: &str) {
+    use std::io::Write;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("OSTOV_DEBUG_DRAG").is_some()) {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let dir = std::path::Path::new(&home).join(".local/state/ostov");
+    let _ = std::fs::create_dir_all(&dir);
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() % 1_000_000);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("drag.log"))
+    {
+        let _ = writeln!(file, "{millis:>6} {text}");
+    }
+}
+
 /// Высота панели вкладок (логические пиксели).
 const STRIP_HEIGHT: f32 = 40.0;
 /// Где в новом окне вкладка: указатель встаёт на её середину (логические пиксели).
@@ -100,6 +125,28 @@ impl Windows {
                 drag: None,
             })),
         }
+    }
+
+    /// Для тестового стенда: окна по модели, окна на экране и число вкладок в каждом окне модели.
+    /// Две первые части обязаны совпадать.
+    #[doc(hidden)]
+    pub fn debug_state(&self) -> (Vec<WindowId>, Vec<WindowId>, Vec<usize>) {
+        let inner = self.inner.borrow();
+        let mut model = inner.workspace.extra_ids();
+        model.sort_unstable();
+        let mut screen: Vec<WindowId> = inner.hosts.keys().copied().collect();
+        screen.sort_unstable();
+        let tabs = model
+            .iter()
+            .map(|id| inner.workspace.list(*id).map_or(0, |l| l.tabs().len()))
+            .collect();
+        (model, screen, tabs)
+    }
+
+    /// Окно дополнительное по номеру (для стенда).
+    #[doc(hidden)]
+    pub fn host(&self, id: WindowId) -> Option<AppWindow> {
+        self.inner.borrow().hosts.get(&id).map(|w| w.clone_strong())
     }
 
     /// Активное окно: в нём открываются новые вкладки и документы.
@@ -217,6 +264,12 @@ impl Windows {
         }
         let scale = source_window.window().scale_factor();
         let point = pointer_global(source_window, x, y);
+        drag_log(&format!(
+            "moved {source:?} tab={index} local=({x:.0},{y:.0}) out={out} окно={:?} масштаб={scale} точка=({:.0},{:.0})",
+            source_window.window().position(),
+            point.0,
+            point.1
+        ));
         let (whole, follower, grab) = {
             let mut inner = self.inner.borrow_mut();
             if inner.drag.is_none() {
@@ -234,6 +287,11 @@ impl Windows {
             }
         };
         if whole {
+            drag_log(&format!(
+                "  целое окно -> ({:.0},{:.0})",
+                point.0 - grab.0,
+                point.1 - grab.1
+            ));
             source_window.window().set_position(PhysicalPosition::new(
                 (point.0 - grab.0) as i32,
                 (point.1 - grab.1) as i32,
@@ -244,6 +302,7 @@ impl Windows {
         let mut follower = follower;
         if out && follower.is_none() {
             let id = self.inner.borrow_mut().workspace.open_extra(tab);
+            drag_log(&format!("  создано окно-копия {id}"));
             self.open_host(main, shell, id);
             self.refresh_host(id);
             // Окно-копия поверх остальных, а вместо «призрака» вкладки идёт оно само.
@@ -295,6 +354,9 @@ impl Windows {
     ) -> bool {
         self.highlight(main, None);
         source_window.set_follower_active(false);
+        drag_log(&format!(
+            "ended {source:?} tab={index} local=({x:.0},{y:.0}) out={out}"
+        ));
         let state = self.inner.borrow_mut().drag.take();
         // Окно, которое осталось жить, снова обычное.
         if let Some(window) = state
@@ -313,6 +375,10 @@ impl Windows {
             exclude.push(WindowRef::Extra(id));
         }
         let target = self.find_target(main, point, &exclude);
+        drag_log(&format!(
+            "  состояние={:?} цель={target:?}",
+            state.follower.map(|f| (f, state.whole))
+        ));
         let change = {
             let mut inner = self.inner.borrow_mut();
             let mut shell = shell.borrow_mut();

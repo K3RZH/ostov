@@ -402,6 +402,158 @@ fn attach_core(app: &AppWindow, receipts: &crate::receipts_ui::ReceiptsUi) {
 }
 
 /// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
+/// Обработчики навигации и вкладок окна: выбор, закрытие, порядок, перетаскивание. Подключаются
+/// так же в тестовом стенде (`examples/drag_e2e.rs`), который шлёт окну настоящие события мыши.
+pub fn wire_tabs(
+    app: &AppWindow,
+    shell: &Rc<RefCell<Shell>>,
+    receipts: &crate::receipts_ui::ReceiptsUi,
+    windows: &crate::windows::Windows,
+) {
+    app.on_nav_clicked({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |id| {
+            let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(id) = index(id) {
+                shell.click(id);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+        }
+    });
+
+    app.on_tab_selected({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(tab) = index(tab) {
+                shell.select_tab(tab);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+        }
+    });
+
+    app.on_tab_reordered({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |from, to| {
+            let Some(app) = app.upgrade() else { return };
+            let (Some(from), Some(to)) = (index(from), index(to)) else {
+                return;
+            };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            receipts.before(&app, &mut shell.borrow_mut());
+            windows.reorder(&app, &shell, crate::workspace::WindowRef::Main, from, to);
+            receipts.after(&app, &shell.borrow());
+        }
+    });
+
+    app.on_tab_drag_moved({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            windows.drag_moved(
+                &app,
+                &shell,
+                crate::workspace::WindowRef::Main,
+                tab,
+                &app,
+                x,
+                y,
+                out,
+            );
+        }
+    });
+
+    app.on_tab_drag_ended({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            let main = crate::workspace::WindowRef::Main;
+            windows.set_active(main);
+            if windows.drag_ended(&app, &shell, main, tab, &app, x, y, out) || !out {
+                return;
+            }
+            // Запасной путь (чистый Wayland, документы): окно создаётся при отпускании.
+            let kind = shell
+                .borrow()
+                .tabs()
+                .get(tab)
+                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
+            match kind {
+                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
+                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
+                _ => {}
+            }
+        }
+    });
+
+    app.on_tab_detached({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            let kind = shell
+                .borrow()
+                .tabs()
+                .get(tab)
+                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
+            match kind {
+                // Документ выносится прежним способом: его состояние привязано к окну документа.
+                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
+                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
+                _ => {}
+            }
+        }
+    });
+    app.on_tab_closed({
+        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(tab) = index(tab) {
+                shell.close_tab(tab);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+        }
+    });
+}
+
 pub fn run() -> Result<(), slint::PlatformError> {
     use slint::Model;
 
@@ -724,148 +876,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    app.on_nav_clicked({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
-        move |id| {
-            let Some(app) = app.upgrade() else { return };
-            windows.set_active(crate::workspace::WindowRef::Main);
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(id) = index(id) {
-                shell.click(id);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
-
-    app.on_tab_selected({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
-        move |tab| {
-            let Some(app) = app.upgrade() else { return };
-            windows.set_active(crate::workspace::WindowRef::Main);
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(tab) = index(tab) {
-                shell.select_tab(tab);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
-
-    app.on_tab_reordered({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
-        move |from, to| {
-            let Some(app) = app.upgrade() else { return };
-            let (Some(from), Some(to)) = (index(from), index(to)) else {
-                return;
-            };
-            windows.set_active(crate::workspace::WindowRef::Main);
-            receipts.before(&app, &mut shell.borrow_mut());
-            windows.reorder(&app, &shell, crate::workspace::WindowRef::Main, from, to);
-            receipts.after(&app, &shell.borrow());
-        }
-    });
-
-    app.on_tab_drag_moved({
-        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
-        move |tab, x, y, out| {
-            let Some(app) = app.upgrade() else { return };
-            let Some(tab) = index(tab) else { return };
-            windows.drag_moved(
-                &app,
-                &shell,
-                crate::workspace::WindowRef::Main,
-                tab,
-                &app,
-                x,
-                y,
-                out,
-            );
-        }
-    });
-
-    app.on_tab_drag_ended({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
-        move |tab, x, y, out| {
-            let Some(app) = app.upgrade() else { return };
-            let Some(tab) = index(tab) else { return };
-            let main = crate::workspace::WindowRef::Main;
-            windows.set_active(main);
-            if windows.drag_ended(&app, &shell, main, tab, &app, x, y, out) || !out {
-                return;
-            }
-            // Запасной путь (чистый Wayland, документы): окно создаётся при отпускании.
-            let kind = shell
-                .borrow()
-                .tabs()
-                .get(tab)
-                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
-            match kind {
-                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
-                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
-                _ => {}
-            }
-        }
-    });
-
-    app.on_tab_detached({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
-        move |tab| {
-            let Some(app) = app.upgrade() else { return };
-            let Some(tab) = index(tab) else { return };
-            let kind = shell
-                .borrow()
-                .tabs()
-                .get(tab)
-                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
-            match kind {
-                // Документ выносится прежним способом: его состояние привязано к окну документа.
-                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
-                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
-                _ => {}
-            }
-        }
-    });
-    app.on_tab_closed({
-        let (app, shell, receipts) = (app.as_weak(), shell, receipts);
-        move |tab| {
-            let Some(app) = app.upgrade() else { return };
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(tab) = index(tab) {
-                shell.close_tab(tab);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
+    wire_tabs(&app, &shell, &receipts, &windows);
 
     app.show()?;
     slint::run_event_loop_until_quit()
