@@ -27,6 +27,8 @@ pub enum CoreError {
         date: String,
         closed_through: String,
     },
+    /// Конфигурация не ложится на базу без потери данных (реструктуризация).
+    Incompatible(String),
     Invalid(String),
 }
 
@@ -61,7 +63,7 @@ impl fmt::Display for CoreError {
                 f,
                 "период по {closed_through} закрыт: документ от {date} менять нельзя"
             ),
-            Self::Invalid(msg) => write!(f, "{msg}"),
+            Self::Incompatible(msg) | Self::Invalid(msg) => write!(f, "{msg}"),
         }
     }
 }

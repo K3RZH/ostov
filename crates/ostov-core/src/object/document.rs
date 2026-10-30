@@ -104,28 +104,38 @@ impl DocumentKind {
                 d.quote_ident(&self.table),
                 columns.join(", ")
             ));
-
-            for part in &self.parts {
-                let mut columns = vec![
-                    format!("{} {}", d.quote_ident("id"), d.id_column()),
-                    format!(
-                        "{} BIGINT NOT NULL REFERENCES {}",
-                        d.quote_ident("doc_id"),
-                        d.quote_ident(&self.table)
-                    ),
-                    format!("{} BIGINT NOT NULL", d.quote_ident("line_no")),
-                ];
-                columns.extend(column_defs(d, &part.fields));
-                statements.push(format!(
-                    "CREATE TABLE {} ({})",
-                    d.quote_ident(&self.part_table(part)),
-                    columns.join(", ")
-                ));
-            }
         }
         for sql in statements {
             db.execute(&sql, &[])?;
         }
+        for part in &self.parts {
+            self.create_part_table(db, part)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn create_part_table(
+        &self,
+        db: &mut dyn Driver,
+        part: &TablePart,
+    ) -> Result<(), CoreError> {
+        let d = db.dialect();
+        let mut columns = vec![
+            format!("{} {}", d.quote_ident("id"), d.id_column()),
+            format!(
+                "{} BIGINT NOT NULL REFERENCES {}",
+                d.quote_ident("doc_id"),
+                d.quote_ident(&self.table)
+            ),
+            format!("{} BIGINT NOT NULL", d.quote_ident("line_no")),
+        ];
+        columns.extend(column_defs(d, &part.fields));
+        let sql = format!(
+            "CREATE TABLE {} ({})",
+            d.quote_ident(&self.part_table(part)),
+            columns.join(", ")
+        );
+        db.execute(&sql, &[])?;
         Ok(())
     }
 
@@ -393,7 +403,7 @@ impl DocumentKind {
         }
     }
 
-    fn part_table(&self, part: &TablePart) -> String {
+    pub(crate) fn part_table(&self, part: &TablePart) -> String {
         format!("{}__{}", self.table, part.name)
     }
 

@@ -59,6 +59,7 @@ pub fn error(e: CoreError) -> EngineError {
         CoreError::VersionConflict { .. } => ErrorCode::VersionConflict,
         CoreError::NotFound { .. } => ErrorCode::NotFound,
         CoreError::PeriodClosed { .. } => ErrorCode::PeriodClosed,
+        CoreError::Incompatible(_) => ErrorCode::Incompatible,
         CoreError::NegativeBalance { .. } | CoreError::Invalid(_) => ErrorCode::Validation,
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.

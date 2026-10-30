@@ -99,6 +99,30 @@ impl AccumulationRegister {
         &self.dims
     }
 
+    pub fn resources(&self) -> &[FieldDef] {
+        &self.resources
+    }
+
+    pub(crate) fn has_movements(&self, db: &mut dyn Driver) -> Result<bool, CoreError> {
+        let sql = format!(
+            "SELECT 1 FROM {} LIMIT 1",
+            db.dialect().quote_ident(&self.name)
+        );
+        Ok(!db.query(&sql, &[])?.is_empty())
+    }
+
+    /// Только для пустого регистра: перестроить таблицы под новые измерения.
+    pub(crate) fn drop_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
+        let statements = {
+            let d = db.dialect();
+            [self.totals(), self.name.clone()].map(|t| format!("DROP TABLE {}", d.quote_ident(&t)))
+        };
+        for sql in statements {
+            db.execute(&sql, &[])?;
+        }
+        Ok(())
+    }
+
     /// Разрешить уход итогов в минус. По умолчанию запрещено.
     pub fn allow_negative(mut self) -> Self {
         self.allow_negative = true;
@@ -292,7 +316,7 @@ impl AccumulationRegister {
         )
     }
 
-    fn totals(&self) -> String {
+    pub(crate) fn totals(&self) -> String {
         format!("{}__totals", self.name)
     }
 

@@ -926,3 +926,133 @@ fn old_base_gets_closing_table() {
     assert_eq!(engine.closing_date().unwrap(), None);
     engine.set_closing_date(Some("2026-01-31")).unwrap();
 }
+
+fn changed_model(change: impl FnOnce(&mut ostov_model::Config)) -> LocalConnector {
+    let mut model = super::warehouse_model();
+    change(&mut model);
+    LocalConnector::new(model)
+}
+
+#[test]
+fn base_follows_config_changes() {
+    let base = Base::new("restructure");
+    let (engine, flour, main, _) = stocked(&base);
+    drop(engine);
+
+    let connector = changed_model(|m| {
+        use crate::{FieldDef, FieldKind};
+        m.catalogs[0]
+            .fields
+            .push(FieldDef::new("barcode", FieldKind::Text));
+        m.catalogs.push(ostov_model::CatalogDef {
+            name: "units".into(),
+            title: "Единицы".into(),
+            fields: vec![FieldDef::new("name", FieldKind::Text)],
+        });
+        let receipt = &mut m.documents[1];
+        receipt
+            .fields
+            .push(FieldDef::new("comment", FieldKind::Text));
+        receipt.table_parts.push(ostov_model::TablePartDef {
+            name: "costs".into(),
+            title: "Расходы".into(),
+            fields: vec![FieldDef::new("amount", FieldKind::Decimal { scale: 2 })],
+        });
+        m.registers[0]
+            .resources
+            .push(FieldDef::new("weight", FieldKind::Decimal { scale: 3 }));
+    });
+    let engine = connector.open_local(&base.path, None).unwrap();
+
+    // Старые данные на месте, новые поля пустые и записываются.
+    let mut goods = engine.get("goods", flour).unwrap();
+    assert_eq!(goods.fields["barcode"], Value::Null);
+    goods.fields.insert("barcode".into(), text("460"));
+    engine.save("goods", &goods, PostAction::Write).unwrap();
+    add(&*engine, "units", "кг");
+    let balance = report(&*engine, "stock_balance", &[("warehouse", refer(main))]);
+    assert_eq!(balance[0]["qty"], dec(10_000, 3));
+    assert_eq!(balance[0]["weight"], dec(0, 3));
+    drop(engine);
+
+    // Повторное открытие ничего не меняет.
+    let engine = connector.open_local(&base.path, None).unwrap();
+    assert_eq!(
+        engine.get("goods", flour).unwrap().fields["barcode"],
+        text("460")
+    );
+    drop(engine);
+
+    // Старая конфигурация убрала бы ресурс weight с данными — её база не примет.
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+}
+
+#[test]
+fn config_that_loses_data_is_refused() {
+    let base = Base::new("restructure-refused");
+    drop(stocked(&base).0);
+
+    let refused = |connector: LocalConnector| {
+        let err = connector.open_local(&base.path, None).err().unwrap();
+        assert_eq!(err.code, ErrorCode::Incompatible, "{}", err.message);
+        err.message
+    };
+    let unit = refused(changed_model(|m| {
+        m.catalogs[0].fields[1].kind = crate::FieldKind::Int;
+    }));
+    assert!(unit.contains("unit"), "{unit}");
+    refused(changed_model(|m| {
+        m.documents[1].table_parts[0].fields[1].kind = crate::FieldKind::Decimal { scale: 2 };
+    }));
+    // В регистре есть движения: новое измерение не добавить.
+    refused(changed_model(|m| {
+        m.registers[0]
+            .dimensions
+            .push(crate::FieldDef::new("batch", crate::FieldKind::Text));
+    }));
+
+    // После отказа база цела и открывается как раньше.
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(report(&*engine, "stock_balance", &[]).len(), 1);
+}
+
+#[test]
+fn empty_register_is_rebuilt() {
+    let base = Base::new("restructure-register");
+    drop(base.create());
+    let engine = changed_model(|m| {
+        m.registers[0]
+            .dimensions
+            .push(crate::FieldDef::new("batch", crate::FieldKind::Text));
+    })
+    .open_local(&base.path, None)
+    .unwrap();
+    assert!(report(&*engine, "stock_balance", &[]).is_empty());
+}
+
+#[test]
+fn base_before_restructuring_is_adopted() {
+    let base = Base::new("restructure-old");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        use ostov_store::Driver;
+        db.execute("DROP TABLE ostov_schema", &[]).unwrap();
+        db.execute("DELETE FROM ostov_base WHERE key = 'schema'", &[])
+            .unwrap();
+    }
+    let engine = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("barcode", crate::FieldKind::Text));
+    })
+    .open_local(&base.path, None)
+    .unwrap();
+    add(&*engine, "goods", "Соль");
+}

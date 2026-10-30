@@ -4,6 +4,7 @@
 mod config;
 mod convert;
 mod demo;
+mod schema;
 #[cfg(test)]
 mod tests;
 
@@ -735,7 +736,8 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
             &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
             &[Value::Text(config.name.clone())],
         )?;
-        config.create_tables(db)
+        config.create_tables(db)?;
+        schema::record(db, &config)
     })
     .map_err(error)?;
     Ok((db, config, lock))
@@ -745,6 +747,11 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
     crate::closing::create_table(db)?;
+    if !schema::recorded(db)? {
+        // Базы до реструктуризации создавались только под встроенный «Склад».
+        schema::record(db, &warehouse()?)?;
+    }
+    schema::restructure(db, config)?;
     if config.stock.upgrade(db)? {
         for (table, doc) in &config.documents {
             if doc.kind.header().iter().any(|f| f.name == "date") {
