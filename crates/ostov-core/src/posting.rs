@@ -1,0 +1,502 @@
+//! Проведение документов: движения в регистр пишутся одной транзакцией с отметкой «проведён».
+
+use ostov_store::Driver;
+
+use crate::object::document::{Document, DocumentKind};
+use crate::register::{AccumulationRegister, Movement};
+use crate::{CoreError, in_transaction};
+
+/// Проводит документ. Движения строит `rule` — потом это будет `on_post` из Python-конфигурации.
+/// Повторное проведение заменяет прежние движения; любая ошибка откатывает всё.
+pub fn post(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    id: i64,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<(), CoreError> {
+    in_transaction(db, |db| {
+        let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        check_not_deleted(&doc)?;
+        let movements = rule(&doc)?;
+        register.replace_dated(db, kind.table(), id, period(&doc).as_deref(), &movements)?;
+        kind.set_posted(db, id, true)
+    })
+}
+
+/// Записывает изменения документа и сразу проводит его или снимает с проведения — одной
+/// транзакцией, чтобы записанный документ не остался со старыми движениями.
+pub fn save(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    doc: &Document,
+    post: bool,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<Document, CoreError> {
+    in_transaction(db, |db| {
+        let saved = kind.write(db, doc)?;
+        if post {
+            check_not_deleted(&saved)?;
+            let movements = rule(&saved)?;
+            register.replace_dated(
+                db,
+                kind.table(),
+                saved.id,
+                period(&saved).as_deref(),
+                &movements,
+            )?;
+            kind.set_posted(db, saved.id, true)?;
+        } else if saved.posted {
+            register.replace(db, kind.table(), saved.id, &[])?;
+            kind.set_posted(db, saved.id, false)?;
+        }
+        kind.get(db, saved.id)?
+            .ok_or_else(|| kind.not_found(saved.id))
+    })
+}
+
+/// Записывает новый документ и сразу проводит его — одной транзакцией.
+pub fn insert_and_post(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    header: &crate::Fields,
+    parts: &std::collections::BTreeMap<String, Vec<crate::Fields>>,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<Document, CoreError> {
+    in_transaction(db, |db| {
+        let doc = kind.insert_in(db, header, parts)?;
+        let movements = rule(&doc)?;
+        register.replace_dated(
+            db,
+            kind.table(),
+            doc.id,
+            period(&doc).as_deref(),
+            &movements,
+        )?;
+        kind.set_posted(db, doc.id, true)?;
+        kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
+    })
+}
+
+/// Дата документа для движений — поле `date`, если оно есть.
+pub(crate) fn period(doc: &Document) -> Option<String> {
+    match doc.header.get("date") {
+        Some(crate::FieldValue::Date(d)) => Some(d.clone()),
+        _ => None,
+    }
+}
+
+fn check_not_deleted(doc: &Document) -> Result<(), CoreError> {
+    if doc.deleted {
+        return Err(CoreError::Invalid(format!(
+            "документ {} помечен на удаление: снимите пометку, чтобы провести",
+            doc.number
+        )));
+    }
+    Ok(())
+}
+
+/// Отменяет проведение: движения удаляются, итоги пересчитываются.
+pub fn unpost(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    id: i64,
+) -> Result<(), CoreError> {
+    in_transaction(db, |db| {
+        kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        register.replace(db, kind.table(), id, &[])?;
+        kind.set_posted(db, id, false)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::object::document::TablePart;
+    use crate::register::MovementKind;
+    use crate::testing::*;
+    use crate::{FieldDef, FieldKind, FieldValue, Fields};
+    use ostov_store::Decimal;
+    use ostov_store::drivers::sqlite::SqliteDriver;
+
+    struct Setup {
+        db: SqliteDriver,
+        receipt: DocumentKind,
+        issue: DocumentKind,
+        stock: AccumulationRegister,
+    }
+
+    fn doc_kind(table: &str) -> DocumentKind {
+        DocumentKind::new(
+            table,
+            vec![FieldDef::new("store", FieldKind::Text)],
+            vec![
+                TablePart::new(
+                    "lines",
+                    vec![
+                        FieldDef::new("item", FieldKind::Int),
+                        FieldDef::new("qty", FieldKind::Decimal { scale: 3 }),
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn setup() -> Setup {
+        let mut db = memory_db();
+        let receipt = doc_kind("receipt");
+        let issue = doc_kind("issue");
+        let stock = AccumulationRegister::new(
+            "stock",
+            vec![
+                FieldDef::new("store", FieldKind::Text),
+                FieldDef::new("item", FieldKind::Int),
+            ],
+            vec![FieldDef::new("qty", FieldKind::Decimal { scale: 3 })],
+        )
+        .unwrap();
+        receipt.create_tables(&mut db).unwrap();
+        issue.create_tables(&mut db).unwrap();
+        stock.create_tables(&mut db).unwrap();
+        Setup {
+            db,
+            receipt,
+            issue,
+            stock,
+        }
+    }
+
+    // Каждая строка документа — одно движение по складу и товару.
+    fn rule(kind: MovementKind) -> impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError> {
+        move |doc| {
+            doc.parts["lines"]
+                .iter()
+                .map(|line| {
+                    let FieldValue::Decimal(qty) = line["qty"] else {
+                        return Err(CoreError::Invalid("нет количества".into()));
+                    };
+                    Ok(Movement {
+                        kind,
+                        dims: fields(&[
+                            ("store", doc.header["store"].clone()),
+                            ("item", line["item"].clone()),
+                        ]),
+                        resources: BTreeMap::from([("qty".to_owned(), qty)]),
+                    })
+                })
+                .collect()
+        }
+    }
+
+    fn new_doc(s: &mut Setup, kind: MovementKind, lines: &[(i64, &str)]) -> i64 {
+        let doc_kind = match kind {
+            MovementKind::Receipt => &s.receipt,
+            MovementKind::Issue => &s.issue,
+        };
+        let lines: Vec<Fields> = lines
+            .iter()
+            .map(|(item, qty)| fields(&[("item", FieldValue::Int(*item)), ("qty", dec(qty))]))
+            .collect();
+        doc_kind
+            .insert(
+                &mut s.db,
+                &fields(&[("store", text("main"))]),
+                &BTreeMap::from([("lines".to_owned(), lines)]),
+            )
+            .unwrap()
+            .id
+    }
+
+    fn post_doc(s: &mut Setup, kind: MovementKind, id: i64) -> Result<(), CoreError> {
+        let doc_kind = if kind == MovementKind::Receipt {
+            &s.receipt
+        } else {
+            &s.issue
+        };
+        post(&mut s.db, doc_kind, &s.stock, id, rule(kind))
+    }
+
+    fn balance(s: &mut Setup, item: i64) -> Decimal {
+        let dims = fields(&[("store", text("main")), ("item", FieldValue::Int(item))]);
+        s.stock.balance(&mut s.db, &dims).unwrap()["qty"]
+    }
+
+    fn q(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn receipt_then_issue() {
+        let mut s = setup();
+        let r = new_doc(
+            &mut s,
+            MovementKind::Receipt,
+            &[(1, "10"), (1, "5.5"), (2, "1")],
+        );
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        assert_eq!(balance(&mut s, 1), q("15.5"));
+        assert_eq!(balance(&mut s, 2), q("1"));
+
+        let i = new_doc(&mut s, MovementKind::Issue, &[(1, "3.25")]);
+        post_doc(&mut s, MovementKind::Issue, i).unwrap();
+        assert_eq!(balance(&mut s, 1), q("12.25"));
+        assert!(s.issue.get(&mut s.db, i).unwrap().unwrap().posted);
+        assert_eq!(balance(&mut s, 3), q("0"));
+    }
+
+    #[test]
+    fn issue_beyond_balance_changes_nothing() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "2")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let i = new_doc(&mut s, MovementKind::Issue, &[(1, "1"), (1, "1.5")]);
+        let err = post_doc(&mut s, MovementKind::Issue, i).unwrap_err();
+        assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+        assert_eq!(balance(&mut s, 1), q("2"));
+        assert!(!s.issue.get(&mut s.db, i).unwrap().unwrap().posted);
+    }
+
+    #[test]
+    fn repost_replaces_movements() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        assert_eq!(balance(&mut s, 1), q("10"));
+    }
+
+    #[test]
+    fn unpost_respects_balance() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        let i = new_doc(&mut s, MovementKind::Issue, &[(1, "4")]);
+        post_doc(&mut s, MovementKind::Issue, i).unwrap();
+
+        // Отменить приход нельзя: по нему уже списали.
+        let err = unpost(&mut s.db, &s.receipt, &s.stock, r).unwrap_err();
+        assert!(matches!(err, CoreError::NegativeBalance { .. }));
+        assert_eq!(balance(&mut s, 1), q("6"));
+
+        unpost(&mut s.db, &s.issue, &s.stock, i).unwrap();
+        unpost(&mut s.db, &s.receipt, &s.stock, r).unwrap();
+        assert_eq!(balance(&mut s, 1), q("0"));
+        assert!(!s.receipt.get(&mut s.db, r).unwrap().unwrap().posted);
+    }
+
+    #[test]
+    fn failing_rule_rolls_back() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        let err = post(&mut s.db, &s.receipt, &s.stock, r, |_| {
+            Err(CoreError::Invalid("ошибка в on_post".into()))
+        });
+        assert!(err.is_err());
+        assert_eq!(balance(&mut s, 1), q("0"));
+        assert!(!s.receipt.get(&mut s.db, r).unwrap().unwrap().posted);
+    }
+
+    #[test]
+    fn document_keeps_lines_in_order() {
+        let mut s = setup();
+        let r = new_doc(
+            &mut s,
+            MovementKind::Receipt,
+            &[(3, "1"), (1, "2"), (2, "3")],
+        );
+        let doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        let items: Vec<_> = doc.parts["lines"]
+            .iter()
+            .map(|l| l["item"].clone())
+            .collect();
+        assert_eq!(
+            items,
+            vec![FieldValue::Int(3), FieldValue::Int(1), FieldValue::Int(2)]
+        );
+        assert_eq!(doc.version, 1);
+        assert!(!doc.posted);
+    }
+
+    fn lines(items: &[(i64, &str)]) -> BTreeMap<String, Vec<Fields>> {
+        let lines = items
+            .iter()
+            .map(|(item, qty)| fields(&[("item", FieldValue::Int(*item)), ("qty", dec(qty))]))
+            .collect();
+        BTreeMap::from([("lines".to_owned(), lines)])
+    }
+
+    fn save_receipt(s: &mut Setup, doc: &Document, post_it: bool) -> Result<Document, CoreError> {
+        save(
+            &mut s.db,
+            &s.receipt,
+            &s.stock,
+            doc,
+            post_it,
+            rule(MovementKind::Receipt),
+        )
+    }
+
+    #[test]
+    fn update_unposted_document() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.header.insert("store".into(), text("bar"));
+        doc.parts = lines(&[(1, "7"), (2, "1")]);
+
+        let saved = s.receipt.update(&mut s.db, &doc).unwrap();
+        assert_eq!(saved.version, 2);
+        assert_eq!(saved.header["store"], text("bar"));
+        assert_eq!(saved.parts, lines(&[(1, "7"), (2, "1")]));
+    }
+
+    #[test]
+    fn stale_update_changes_nothing() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        let old = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+
+        let mut first = old.clone();
+        first.parts = lines(&[(1, "5")]);
+        s.receipt.update(&mut s.db, &first).unwrap();
+
+        let mut second = old;
+        second.parts = lines(&[(2, "99")]);
+        let err = s.receipt.update(&mut s.db, &second).unwrap_err();
+        assert!(matches!(err, CoreError::VersionConflict { .. }), "{err}");
+        let stored = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert_eq!(stored.parts, lines(&[(1, "5")]));
+    }
+
+    #[test]
+    fn posted_document_is_not_updated_directly() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        let doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert!(matches!(
+            s.receipt.update(&mut s.db, &doc),
+            Err(CoreError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn save_reposts_with_new_lines() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.parts = lines(&[(1, "4"), (2, "3")]);
+        let saved = save_receipt(&mut s, &doc, true).unwrap();
+        assert!(saved.posted);
+        assert_eq!(balance(&mut s, 1), q("4"));
+        assert_eq!(balance(&mut s, 2), q("3"));
+    }
+
+    #[test]
+    fn save_without_post_unposts() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        let saved = save_receipt(&mut s, &doc, false).unwrap();
+        assert!(!saved.posted);
+        assert_eq!(balance(&mut s, 1), q("0"));
+    }
+
+    #[test]
+    fn save_that_breaks_balance_changes_nothing() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        let i = new_doc(&mut s, MovementKind::Issue, &[(1, "6")]);
+        post_doc(&mut s, MovementKind::Issue, i).unwrap();
+
+        // Уменьшить приход до 5 нельзя: 6 уже списали.
+        let mut doc = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        doc.parts = lines(&[(1, "5")]);
+        let err = save_receipt(&mut s, &doc, true).unwrap_err();
+        assert!(matches!(err, CoreError::NegativeBalance { .. }), "{err}");
+
+        let stored = s.receipt.get(&mut s.db, r).unwrap().unwrap();
+        assert_eq!(stored.parts, lines(&[(1, "10")]));
+        assert!(stored.posted);
+        assert_eq!(balance(&mut s, 1), q("4"));
+    }
+
+    #[test]
+    fn insert_with_bad_line_writes_nothing() {
+        let mut s = setup();
+        let bad = BTreeMap::from([(
+            "lines".to_owned(),
+            vec![
+                fields(&[("item", FieldValue::Int(1)), ("qty", dec("1"))]),
+                fields(&[("item", text("мука"))]),
+            ],
+        )]);
+        let header = fields(&[("store", text("main"))]);
+        assert!(s.receipt.insert(&mut s.db, &header, &bad).is_err());
+        assert_eq!(s.receipt.get(&mut s.db, 1).unwrap(), None);
+    }
+
+    #[test]
+    fn documents_are_numbered_by_kind() {
+        let mut s = setup();
+        let a = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        let b = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        let c = new_doc(&mut s, MovementKind::Issue, &[(1, "1")]);
+        let number = |s: &mut Setup, kind: &DocumentKind, id| {
+            kind.get(&mut s.db, id).unwrap().unwrap().number
+        };
+        let (receipt, issue) = (s.receipt.clone(), s.issue.clone());
+        assert_eq!(number(&mut s, &receipt, a), 1);
+        assert_eq!(number(&mut s, &receipt, b), 2);
+        assert_eq!(number(&mut s, &issue, c), 1);
+
+        // Неудачная запись номер не занимает.
+        let bad = BTreeMap::from([("lines".to_owned(), vec![fields(&[("item", text("мука"))])])]);
+        let header = fields(&[("store", text("main"))]);
+        assert!(s.receipt.insert(&mut s.db, &header, &bad).is_err());
+        let d = new_doc(&mut s, MovementKind::Receipt, &[(1, "1")]);
+        assert_eq!(number(&mut s, &receipt, d), 3);
+    }
+
+    #[test]
+    fn deletion_mark_and_posting() {
+        let mut s = setup();
+        let r = new_doc(&mut s, MovementKind::Receipt, &[(1, "10")]);
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+
+        let version = s.receipt.get(&mut s.db, r).unwrap().unwrap().version;
+        let err = s
+            .receipt
+            .mark_deleted(&mut s.db, r, version, true)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Invalid(_)), "{err}");
+
+        unpost(&mut s.db, &s.receipt, &s.stock, r).unwrap();
+        let version = s.receipt.get(&mut s.db, r).unwrap().unwrap().version;
+        let marked = s.receipt.mark_deleted(&mut s.db, r, version, true).unwrap();
+        assert!(marked.deleted);
+
+        let err = post_doc(&mut s, MovementKind::Receipt, r).unwrap_err();
+        assert!(matches!(err, CoreError::Invalid(_)), "{err}");
+        assert_eq!(balance(&mut s, 1), q("0"));
+
+        s.receipt
+            .mark_deleted(&mut s.db, r, marked.version, false)
+            .unwrap();
+        post_doc(&mut s, MovementKind::Receipt, r).unwrap();
+        assert_eq!(balance(&mut s, 1), q("10"));
+    }
+}

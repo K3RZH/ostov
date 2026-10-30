@@ -1,0 +1,19 @@
+[package]
+name = "ostov-store"
+description = "Слой хранения Ostov: драйверы и диалекты СУБД, тип Decimal, миграции"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+postgres = { version = "0.19.14", optional = true }
+rusqlite = { version = "0.41.1", features = ["bundled", "functions"], optional = true }
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:postgres"]

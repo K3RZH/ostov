@@ -1,12 +1,22 @@
 [workspace]
 resolver = "3"
-members = ["crates/ostov-ui"]
+members = ["crates/ostov-store", "crates/ostov-core", "crates/ostov-api", "crates/ostov-ui"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.99"
 publish = false
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# unwrap и expect на внешних данных запрещены (coding-rules §1.2); в тестах разрешены через clippy.toml.
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+
+[profile.release]
+# Переполнение в учётной арифметике — ошибка, а не тихое искажение (СТ-56). Цену замерить.
+overflow-checks = true
