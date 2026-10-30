@@ -19,6 +19,10 @@ export global ReceiptsData {
     in property <string> list-error;
     // Сообщение об ошибке действия над списком (пусто: нет).
     in property <string> notice;
+    // Ошибка записи или проведения документа над формой; при конфликте версий есть «Перечитать».
+    in property <string> form-error;
+    in property <bool> form-conflict;
+    callback form-reload();
     in property <int> milestone-step;
     in property <[GridMark]> marks;
     in property <int> sort-column: -1;
@@ -207,6 +211,27 @@ component ReceiptForm inherits VerticalLayout {
             clicked => { ReceiptsData.form-dock(); }
         }
         Button { text: "Закрыть"; kind: ButtonKind.text; clicked => { ReceiptsData.form-close(); } }
+    }
+    if ReceiptsData.form-error != "" : Rectangle {
+        border-radius: Shape.surface-radius;
+        background: Theme.danger-soft;
+        height: banner-row.preferred-height + 2 * Theme.space-8;
+        banner-row := HorizontalLayout {
+            padding: Theme.space-8;
+            spacing: Theme.space-12;
+            Text {
+                text: ReceiptsData.form-error;
+                font-size: Theme.font-body;
+                color: Theme.danger;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if ReceiptsData.form-conflict : Button {
+                text: "Перечитать";
+                clicked => { ReceiptsData.form-reload(); }
+            }
+        }
     }
     Rectangle {
         border-radius: Shape.surface-radius;

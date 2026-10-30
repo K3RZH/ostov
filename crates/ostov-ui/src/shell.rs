@@ -274,6 +274,15 @@ impl Shell {
         }
     }
 
+    /// Ядро назначило документу другой номер: вкладка следует за ним.
+    pub fn renumber_doc(&mut self, old: u32, new: u32) {
+        for tab in &mut self.tabs {
+            if tab.doc == Some(old) {
+                tab.doc = Some(new);
+            }
+        }
+    }
+
     pub fn doc_tab(&self, doc: u32) -> Option<usize> {
         self.tabs.iter().position(|tab| tab.doc == Some(doc))
     }

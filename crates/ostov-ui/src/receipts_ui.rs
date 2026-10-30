@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use ostov_api::{Engine, EngineResult, ListQuery, Row, Value};
+use ostov_api::{
+    Engine, EngineError, EngineResult, ErrorCode, Fields, ListQuery, ObjectData, PostAction, Row,
+    Saved, Value,
+};
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
@@ -53,8 +56,13 @@ struct Content {
 }
 
 struct DocState {
+    /// Идентификатор в ядре; у ещё не записанного документа 0.
+    id: i64,
+    /// Версия объекта в ядре: запись с устаревшей версией ядро отклонит.
+    version: i64,
     number: u32,
     posted: bool,
+    deleted: bool,
     /// Документ уже есть в списке (новый попадёт туда при записи).
     saved: bool,
     content: Content,
@@ -64,35 +72,57 @@ struct DocState {
 }
 
 impl DocState {
-    fn from_receipt(receipt: &Receipt) -> Self {
-        let content = Content {
-            supplier: receipt.supplier.clone(),
-            warehouse: receipt.warehouse.clone(),
-            date: receipts::date_text(receipt.date),
-            lines: receipt
-                .lines
-                .clone()
-                .unwrap_or_else(|| receipts::lines(receipt)),
+    /// Документ из ядра; без номера ядро документ не отдаёт.
+    fn from_object(data: &ObjectData, catalogs: &Catalogs) -> Option<Self> {
+        let title = |name: &str| match data.fields.get(name) {
+            Some(Value::Ref {
+                title: Some(title), ..
+            }) => title.clone(),
+            _ => String::new(),
         };
-        Self {
-            number: receipt.number,
-            posted: receipt.posted,
+        let content = Content {
+            supplier: title("supplier"),
+            warehouse: title("warehouse"),
+            date: match data.fields.get("date") {
+                Some(Value::Date(text)) => parse_iso_date(text).map(receipts::date_text),
+                _ => None,
+            }
+            .unwrap_or_default(),
+            lines: data
+                .tables
+                .get("lines")
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| line_from_fields(row, catalogs))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        Some(Self {
+            id: data.id?,
+            version: data.version,
+            number: u32::try_from(data.number?).ok()?,
+            posted: data.posted,
+            deleted: data.deleted,
             saved: true,
             baseline: content.clone(),
             content,
-        }
+        })
     }
 
-    fn new_document(number: u32) -> Self {
+    fn new_document(number: u32, warehouse: String) -> Self {
         let content = Content {
             supplier: String::new(),
-            warehouse: receipts::WAREHOUSES[0].to_owned(),
+            warehouse,
             date: receipts::date_text(NEW_DOC_DATE),
             lines: Vec::new(),
         };
         Self {
+            id: 0,
+            version: 0,
             number,
             posted: false,
+            deleted: false,
             saved: false,
             baseline: content.clone(),
             content,
@@ -138,10 +168,268 @@ struct State {
     marks: HashSet<u32>,
     /// Сколько показывать сообщение об ошибке действия над списком.
     notice_timer: slint::Timer,
-    warehouses: Vec<String>,
-    suppliers: Vec<String>,
-    /// Номенклатура: название и единица измерения.
-    goods: Vec<(String, String)>,
+    catalogs: Catalogs,
+}
+
+/// Справочники из ядра: `id` нужен для записи ссылок, название для выпадающих списков.
+#[derive(Default)]
+struct Catalogs {
+    warehouses: Vec<(i64, String)>,
+    suppliers: Vec<(i64, String)>,
+    /// Номенклатура: `id`, название и единица измерения.
+    goods: Vec<(i64, String, String)>,
+}
+
+impl Catalogs {
+    fn warehouse_names(&self) -> Vec<String> {
+        self.warehouses
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    fn supplier_names(&self) -> Vec<String> {
+        self.suppliers
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    fn goods_names(&self) -> Vec<String> {
+        self.goods.iter().map(|(_, name, _)| name.clone()).collect()
+    }
+
+    fn warehouse_id(&self, name: &str) -> Option<i64> {
+        id_of(&self.warehouses, name)
+    }
+
+    fn supplier_id(&self, name: &str) -> Option<i64> {
+        id_of(&self.suppliers, name)
+    }
+
+    fn goods_id(&self, name: &str) -> Option<i64> {
+        self.goods
+            .iter()
+            .find(|(_, good, _)| good == name)
+            .map(|(id, _, _)| *id)
+    }
+
+    /// Единица измерения товара по справочнику (нет в справочнике: «шт»).
+    fn unit_of(&self, name: &str) -> &str {
+        self.goods
+            .iter()
+            .find(|(_, good, _)| good == name)
+            .map_or("шт", |(_, _, unit)| unit.as_str())
+    }
+}
+
+fn id_of(items: &[(i64, String)], name: &str) -> Option<i64> {
+    items
+        .iter()
+        .find(|(_, item)| item == name)
+        .map(|(id, _)| *id)
+}
+
+/// Все элементы справочника ядра по названию: страницами, пока ядро отдаёт следующий ключ.
+fn read_catalog(engine: &dyn Engine, object: &str) -> EngineResult<Vec<Row>> {
+    let mut rows = Vec::new();
+    let mut after_key = None;
+    loop {
+        let page = engine.list(&ListQuery {
+            object: object.to_owned(),
+            order: Some("name".to_owned()),
+            descending: false,
+            search: None,
+            after_key: after_key.take(),
+            size: PAGE_SIZE,
+        })?;
+        rows.extend(page.rows);
+        match page.next_key {
+            Some(key) => after_key = Some(key),
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Строка табличной части из ядра; без товара строка не показывается.
+fn line_from_fields(row: &Fields, catalogs: &Catalogs) -> Option<Line> {
+    let Some(Value::Ref {
+        title: Some(name), ..
+    }) = row.get("goods")
+    else {
+        return None;
+    };
+    let decimal = |field: &str, target: u8| match row.get(field) {
+        Some(Value::Decimal { units, scale }) => rescale(*units, *scale, target),
+        _ => 0,
+    };
+    Some(Line {
+        unit: catalogs.unit_of(name).to_owned(),
+        name: name.clone(),
+        quantity_milli: decimal("qty", 3),
+        price: decimal("price", 2),
+        amount: decimal("amount", 2),
+    })
+}
+
+/// Документ интерфейса в объект ядра. Ошибка: текст для человека (поле, которое не разобрать).
+fn to_object(doc: &DocState, catalogs: &Catalogs) -> Result<ObjectData, String> {
+    let (year, month, day) =
+        receipts::parse_date(&doc.content.date).ok_or("Дата: введите в виде дд.мм.гггг.")?;
+    let reference = |name: &str, id: Option<i64>, what: &str| -> Result<Value, String> {
+        if name.is_empty() {
+            return Ok(Value::Null);
+        }
+        id.map(|id| Value::Ref { id, title: None })
+            .ok_or_else(|| format!("{what} «{name}» нет в справочнике."))
+    };
+    let mut fields = Fields::new();
+    fields.insert(
+        "date".to_owned(),
+        Value::Date(format!("{year:04}-{month:02}-{day:02}")),
+    );
+    fields.insert(
+        "supplier".to_owned(),
+        reference(
+            &doc.content.supplier,
+            catalogs.supplier_id(&doc.content.supplier),
+            "Поставщика",
+        )?,
+    );
+    fields.insert(
+        "warehouse".to_owned(),
+        reference(
+            &doc.content.warehouse,
+            catalogs.warehouse_id(&doc.content.warehouse),
+            "Склада",
+        )?,
+    );
+    let mut lines = Vec::new();
+    for line in &doc.content.lines {
+        let mut row = Fields::new();
+        row.insert(
+            "goods".to_owned(),
+            reference(&line.name, catalogs.goods_id(&line.name), "Товара")?,
+        );
+        row.insert(
+            "qty".to_owned(),
+            Value::Decimal {
+                units: line.quantity_milli,
+                scale: 3,
+            },
+        );
+        row.insert(
+            "price".to_owned(),
+            Value::Decimal {
+                units: line.price,
+                scale: 2,
+            },
+        );
+        lines.push(row);
+    }
+    Ok(ObjectData {
+        id: (doc.id != 0).then_some(doc.id),
+        version: doc.version,
+        number: doc.saved.then_some(i64::from(doc.number)),
+        posted: doc.posted,
+        deleted: doc.deleted,
+        fields,
+        tables: [("lines".to_owned(), lines)].into(),
+    })
+}
+
+/// Строка списка по документу, прочитанному из ядра.
+fn receipt_from_object(doc: &DocState, data: &ObjectData) -> Receipt {
+    Receipt {
+        id: doc.id,
+        number: doc.number,
+        date: parse_iso_date(match data.fields.get("date") {
+            Some(Value::Date(text)) => text,
+            _ => "",
+        })
+        .unwrap_or_default(),
+        supplier: doc.content.supplier.clone(),
+        warehouse: doc.content.warehouse.clone(),
+        amount: match data.fields.get("amount") {
+            Some(Value::Decimal { units, scale }) => kopecks(*units, *scale),
+            _ => doc.total(),
+        },
+        posted: doc.posted,
+        deleted: doc.deleted,
+    }
+}
+
+fn no_engine() -> EngineError {
+    EngineError::new(ErrorCode::Unavailable, "Нет подключения к ядру.")
+}
+
+/// Читает документ из ядра.
+fn fetch_doc(state: &State, id: i64) -> EngineResult<DocState> {
+    let engine = state.engine.as_ref().ok_or_else(no_engine)?;
+    let data = engine.get(OBJECT, id)?;
+    DocState::from_object(&data, &state.catalogs)
+        .ok_or_else(|| EngineError::new(ErrorCode::Internal, "Ядро вернуло документ без номера."))
+}
+
+/// Номер последнего документа в ядре: следующий новый получит номер на единицу больше.
+fn last_number(engine: &dyn Engine) -> EngineResult<u32> {
+    let page = engine.list(&ListQuery {
+        object: OBJECT.to_owned(),
+        order: Some("number".to_owned()),
+        descending: true,
+        search: None,
+        after_key: None,
+        size: 1,
+    })?;
+    Ok(page
+        .rows
+        .first()
+        .and_then(|row| match row.values.get("number") {
+            Some(Value::Int(number)) => u32::try_from(*number).ok(),
+            _ => None,
+        })
+        .unwrap_or(0))
+}
+
+/// Записывает новый элемент справочника в ядро, возвращает его `id`.
+fn create_catalog_item(
+    engine: &dyn Engine,
+    catalog: Catalog,
+    name: &str,
+    unit: &str,
+) -> EngineResult<i64> {
+    let mut fields = Fields::new();
+    fields.insert("name".to_owned(), Value::Text(name.to_owned()));
+    if catalog == Catalog::Goods {
+        fields.insert("unit".to_owned(), Value::Text(unit.to_owned()));
+    }
+    let item = ObjectData {
+        fields,
+        ..ObjectData::default()
+    };
+    Ok(engine.save(catalog.object(), &item, PostAction::Write)?.id)
+}
+
+fn load_catalogs(engine: &dyn Engine) -> EngineResult<Catalogs> {
+    let text = |row: &Row, field: &str| match row.values.get(field) {
+        Some(Value::Text(text)) => text.clone(),
+        _ => String::new(),
+    };
+    let named = |object: &str| -> EngineResult<Vec<(i64, String)>> {
+        Ok(read_catalog(engine, object)?
+            .iter()
+            .map(|row| (row.id, text(row, "name")))
+            .collect())
+    };
+    Ok(Catalogs {
+        warehouses: named("warehouses")?,
+        suppliers: named("suppliers")?,
+        goods: read_catalog(engine, "goods")?
+            .iter()
+            .map(|row| (row.id, text(row, "name"), text(row, "unit")))
+            .collect(),
+    })
 }
 
 /// Что помнит форма документа между действиями: открытый в ней документ, правимая строка,
@@ -240,6 +528,15 @@ impl Catalog {
         }
     }
 
+    /// Имя объекта в ядре.
+    fn object(self) -> &'static str {
+        match self {
+            Self::Warehouse => "warehouses",
+            Self::Supplier => "suppliers",
+            Self::Goods => "goods",
+        }
+    }
+
     fn dialog_title(self) -> &'static str {
         match self {
             Self::Warehouse => "Новый склад",
@@ -278,11 +575,16 @@ struct ListRequest {
 /// Число из десятичного значения ядра в копейках (деньги в ядре: 2 знака; другое
 /// приводится, лишние знаки отбрасываются).
 fn kopecks(units: i64, scale: u8) -> i64 {
+    rescale(units, scale, 2)
+}
+
+/// Десятичное значение ядра в целые доли с `target` знаками после запятой (лишние отбрасываются).
+fn rescale(units: i64, scale: u8, target: u8) -> i64 {
     let factor = |digits: u8| 10i64.checked_pow(u32::from(digits)).unwrap_or(i64::MAX);
-    match scale.cmp(&2) {
+    match scale.cmp(&target) {
         std::cmp::Ordering::Equal => units,
-        std::cmp::Ordering::Less => units.saturating_mul(factor(2 - scale)),
-        std::cmp::Ordering::Greater => units / factor(scale - 2),
+        std::cmp::Ordering::Less => units.saturating_mul(factor(target - scale)),
+        std::cmp::Ordering::Greater => units / factor(scale - target),
     }
 }
 
@@ -323,7 +625,6 @@ fn receipt_from_row(row: &Row) -> Option<Receipt> {
         },
         posted: int("posted").unwrap_or(0) != 0,
         deleted: int("deleted").unwrap_or(0) != 0,
-        lines: None,
     })
 }
 
@@ -354,10 +655,53 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
 }
 
 /// Ставит или снимает пометку удаления; версию берём свежей: действие идёт по строке списка.
-fn mark_deleted(engine: &dyn Engine, id: i64, deleted: bool) -> EngineResult<()> {
+fn mark_deleted(engine: &dyn Engine, id: i64, deleted: bool) -> EngineResult<Saved> {
     let version = engine.get(OBJECT, id)?.version;
-    engine.mark_deleted(OBJECT, id, version, deleted)?;
-    Ok(())
+    engine.mark_deleted(OBJECT, id, version, deleted)
+}
+
+/// «Провести» или «Отменить проведение» строки списка: команда уходит в ядро.
+fn post_in_core(
+    app: &AppWindow,
+    state_rc: &Rc<RefCell<State>>,
+    state: &State,
+    number: u32,
+    post: bool,
+) {
+    let (Some(engine), Some(receipt)) = (
+        state.engine.clone(),
+        state.all.iter().find(|r| r.number == number),
+    ) else {
+        return;
+    };
+    let id = receipt.id;
+    let (app, state_rc) = (app.as_weak(), state_rc.clone());
+    call_in_background(
+        move || {
+            if post {
+                engine.post(OBJECT, id)
+            } else {
+                engine.unpost(OBJECT, id)
+            }
+        },
+        move |result| {
+            let Some(app) = app.upgrade() else { return };
+            let mut state = state_rc.borrow_mut();
+            match result {
+                Ok(saved) => {
+                    show_notice(&app, &state, "");
+                    set_posted(&app, &mut state, number, post);
+                    if let Some(doc) = state.docs.get_mut(&number) {
+                        doc.version = saved.version;
+                    }
+                    if let Some(index) = state.all.iter().position(|r| r.number == number) {
+                        update_row(&app, &state, index);
+                    }
+                }
+                Err(error) => show_notice(&app, &state, &error.message),
+            }
+        },
+    );
 }
 
 /// Сообщение под списком; само пропадает через несколько секунд.
@@ -400,8 +744,12 @@ fn mark_deleted_in_core(
             let Some(app) = app.upgrade() else { return };
             let mut state = state_rc.borrow_mut();
             match result {
-                Ok(()) => {
+                Ok(saved) => {
                     show_notice(&app, &state, "");
+                    if let Some(doc) = state.docs.values_mut().find(|doc| doc.id == id) {
+                        doc.version = saved.version;
+                        doc.deleted = deleted;
+                    }
                     if let Some(index) = state.all.iter().position(|r| r.id == id) {
                         state.all[index].deleted = deleted;
                         update_row(&app, &state, index);
@@ -460,13 +808,21 @@ impl ReceiptsUi {
 
     /// Подключает ядро и читает список в фоне.
     pub fn attach(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
-        self.state.borrow_mut().engine = Some(engine);
+        self.connect(app, engine);
         reload(app, &self.state, false);
+    }
+
+    /// Запоминает ядро и читает справочники (их мало, поэтому на месте).
+    fn connect(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
+        let mut state = self.state.borrow_mut();
+        state.catalogs = load_catalogs(&*engine).unwrap_or_default();
+        state.engine = Some(engine);
+        publish_all(app, &state);
     }
 
     /// То же, но ждёт ответа на месте (снимки экранов и проверки).
     pub fn attach_blocking(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
-        self.state.borrow_mut().engine = Some(engine);
+        self.connect(app, engine);
         reload(app, &self.state, true);
     }
 
@@ -779,7 +1135,7 @@ fn render_lines(app: &AppWindow, doc: &DocState) {
                     (i + 1).to_string(),
                     line.name.clone(),
                     line.unit.clone(),
-                    receipts::quantity(line.quantity_tenths),
+                    receipts::quantity(line.quantity_milli),
                     receipts::money(line.price),
                     receipts::money(line.amount),
                 ],
@@ -819,6 +1175,8 @@ fn store_form(app: &AppWindow, state: &mut State) {
 fn fill_form(app: &AppWindow, doc: &DocState) {
     let data = app.global::<ReceiptsData>();
     data.set_form_title(doc.title().into());
+    data.set_form_error("".into());
+    data.set_form_conflict(false);
     data.set_form_posted(doc.posted);
     data.set_form_number(doc.number.to_string().into());
     let (year, month, day) = receipts::parse_date(&doc.content.date).unwrap_or(NEW_DOC_DATE);
@@ -846,10 +1204,9 @@ fn load_doc(app: &AppWindow, state: &mut State, number: u32) {
 /// Значения выпадающих списков (справочники) в окне `app`.
 fn publish_catalogs(app: &AppWindow, state: &State) {
     let data = app.global::<ReceiptsData>();
-    data.set_warehouses(strings(&state.warehouses));
-    data.set_suppliers(strings(&state.suppliers));
-    let goods: Vec<String> = state.goods.iter().map(|(name, _)| name.clone()).collect();
-    data.set_goods(strings(&goods));
+    data.set_warehouses(strings(&state.catalogs.warehouse_names()));
+    data.set_suppliers(strings(&state.catalogs.supplier_names()));
+    data.set_goods(strings(&state.catalogs.goods_names()));
 }
 
 /// То же во всех окнах: главном и отдельных.
@@ -932,9 +1289,23 @@ fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) 
     }
     before(app, state, shell);
     if !state.docs.contains_key(&number) {
-        let doc = match state.all.iter().find(|r| r.number == number) {
-            Some(receipt) => DocState::from_receipt(receipt),
-            None => DocState::new_document(number),
+        let doc = match state.all.iter().find(|r| r.number == number).map(|r| r.id) {
+            Some(id) => match fetch_doc(state, id) {
+                Ok(doc) => doc,
+                Err(error) => {
+                    show_notice(app, state, &error.message);
+                    return;
+                }
+            },
+            None => DocState::new_document(
+                number,
+                state
+                    .catalogs
+                    .warehouses
+                    .first()
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_default(),
+            ),
         };
         state.docs.insert(number, doc);
     }
@@ -948,52 +1319,82 @@ fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) 
     crate::app::refresh(app, shell);
 }
 
-/// Записывает открытый документ в список (новый добавляет); `post` ещё и проводит.
-fn save_loaded(app: &AppWindow, state: &mut State, shell: &mut Shell, post: bool) {
+/// Записывает открытый документ в ядро (`action`: просто записать, провести или снять проведение
+/// одной транзакцией) и перечитывает его: суммы и номер считает ядро.
+fn save_loaded(
+    app: &AppWindow,
+    state: &mut State,
+    shell: &mut Shell,
+    action: PostAction,
+) -> EngineResult<()> {
     store_form(app, state);
     let Some(number) = state.form.loaded else {
-        return;
+        return Ok(());
     };
-    let State { all, docs, .. } = &mut *state;
-    let Some(doc) = docs.get_mut(&number) else {
-        return;
+    let Some(doc) = state.docs.get(&number) else {
+        return Ok(());
     };
-    let date = receipts::parse_date(&doc.content.date);
-    let lines = doc.content.lines.clone();
-    let amount = doc.total();
-    doc.posted |= post;
-    if let Some(receipt) = all.iter_mut().find(|r| r.number == number) {
-        receipt.supplier = doc.content.supplier.clone();
-        receipt.warehouse = doc.content.warehouse.clone();
-        if let Some(date) = date {
-            receipt.date = date;
+    let engine = state.engine.clone().ok_or_else(no_engine)?;
+    let data = to_object(doc, &state.catalogs)
+        .map_err(|text| EngineError::new(ErrorCode::Validation, text))?;
+    let saved = engine.save(OBJECT, &data, action)?;
+    let fresh = engine.get(OBJECT, saved.id)?;
+    let loaded = DocState::from_object(&fresh, &state.catalogs).ok_or_else(|| {
+        EngineError::new(ErrorCode::Internal, "Ядро вернуло документ без номера.")
+    })?;
+    let row = receipt_from_object(&loaded, &fresh);
+
+    // Новому документу ядро могло дать номер, отличный от временного: вкладка следует за ним.
+    let mut key = number;
+    if loaded.number != number && !state.detached.contains_key(&number) {
+        if let Some(doc) = state.docs.remove(&number) {
+            state.docs.insert(loaded.number, doc);
         }
-        receipt.amount = amount;
-        receipt.lines = Some(lines);
-        receipt.posted = doc.posted;
-    } else {
-        all.insert(
-            0,
-            Receipt {
-                id: 0,
-                number,
-                date: date.unwrap_or(NEW_DOC_DATE),
-                supplier: doc.content.supplier.clone(),
-                warehouse: doc.content.warehouse.clone(),
-                amount,
-                posted: doc.posted,
-                deleted: false,
-                lines: Some(lines),
-            },
-        );
+        state.form.loaded = Some(loaded.number);
+        shell.renumber_doc(number, loaded.number);
+        key = loaded.number;
     }
-    doc.saved = true;
-    doc.baseline = doc.content.clone();
-    let title = doc.title();
-    if let Some(tab) = shell.doc_tab(number) {
+    state.next_number = state.next_number.max(loaded.number + 1);
+    let title = loaded.title();
+    state.docs.insert(key, loaded);
+    match state
+        .all
+        .iter()
+        .position(|r| r.id == row.id || r.number == number)
+    {
+        Some(index) => state.all[index] = row,
+        None => {
+            state.all.insert(0, row);
+            state.total_all += 1;
+        }
+    }
+    if let Some(tab) = shell.doc_tab(key) {
         shell.set_modified(tab, false);
     }
-    shell.set_doc_title(number, title);
+    shell.set_doc_title(key, title);
+    Ok(())
+}
+
+/// Показывает результат записи над формой: ошибка ядра или пусто.
+fn show_form_result(app: &AppWindow, result: &EngineResult<()>) {
+    let data = app.global::<ReceiptsData>();
+    match result {
+        Ok(()) => {
+            data.set_form_error("".into());
+            data.set_form_conflict(false);
+        }
+        Err(error) if error.code == ErrorCode::VersionConflict => {
+            data.set_form_error(
+                "Документ изменён другим пользователем. Нажмите «Перечитать»: правки в форме пропадут."
+                    .into(),
+            );
+            data.set_form_conflict(true);
+        }
+        Err(error) => {
+            data.set_form_error(error.message.as_str().into());
+            data.set_form_conflict(false);
+        }
+    }
 }
 
 /// Закрывает вкладку активного документа.
@@ -1135,7 +1536,7 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     data.set_line_name(line.as_ref().map_or("", |l| l.name.as_str()).into());
     data.set_line_quantity(
         line.as_ref()
-            .map_or(String::new(), |l| receipts::quantity(l.quantity_tenths))
+            .map_or(String::new(), |l| receipts::quantity(l.quantity_milli))
             .into(),
     );
     data.set_line_price(
@@ -1162,18 +1563,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         detached: HashMap::new(),
         marks: HashSet::new(),
         notice_timer: slint::Timer::default(),
-        warehouses: receipts::WAREHOUSES
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        suppliers: receipts::SUPPLIERS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        goods: receipts::GOODS
-            .iter()
-            .map(|(name, unit)| ((*name).to_owned(), (*unit).to_owned()))
-            .collect(),
+        catalogs: Catalogs::default(),
     }));
     let data = app.global::<ReceiptsData>();
     data.set_columns(ModelRc::new(VecModel::from(list_columns())));
@@ -1274,7 +1664,10 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
             };
             match id.as_str() {
                 "edit" => open_doc(&app, &mut state, &mut shell.borrow_mut(), number),
-                "post" | "unpost" => set_posted(&app, &mut state, number, id == "post"),
+                "post" | "unpost" => {
+                    post_in_core(&app, &state_rc, &state, number, id == "post");
+                    return;
+                }
                 "delete" => {
                     mark_deleted_in_core(&app, &state_rc, &state, number);
                     return;
@@ -1312,8 +1705,12 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         move || {
             let Some(app) = app.upgrade() else { return };
             let mut state = state.borrow_mut();
-            let number = state.next_number;
-            state.next_number += 1;
+            let number = state
+                .engine
+                .as_ref()
+                .and_then(|engine| last_number(&**engine).ok())
+                .map_or(state.next_number, |last| (last + 1).max(state.next_number));
+            state.next_number = number + 1;
             open_doc(&app, &mut state, &mut shell.borrow_mut(), number);
         }
     });
@@ -1377,13 +1774,17 @@ fn wire_form(
                 return;
             };
             let mut shell = shell.borrow_mut();
-            {
+            let result = {
                 let mut state = form_state(&state, target);
-                save_loaded(&app, &mut state, &mut shell, false);
-                if let Some(number) = state.form.loaded {
+                let result = save_loaded(&app, &mut state, &mut shell, PostAction::Write);
+                if result.is_ok()
+                    && let Some(number) = state.form.loaded
+                {
                     load_doc(&app, &mut state, number);
                 }
-            }
+                result
+            };
+            show_form_result(&app, &result);
             refresh_list(&main, &state.borrow());
             crate::app::refresh(&main, &shell);
         }
@@ -1396,18 +1797,43 @@ fn wire_form(
                 return;
             };
             let mut shell = shell.borrow_mut();
-            {
+            let result = {
                 let mut state = form_state(&state, target);
-                save_loaded(&app, &mut state, &mut shell, true);
-                if !close && let Some(number) = state.form.loaded {
+                let result = save_loaded(&app, &mut state, &mut shell, PostAction::Post);
+                if result.is_ok()
+                    && !close
+                    && let Some(number) = state.form.loaded
+                {
                     load_doc(&app, &mut state, number);
                 }
-            }
-            if close {
+                result
+            };
+            show_form_result(&app, &result);
+            if close && result.is_ok() {
                 close_form(&main, &mut state.borrow_mut(), &mut shell, target);
             }
             refresh_list(&main, &state.borrow());
             crate::app::refresh(&main, &shell);
+        }
+    });
+
+    // «Перечитать» при конфликте версий: форма берёт документ из ядра заново.
+    data.on_form_reload({
+        let (app, state) = (app.as_weak(), state.clone());
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            let mut state = form_state(&state, target);
+            let Some(number) = state.form.loaded else {
+                return;
+            };
+            let Some(id) = state.docs.get(&number).map(|doc| doc.id) else {
+                return;
+            };
+            let result = fetch_doc(&state, id).map(|doc| {
+                state.docs.insert(number, doc);
+                load_doc(&app, &mut state, number);
+            });
+            show_form_result(&app, &result);
         }
     });
 
@@ -1583,10 +2009,10 @@ fn wire_form(
             let data = app.global::<ReceiptsData>();
             let name = data.get_catalog_name().trim().to_owned();
             let unit = data.get_catalog_unit().trim().to_owned();
-            let existing: Vec<&String> = match catalog {
-                Catalog::Warehouse => state.warehouses.iter().collect(),
-                Catalog::Supplier => state.suppliers.iter().collect(),
-                Catalog::Goods => state.goods.iter().map(|(n, _)| n).collect(),
+            let existing = match catalog {
+                Catalog::Warehouse => state.catalogs.warehouse_names(),
+                Catalog::Supplier => state.catalogs.supplier_names(),
+                Catalog::Goods => state.catalogs.goods_names(),
             };
             let error = if name.is_empty() {
                 "Введите наименование."
@@ -1604,18 +2030,29 @@ fn wire_form(
                 data.set_catalog_error(error.into());
                 return;
             }
+            let Some(engine) = state.engine.clone() else {
+                data.set_catalog_error("Нет подключения к ядру.".into());
+                return;
+            };
+            let id = match create_catalog_item(&*engine, catalog, &name, &unit) {
+                Ok(id) => id,
+                Err(error) => {
+                    data.set_catalog_error(error.message.as_str().into());
+                    return;
+                }
+            };
             // Новый элемент появляется в списке и сразу выбирается в поле, из которого его добавляли.
             match catalog {
                 Catalog::Warehouse => {
-                    state.warehouses.push(name.clone());
+                    state.catalogs.warehouses.push((id, name.clone()));
                     data.set_form_warehouse(name.into());
                 }
                 Catalog::Supplier => {
-                    state.suppliers.push(name.clone());
+                    state.catalogs.suppliers.push((id, name.clone()));
                     data.set_form_supplier(name.into());
                 }
                 Catalog::Goods => {
-                    state.goods.push((name.clone(), unit));
+                    state.catalogs.goods.push((id, name.clone(), unit));
                     data.set_line_name(name.into());
                 }
             }
@@ -1632,7 +2069,7 @@ fn wire_form(
         let app = app.as_weak();
         move |text| {
             let Some(app) = app.upgrade() else { return };
-            let clean = receipts::clean_decimal(&text, 1);
+            let clean = receipts::clean_decimal(&text, 3);
             if clean != text.as_str() {
                 app.global::<ReceiptsData>().set_line_quantity(clean.into());
             }
@@ -1655,12 +2092,12 @@ fn wire_form(
             let Some(app) = app.upgrade() else { return };
             let data = app.global::<ReceiptsData>();
             let name = data.get_line_name().to_string();
-            let quantity = receipts::parse_decimal(&data.get_line_quantity(), 1).filter(|q| *q > 0);
+            let quantity = receipts::parse_decimal(&data.get_line_quantity(), 3).filter(|q| *q > 0);
             let price = receipts::parse_decimal(&data.get_line_price(), 2);
             let error = match (name.is_empty(), quantity, price) {
                 (true, _, _) => "Выберите товар из справочника.",
                 (_, None, _) => {
-                    "Количество: число больше нуля, не больше одного знака после запятой."
+                    "Количество: число больше нуля, не больше трёх знаков после запятой."
                 }
                 (_, _, None) => "Цена: число, не больше двух знаков после запятой.",
                 _ => "",
@@ -1673,12 +2110,7 @@ fn wire_form(
                 return;
             };
             let mut state = form_state(&state, target);
-            let unit = state
-                .goods
-                .iter()
-                .find(|(good, _)| *good == name)
-                .map_or("шт", |(_, unit)| unit.as_str())
-                .to_owned();
+            let unit = state.catalogs.unit_of(&name).to_owned();
             let line = Line::new(&name, &unit, quantity, price);
             let editing = state.form.editing_line;
             data.set_line_open(false);
@@ -1708,6 +2140,63 @@ mod tests {
     fn iso_date_is_parsed() {
         assert_eq!(parse_iso_date("2026-10-18"), Some((2026, 10, 18)));
         assert_eq!(parse_iso_date("18.10.2026"), None);
+    }
+
+    /// Документ из настоящего ядра: чтение, запись, конфликт версий, новый документ с проведением.
+    #[test]
+    fn document_goes_through_the_core() {
+        let path = std::env::temp_dir().join(format!("ostov-ui-doc-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let engine = ostov_core::LocalConnector
+            .create_demo(path.to_str().unwrap_or_default(), 50)
+            .unwrap();
+        let catalogs = load_catalogs(&*engine).unwrap();
+        assert!(!catalogs.suppliers.is_empty() && !catalogs.warehouses.is_empty());
+        assert!(!catalogs.goods.is_empty());
+
+        let (all, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        let draft = all.iter().find(|r| !r.posted && !r.deleted).unwrap();
+        let data = engine.get(OBJECT, draft.id).unwrap();
+        let doc = DocState::from_object(&data, &catalogs).unwrap();
+        assert_eq!(doc.number, draft.number);
+        assert!(!doc.content.lines.is_empty());
+        assert_eq!(doc.total(), draft.amount);
+
+        // Туда и обратно: запись проходит, повторная запись со старой версией отклоняется.
+        let back = to_object(&doc, &catalogs).unwrap();
+        let saved = engine.save(OBJECT, &back, PostAction::Write).unwrap();
+        assert!(saved.version > data.version);
+        let conflict = engine.save(OBJECT, &back, PostAction::Write).unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::VersionConflict);
+
+        // Новый документ: номер даёт ядро, суммы считает ядро, проведение одной записью.
+        let number = last_number(&*engine).unwrap() + 1;
+        let mut new = DocState::new_document(number, catalogs.warehouses[0].1.clone());
+        new.content.supplier = catalogs.suppliers[0].1.clone();
+        let (_, name, unit) = &catalogs.goods[0];
+        new.content.lines.push(Line::new(name, unit, 2500, 10_000));
+        let created = engine
+            .save(
+                OBJECT,
+                &to_object(&new, &catalogs).unwrap(),
+                PostAction::Post,
+            )
+            .unwrap();
+        assert_eq!(created.number, Some(i64::from(number)));
+        let fresh = engine.get(OBJECT, created.id).unwrap();
+        let loaded = DocState::from_object(&fresh, &catalogs).unwrap();
+        assert!(loaded.posted);
+        assert_eq!(loaded.content.lines[0].quantity_milli, 2500);
+        assert_eq!(loaded.content.lines[0].amount, 25_000);
+        assert_eq!(receipt_from_object(&loaded, &fresh).amount, 25_000);
+
+        // Незнакомый поставщик до ядра не доходит.
+        new.content.supplier = "Нет такого".to_owned();
+        assert!(to_object(&new, &catalogs).is_err());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
     }
 
     /// Список из настоящего ядра: все строки пришли, порядок и поиск делает ядро.

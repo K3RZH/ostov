@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "receipts" | "receipts-large" | "receipts-marks" | "receipts-sorted"
         | "receipts-notice" | "doc-window" | "doc-dock" | "doc-close" | "receipt-form"
-        | "tabs-many" => {
+        | "receipt-form-error" | "tabs-many" => {
             use std::cell::RefCell;
             use std::rc::Rc;
 
@@ -190,8 +190,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return save(&window, dark, &path);
             }
-            if screen == "receipt-form" {
+            if screen == "receipt-form" || screen == "receipt-form-error" {
                 window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
+            }
+            if screen == "receipt-form-error" {
+                // Конфликт версий: сообщение над формой и кнопка «Перечитать».
+                let data = window.global::<ostov_ui::ReceiptsData>();
+                data.set_form_error(
+                    "Документ изменён другим пользователем. Нажмите «Перечитать»: правки в форме пропадут."
+                        .into(),
+                );
+                data.set_form_conflict(true);
             }
             if screen == "tabs-many" {
                 // Много закреплённых вкладок: панель должна сжимать и прокручивать.

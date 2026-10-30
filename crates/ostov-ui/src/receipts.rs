@@ -1,5 +1,5 @@
-//! Данные списка «Поступления» для макета: примерные документы, сортировка, поиск.
-//! Настоящие данные придут из ядра (Engine API); логика сортировки и отбора останется.
+//! Данные списка «Поступления» и строки документа: типы интерфейса и форматирование.
+//! Сами данные, порядок и поиск дают ядро (Engine API).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
@@ -15,8 +15,6 @@ pub struct Receipt {
     pub posted: bool,
     /// Помечен на удаление: окончательно удаляется отдельным действием.
     pub deleted: bool,
-    /// Строки документа; `None`: ещё не открывали (покажем примерные).
-    pub lines: Option<Vec<Line>>,
 }
 
 /// Колонки списка в порядке показа.
@@ -39,18 +37,6 @@ pub const COLUMNS: [Column; 6] = [
     Column::Status,
 ];
 
-/// Справочник поставщиков (для выпадающего списка).
-pub const SUPPLIERS: [&str; 6] = [
-    "Мясной двор",
-    "Овощи оптом",
-    "Молочный комбинат",
-    "Бакалея-Центр",
-    "Рыбный ряд",
-    "Пекарня №3",
-];
-/// Перечисление складов (для выпадающего списка).
-pub const WAREHOUSES: [&str; 3] = ["Основной", "Кухня", "Бар"];
-
 impl Column {
     pub fn title(self) -> &'static str {
         match self {
@@ -62,37 +48,6 @@ impl Column {
             Self::Status => "Статус",
         }
     }
-}
-
-/// Примерные документы: детерминированный генератор, чтобы список не менялся между запусками.
-pub fn demo(count: u32) -> Vec<Receipt> {
-    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    (0..count)
-        .map(|i| {
-            let r = next();
-            Receipt {
-                id: i64::from(count - i),
-                number: count - i,
-                date: (
-                    2026,
-                    1 + u8::try_from((r >> 8) % 10).unwrap_or(0),
-                    1 + u8::try_from((r >> 16) % 28).unwrap_or(0),
-                ),
-                supplier: SUPPLIERS[usize::try_from((r >> 24) % 6).unwrap_or(0)].to_owned(),
-                warehouse: WAREHOUSES[usize::try_from((r >> 32) % 3).unwrap_or(0)].to_owned(),
-                amount: i64::try_from((r >> 40) % 9_000_000).unwrap_or(0) + 10_000,
-                posted: (r >> 60) % 4 != 0,
-                deleted: false,
-                lines: None,
-            }
-        })
-        .collect()
 }
 
 /// Сумма «12 345,60»: неразрывные пробелы между разрядами.
@@ -136,21 +91,6 @@ impl Receipt {
     }
 }
 
-/// Сортирует по колонке; при равенстве порядок сохраняется (сортировка устойчивая).
-pub fn sort(receipts: &mut [Receipt], column: Column, descending: bool) {
-    receipts.sort_by(|a, b| {
-        let order = match column {
-            Column::Number => a.number.cmp(&b.number),
-            Column::Date => a.date.cmp(&b.date),
-            Column::Supplier => a.supplier.cmp(&b.supplier),
-            Column::Warehouse => a.warehouse.cmp(&b.warehouse),
-            Column::Amount => a.amount.cmp(&b.amount),
-            Column::Status => a.posted.cmp(&b.posted),
-        };
-        if descending { order.reverse() } else { order }
-    });
-}
-
 /// Разбирает дату «дд.мм.гггг»; неверный текст: `None`.
 pub fn parse_date(text: &str) -> Option<(u16, u8, u8)> {
     let mut parts = text.trim().split('.');
@@ -168,91 +108,37 @@ pub fn parse_date(text: &str) -> Option<(u16, u8, u8)> {
 pub struct Line {
     pub name: String,
     pub unit: String,
-    /// Количество в десятых долях единицы.
-    pub quantity_tenths: i64,
+    /// Количество в тысячных долях единицы (ядро хранит три знака).
+    pub quantity_milli: i64,
     /// Цена за единицу в копейках.
     pub price: i64,
     /// Сумма строки в копейках.
     pub amount: i64,
 }
 
-/// Справочник номенклатуры: название и единица измерения.
-pub const GOODS: [(&str, &str); 8] = [
-    ("Мука пшеничная в/с", "кг"),
-    ("Говядина охлаждённая", "кг"),
-    ("Молоко 3,2%", "л"),
-    ("Сахар-песок", "кг"),
-    ("Масло сливочное 82%", "кг"),
-    ("Яйцо куриное С1", "шт"),
-    ("Картофель", "кг"),
-    ("Томаты", "кг"),
-];
-
-/// Примерные строки документа: детерминированные, сумма строк равна сумме документа.
-pub fn lines(receipt: &Receipt) -> Vec<Line> {
-    let count = 3 + usize::try_from(receipt.number % 4).unwrap_or(0);
-    let weights: Vec<i64> = (0..count)
-        .map(|i| {
-            1 + i64::from(
-                receipt
-                    .number
-                    .wrapping_mul(31)
-                    .wrapping_add(u32::try_from(i).unwrap_or(0) * 17)
-                    % 7,
-            )
-        })
-        .collect();
-    let total_weight: i64 = weights.iter().sum();
-    let mut left = receipt.amount;
-    weights
-        .iter()
-        .enumerate()
-        .map(|(i, weight)| {
-            let amount = if i + 1 == count {
-                left
-            } else {
-                receipt.amount * weight / total_weight
-            };
-            left -= amount;
-            let (name, unit) =
-                GOODS[(usize::try_from(receipt.number).unwrap_or(0) + i * 3) % GOODS.len()];
-            let quantity_tenths =
-                100 + i64::from(receipt.number % 9) * 70 + i64::try_from(i).unwrap_or(0) * 35;
-            Line {
-                name: name.to_owned(),
-                unit: unit.to_owned(),
-                quantity_tenths,
-                price: amount * 10 / quantity_tenths.max(1),
-                amount,
-            }
-        })
-        .collect()
-}
-
-/// Количество «12,5».
-pub fn quantity(tenths: i64) -> String {
-    format!("{},{}", tenths / 10, tenths % 10)
+/// Количество «12,5» или «12,125»: лишние нули в конце не показываем, один знак оставляем.
+pub fn quantity(milli: i64) -> String {
+    let fraction = format!("{:03}", milli % 1000);
+    let fraction = fraction.trim_end_matches('0');
+    format!(
+        "{},{}",
+        milli / 1000,
+        if fraction.is_empty() { "0" } else { fraction }
+    )
 }
 
 impl Line {
     /// Строка из введённых данных: сумма это цена, умноженная на количество.
-    pub fn new(name: &str, unit: &str, quantity_tenths: i64, price: i64) -> Self {
+    pub fn new(name: &str, unit: &str, quantity_milli: i64, price: i64) -> Self {
         Self {
             name: name.to_owned(),
             unit: unit.to_owned(),
-            quantity_tenths,
+            quantity_milli,
             price,
-            amount: price * quantity_tenths / 10,
+            // Половина вверх, как считает ядро.
+            amount: (price * quantity_milli + 500) / 1000,
         }
     }
-}
-
-/// Единица измерения товара по справочнику (нет в справочнике: «шт»).
-pub fn unit_of(name: &str) -> &'static str {
-    GOODS
-        .iter()
-        .find(|(good, _)| *good == name)
-        .map_or("шт", |(_, unit)| unit)
 }
 
 /// Разбирает неотрицательное число с запятой или точкой в целые доли: `scale` знаков после
