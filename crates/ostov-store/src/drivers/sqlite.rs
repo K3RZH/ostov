@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, params_from_iter};
@@ -54,6 +55,10 @@ impl SqliteDriver {
 }
 
 fn add_functions(conn: &Connection) -> Result<(), StoreError> {
+    // Иначе SQLite молча считает "несуществующую_колонку" строкой, и опечатка в имени
+    // даёт не ошибку, а неверный результат.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
     conn.create_scalar_function("ostov_lower", 1, flags, |ctx| {
         let text: Option<String> = ctx.get(0)?;
@@ -200,6 +205,15 @@ mod tests {
         let mut db = db();
         let err = db.query("SELECT 1.5 AS x", &[]).unwrap_err();
         assert!(matches!(err, StoreError::UnsupportedType(c) if c == "x"));
+    }
+
+    #[test]
+    fn unknown_quoted_column_is_an_error() {
+        let mut db = db();
+        assert!(
+            db.query("SELECT \"no_such_column\" FROM items", &[])
+                .is_err()
+        );
     }
 
     #[test]

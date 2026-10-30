@@ -480,3 +480,187 @@ fn panic_in_command_becomes_error_and_engine_keeps_working() {
     engine.save("receipt", &doc, PostAction::Write).unwrap();
     assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(1));
 }
+
+fn dated(mut data: ObjectData, date: &str) -> ObjectData {
+    data.fields.insert("date".into(), Value::Date(date.into()));
+    data
+}
+
+fn report(engine: &dyn Engine, name: &str, params: &[(&str, Value)]) -> Vec<Fields> {
+    let q = ostov_api::ReportQuery {
+        report: name.into(),
+        params: fields(params),
+        after_key: None,
+        size: 1000,
+    };
+    engine
+        .run_report(&q)
+        .unwrap()
+        .rows
+        .into_iter()
+        .map(|r| r.values)
+        .collect()
+}
+
+fn date(d: &str) -> Value {
+    Value::Date(d.into())
+}
+
+#[test]
+fn stock_reports_by_date_and_period() {
+    let base = Base::new("reports");
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    let sugar = add(&*engine, "goods", "Сахар");
+    let main = add(&*engine, "warehouses", "Основной");
+    let kitchen = add(&*engine, "warehouses", "Кухня");
+    let mill = add(&*engine, "suppliers", "Мельница");
+
+    let post = |data: ObjectData, object: &str| {
+        engine.save(object, &data, PostAction::Post).unwrap();
+    };
+    post(
+        dated(receipt(main, mill, &[(flour, 10_000, 100)]), "2026-01-10"),
+        "receipt",
+    );
+    post(dated(issue(main, flour, 3_000), "2026-01-20"), "issue");
+    post(
+        dated(receipt(main, mill, &[(flour, 5_000, 100)]), "2026-02-05"),
+        "receipt",
+    );
+    post(
+        dated(receipt(kitchen, mill, &[(sugar, 2_000, 100)]), "2026-02-06"),
+        "receipt",
+    );
+
+    // Обороты за февраль.
+    let feb = report(
+        &*engine,
+        "stock_turnover",
+        &[("from", date("2026-02-01")), ("to", date("2026-02-28"))],
+    );
+    assert_eq!(feb.len(), 2);
+    let flour_row = feb
+        .iter()
+        .find(|r| {
+            r["goods"]
+                == Value::Ref {
+                    id: flour,
+                    title: Some("Мука".into()),
+                }
+        })
+        .unwrap();
+    assert_eq!(
+        flour_row["warehouse"],
+        Value::Ref {
+            id: main,
+            title: Some("Основной".into())
+        }
+    );
+    assert_eq!(flour_row["qty_opening"], dec(7_000, 3));
+    assert_eq!(flour_row["qty_receipt"], dec(5_000, 3));
+    assert_eq!(flour_row["qty_issue"], dec(0, 3));
+    assert_eq!(flour_row["qty_closing"], dec(12_000, 3));
+
+    // Отбор по складу.
+    let only_main = report(
+        &*engine,
+        "stock_turnover",
+        &[
+            ("from", date("2026-02-01")),
+            ("to", date("2026-02-28")),
+            ("warehouse", refer(main)),
+        ],
+    );
+    assert_eq!(only_main.len(), 1);
+
+    // Остатки на 15 января и текущие.
+    let jan15 = report(&*engine, "stock_balance", &[("date", date("2026-01-15"))]);
+    assert_eq!(jan15.len(), 1);
+    assert_eq!(jan15[0]["qty"], dec(10_000, 3));
+    let now = report(&*engine, "stock_balance", &[]);
+    assert_eq!(now.len(), 2);
+
+    // Ошибки.
+    let bad = |params: &[(&str, Value)], name: &str| {
+        let q = ostov_api::ReportQuery {
+            report: name.into(),
+            params: fields(params),
+            after_key: None,
+            size: 100,
+        };
+        engine.run_report(&q).unwrap_err().code
+    };
+    assert_eq!(
+        bad(&[("from", date("2026-13-01"))], "stock_turnover"),
+        ErrorCode::Validation
+    );
+    assert_eq!(
+        bad(
+            &[("from", date("2026-03-01")), ("to", date("2026-02-01"))],
+            "stock_turnover"
+        ),
+        ErrorCode::Validation
+    );
+    assert_eq!(
+        bad(&[("color", text("red"))], "stock_balance"),
+        ErrorCode::Validation
+    );
+    assert_eq!(bad(&[], "sales"), ErrorCode::NotFound);
+}
+
+#[test]
+fn report_pages() {
+    let base = Base::new("report-pages");
+    let engine = LocalConnector.create_demo(&base.path, 200).unwrap();
+    let all = report(&*engine, "stock_balance", &[]);
+    assert!(all.len() > 5, "{}", all.len());
+
+    let mut q = ostov_api::ReportQuery {
+        report: "stock_balance".into(),
+        params: Fields::new(),
+        after_key: None,
+        size: 4,
+    };
+    let mut paged = Vec::new();
+    loop {
+        let page = engine.run_report(&q).unwrap();
+        assert_eq!(page.total, Some(all.len() as u64));
+        paged.extend(page.rows.into_iter().map(|r| r.values));
+        match page.next_key {
+            Some(key) => q.after_key = Some(key),
+            None => break,
+        }
+    }
+    assert_eq!(paged, all);
+}
+
+#[test]
+fn old_base_gets_dates_in_movements() {
+    use ostov_store::Driver;
+
+    let base = Base::new("upgrade");
+    let before = {
+        let engine = LocalConnector.create_demo(&base.path, 120).unwrap();
+        report(&*engine, "stock_balance", &[("date", date("2026-03-31"))])
+    };
+
+    // База «до отчётов»: в движениях нет колонки period.
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        db.execute("DROP INDEX stock__period", &[]).unwrap();
+        db.execute("ALTER TABLE stock DROP COLUMN period", &[])
+            .unwrap();
+    }
+
+    let engine = LocalConnector.open_local(&base.path, None).unwrap();
+    let after = report(&*engine, "stock_balance", &[("date", date("2026-03-31"))]);
+    assert_eq!(after, before);
+    drop(engine);
+
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let empty = db
+        .query("SELECT COUNT(*) FROM stock WHERE period IS NULL", &[])
+        .unwrap();
+    assert_eq!(empty, vec![vec![ostov_store::Value::Int(0)]]);
+}

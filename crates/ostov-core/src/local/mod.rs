@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
     Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage, NewAdmin,
-    ObjectData, PROTOCOL_VERSION, PostAction, Row, Saved,
+    ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
@@ -516,6 +516,128 @@ impl Engine for LocalEngine {
     fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         self.guarded("Unpost", || self.run_unpost(document, id))
     }
+
+    fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
+        self.guarded("RunReport", || self.run_run_report(query))
+    }
+}
+
+/// Отчёты по остаткам:
+/// - `stock_balance` — остатки на конец дня `date` (без даты — текущие);
+/// - `stock_turnover` — обороты с `from` по `to`: `<ресурс>_opening`, `_receipt`, `_issue`, `_closing`.
+///
+/// Отбор — параметры с именами измерений (`warehouse`, `goods`). Строки окнами по `size`.
+impl LocalEngine {
+    fn run_run_report(&self, q: &ReportQuery) -> EngineResult<ListPage> {
+        let stock = &self.config.stock;
+        let date = |name: &str| -> EngineResult<Option<String>> {
+            match q.params.get(name) {
+                None | Some(ostov_api::Value::Null) => Ok(None),
+                Some(ostov_api::Value::Date(d)) => Ok(Some(d.clone())),
+                Some(_) => Err(invalid(format!("параметр {name} должен быть датой"))),
+            }
+        };
+        let allowed = ["date", "from", "to"];
+        let mut filter = crate::Fields::new();
+        for (name, value) in &q.params {
+            if stock.dims().iter().any(|d| &d.name == name) {
+                if *value != ostov_api::Value::Null {
+                    filter.insert(name.clone(), convert::value_from_api(value)?);
+                }
+            } else if !allowed.contains(&name.as_str()) {
+                return Err(invalid(format!(
+                    "у отчёта {} нет параметра {name}",
+                    q.report
+                )));
+            }
+        }
+
+        let mut db = self.db();
+        let mut rows: Vec<ostov_api::Fields> = match q.report.as_str() {
+            "stock_balance" => stock
+                .balances(&mut **db, date("date")?.as_deref(), &filter)
+                .map_err(error)?
+                .into_iter()
+                .map(|(dims, amounts)| {
+                    let mut row = fields_to_api(&dims);
+                    for (name, value) in amounts {
+                        row.insert(name, decimal_to_api(value));
+                    }
+                    row
+                })
+                .collect(),
+            "stock_turnover" => stock
+                .turnovers(
+                    &mut **db,
+                    date("from")?.as_deref(),
+                    date("to")?.as_deref(),
+                    &filter,
+                )
+                .map_err(error)?
+                .into_iter()
+                .map(|t| {
+                    let mut row = fields_to_api(&t.dims);
+                    for (part, amounts) in [
+                        ("opening", t.opening),
+                        ("receipt", t.receipt),
+                        ("issue", t.issue),
+                        ("closing", t.closing),
+                    ] {
+                        for (name, value) in amounts {
+                            row.insert(format!("{name}_{part}"), decimal_to_api(value));
+                        }
+                    }
+                    row
+                })
+                .collect(),
+            other => {
+                return Err(EngineError::new(
+                    ErrorCode::NotFound,
+                    format!("нет отчёта {other}"),
+                ));
+            }
+        };
+
+        let total = rows.len();
+        let start: usize = match q.after_key.as_deref() {
+            None => 0,
+            Some(key) => key
+                .parse()
+                .map_err(|_| invalid("испорченный ключ страницы отчёта".into()))?,
+        };
+        let size = window(q.size);
+        if size == 0 || size > crate::list::MAX_WINDOW {
+            return Err(invalid(format!(
+                "размер окна должен быть от 1 до {}",
+                crate::list::MAX_WINDOW
+            )));
+        }
+        let end = start.saturating_add(size).min(total);
+        let mut page: Vec<ostov_api::Fields> = rows.drain(start.min(total)..end).collect();
+        let mut refs: Vec<&mut ostov_api::Fields> = page.iter_mut().collect();
+        self.fill_titles(&mut **db, stock.dims(), &mut refs)?;
+
+        Ok(ListPage {
+            rows: page
+                .into_iter()
+                .zip(start..)
+                .map(|(values, n)| Row {
+                    id: i64::try_from(n + 1).unwrap_or(i64::MAX),
+                    values,
+                })
+                .collect(),
+            next_key: (end < total).then(|| end.to_string()),
+            total: u64::try_from(total).ok(),
+            token: q.report.clone(),
+        })
+    }
+}
+
+fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
+    ostov_api::Value::Decimal {
+        units: d.units(),
+        scale: d.scale(),
+    }
 }
 
 /// Открывает и создаёт локальные базы (режим 1) с временной конфигурацией «Склад».
@@ -544,6 +666,7 @@ impl Connector for LocalConnector {
             ));
         }
         let config = warehouse().map_err(error)?;
+        in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
         ))
@@ -586,6 +709,19 @@ fn create_base(path: &str) -> EngineResult<(SqliteDriver, Config, File)> {
     })
     .map_err(error)?;
     Ok((db, config, lock))
+}
+
+/// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
+/// (их не было до отчётов по периодам) — берутся из поля `date` документов.
+fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    if config.stock.upgrade(db)? {
+        for (table, doc) in &config.documents {
+            if doc.kind.header().iter().any(|f| f.name == "date") {
+                config.stock.fill_periods(db, table, "date")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Системная блокировка `<база>.lock`: снимается сама, даже если программа упала.

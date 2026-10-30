@@ -19,7 +19,7 @@ pub fn post(
         let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
         check_not_deleted(&doc)?;
         let movements = rule(&doc)?;
-        register.replace(db, kind.table(), id, &movements)?;
+        register.replace_dated(db, kind.table(), id, period(&doc).as_deref(), &movements)?;
         kind.set_posted(db, id, true)
     })
 }
@@ -39,7 +39,13 @@ pub fn save(
         if post {
             check_not_deleted(&saved)?;
             let movements = rule(&saved)?;
-            register.replace(db, kind.table(), saved.id, &movements)?;
+            register.replace_dated(
+                db,
+                kind.table(),
+                saved.id,
+                period(&saved).as_deref(),
+                &movements,
+            )?;
             kind.set_posted(db, saved.id, true)?;
         } else if saved.posted {
             register.replace(db, kind.table(), saved.id, &[])?;
@@ -62,10 +68,24 @@ pub fn insert_and_post(
     in_transaction(db, |db| {
         let doc = kind.insert_in(db, header, parts)?;
         let movements = rule(&doc)?;
-        register.replace(db, kind.table(), doc.id, &movements)?;
+        register.replace_dated(
+            db,
+            kind.table(),
+            doc.id,
+            period(&doc).as_deref(),
+            &movements,
+        )?;
         kind.set_posted(db, doc.id, true)?;
         kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
     })
+}
+
+/// Дата документа для движений — поле `date`, если оно есть.
+pub(crate) fn period(doc: &Document) -> Option<String> {
+    match doc.header.get("date") {
+        Some(crate::FieldValue::Date(d)) => Some(d.clone()),
+        _ => None,
+    }
 }
 
 fn check_not_deleted(doc: &Document) -> Result<(), CoreError> {
