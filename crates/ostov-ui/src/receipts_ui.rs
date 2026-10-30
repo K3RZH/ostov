@@ -136,8 +136,8 @@ struct State {
     detached: HashMap<u32, Detached>,
     /// Номера документов со своей вехой пользователя (в списке они не зависят от сортировки).
     marks: HashSet<u32>,
-    /// Документ, удаление которого ждёт подтверждения.
-    pending_delete: Option<u32>,
+    /// Сколько показывать сообщение об ошибке действия над списком.
+    notice_timer: slint::Timer,
     warehouses: Vec<String>,
     suppliers: Vec<String>,
     /// Номенклатура: название и единица измерения.
@@ -353,6 +353,66 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
     Ok((receipts, total))
 }
 
+/// Ставит или снимает пометку удаления; версию берём свежей: действие идёт по строке списка.
+fn mark_deleted(engine: &dyn Engine, id: i64, deleted: bool) -> EngineResult<()> {
+    let version = engine.get(OBJECT, id)?.version;
+    engine.mark_deleted(OBJECT, id, version, deleted)?;
+    Ok(())
+}
+
+/// Сообщение под списком; само пропадает через несколько секунд.
+fn show_notice(app: &AppWindow, state: &State, text: &str) {
+    app.global::<ReceiptsData>().set_notice(text.into());
+    if text.is_empty() {
+        state.notice_timer.stop();
+        return;
+    }
+    let app = app.as_weak();
+    state.notice_timer.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_secs(6),
+        move || {
+            if let Some(app) = app.upgrade() {
+                app.global::<ReceiptsData>().set_notice("".into());
+            }
+        },
+    );
+}
+
+/// «Удалить» или «Восстановить» строку списка: команда уходит в ядро, строка меняется на месте.
+fn mark_deleted_in_core(
+    app: &AppWindow,
+    state_rc: &Rc<RefCell<State>>,
+    state: &State,
+    number: u32,
+) {
+    let (Some(engine), Some(receipt)) = (
+        state.engine.clone(),
+        state.all.iter().find(|r| r.number == number),
+    ) else {
+        return;
+    };
+    let (id, deleted) = (receipt.id, !receipt.deleted);
+    let (app, state_rc) = (app.as_weak(), state_rc.clone());
+    call_in_background(
+        move || mark_deleted(&*engine, id, deleted),
+        move |result| {
+            let Some(app) = app.upgrade() else { return };
+            let mut state = state_rc.borrow_mut();
+            match result {
+                Ok(()) => {
+                    show_notice(&app, &state, "");
+                    if let Some(index) = state.all.iter().position(|r| r.id == id) {
+                        state.all[index].deleted = deleted;
+                        update_row(&app, &state, index);
+                    }
+                }
+                Err(error) => show_notice(&app, &state, &error.message),
+            }
+        },
+    );
+}
+
 /// Точка входа для оболочки: перед и после любого действия с вкладками.
 #[derive(Clone)]
 pub struct ReceiptsUi {
@@ -448,23 +508,19 @@ fn list_menu(receipt: &Receipt, milestone: bool) -> Vec<MenuAction> {
             enabled: !receipt.deleted,
             ..item(post_id, post_label, post_icon)
         },
+        // Удаление в ядре это пометка (СТ-30); проведённый документ ядро не пометит.
         MenuAction {
             divider: true,
+            danger: !receipt.deleted,
             ..item(
-                "mark",
+                "delete",
                 if receipt.deleted {
-                    "Снять пометку удаления"
+                    "Восстановить"
                 } else {
-                    "Пометить на удаление"
+                    "Удалить"
                 },
-                "ban",
+                if receipt.deleted { "undo" } else { "trash" },
             )
-        },
-        // Проведённый документ сначала проводят обратно: удалить его напрямую нельзя.
-        MenuAction {
-            danger: true,
-            enabled: !receipt.posted,
-            ..item("delete", "Удалить…", "trash")
         },
         MenuAction {
             divider: true,
@@ -1105,7 +1161,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         form: FormCtx::default(),
         detached: HashMap::new(),
         marks: HashSet::new(),
-        pending_delete: None,
+        notice_timer: slint::Timer::default(),
         warehouses: receipts::WAREHOUSES
             .iter()
             .map(|s| (*s).to_owned())
@@ -1208,6 +1264,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
         move |row, id| {
             let Some(app) = app.upgrade() else { return };
+            let state_rc = state.clone();
             let mut state = state.borrow_mut();
             let Some(index) = usize::try_from(row).ok() else {
                 return;
@@ -1218,19 +1275,8 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
             match id.as_str() {
                 "edit" => open_doc(&app, &mut state, &mut shell.borrow_mut(), number),
                 "post" | "unpost" => set_posted(&app, &mut state, number, id == "post"),
-                "mark" => {
-                    if let Some(receipt) = state.all.iter_mut().find(|r| r.number == number) {
-                        receipt.deleted = !receipt.deleted;
-                    }
-                }
                 "delete" => {
-                    state.pending_delete = Some(number);
-                    let data = app.global::<ReceiptsData>();
-                    data.set_confirm_text(
-                        format!("Удалить поступление № {number} без возможности восстановления?")
-                            .into(),
-                    );
-                    data.set_confirm_open(true);
+                    mark_deleted_in_core(&app, &state_rc, &state, number);
                     return;
                 }
                 "milestone" => {
@@ -1244,31 +1290,6 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
                 _ => return,
             }
             update_row(&app, &state, index);
-        }
-    });
-
-    data.on_confirm_accepted({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
-        move || {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            app.global::<ReceiptsData>().set_confirm_open(false);
-            let Some(number) = state.pending_delete.take() else {
-                return;
-            };
-            state.all.retain(|r| r.number != number);
-            state.marks.remove(&number);
-            let mut shell = shell.borrow_mut();
-            if let Some(tab) = shell.doc_tab(number) {
-                shell.close_tab(tab);
-            }
-            if let Some(detached) = state.detached.remove(&number) {
-                retire(detached.window, true);
-            }
-            after(&app, &mut state, &shell);
-            app.global::<ReceiptsData>().set_selected_row(-1);
-            refresh_list(&app, &state);
-            crate::app::refresh(&app, &shell);
         }
     });
 
@@ -1748,6 +1769,18 @@ mod tests {
         };
         let (found, _) = fetch_receipts(&*engine, &by_number).unwrap();
         assert!(found.iter().any(|r| r.number == number));
+
+        let posted = all.iter().find(|r| r.posted).unwrap();
+        let error = mark_deleted(&*engine, posted.id, true).unwrap_err();
+        assert_eq!(error.code, ostov_api::ErrorCode::Validation);
+
+        let draft = all.iter().find(|r| !r.posted && !r.deleted).unwrap();
+        mark_deleted(&*engine, draft.id, true).unwrap();
+        let (rows, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        assert!(rows.iter().any(|r| r.id == draft.id && r.deleted));
+        mark_deleted(&*engine, draft.id, false).unwrap();
+        let (rows, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        assert!(rows.iter().any(|r| r.id == draft.id && !r.deleted));
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

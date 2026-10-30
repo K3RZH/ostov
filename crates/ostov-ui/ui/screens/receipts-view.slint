@@ -17,6 +17,8 @@ export global ReceiptsData {
     // Загрузка списка из ядра и текст ошибки (пусто: ошибки нет).
     in property <bool> list-loading;
     in property <string> list-error;
+    // Сообщение об ошибке действия над списком (пусто: нет).
+    in property <string> notice;
     in property <int> milestone-step;
     in property <[GridMark]> marks;
     in property <int> sort-column: -1;
@@ -145,10 +147,19 @@ component ReceiptList inherits VerticalLayout {
         sort-clicked(i) => { ReceiptsData.sort(i); }
         row-activated(i) => { ReceiptsData.open(i); }
     }
-    Text {
-        text: "Показано " + ReceiptsData.rows.length + " из " + ReceiptsData.total;
-        font-size: Theme.font-caption;
-        color: Theme.text-muted;
+    HorizontalLayout {
+        spacing: Theme.space-16;
+        Text {
+            text: "Показано " + ReceiptsData.rows.length + " из " + ReceiptsData.total;
+            font-size: Theme.font-caption;
+            color: Theme.text-muted;
+        }
+        if ReceiptsData.notice != "" : Text {
+            text: ReceiptsData.notice;
+            font-size: Theme.font-caption;
+            color: Theme.danger;
+            overflow: elide;
+        }
     }
 }
 
