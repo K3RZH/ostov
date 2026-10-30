@@ -200,10 +200,9 @@ pub fn set_tabs(window: &AppWindow, items: Vec<TabItem>) {
     window.set_tabs(ModelRc::new(VecModel::from(items)));
 }
 
-pub fn refresh(window: &AppWindow, shell: &Shell) {
-    let rows: Vec<NavRow> = shell
-        .nav_rows()
-        .into_iter()
+/// Строки дерева навигации в виде для Slint.
+pub fn nav_items(rows: Vec<crate::shell::NavRowData>) -> Vec<NavRow> {
+    rows.into_iter()
         .map(|row| NavRow {
             id: i32::try_from(row.id).unwrap_or_default(),
             title: row.title.into(),
@@ -214,9 +213,12 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
             selected: row.selected,
             favorite: row.favorite,
         })
-        .collect();
+        .collect()
+}
+
+pub fn refresh(window: &AppWindow, shell: &Shell) {
     let tabs = tab_items(shell.tabs());
-    window.set_nav(ModelRc::new(VecModel::from(rows)));
+    window.set_nav(ModelRc::new(VecModel::from(nav_items(shell.nav_rows()))));
     set_tabs(window, tabs);
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }
@@ -333,26 +335,23 @@ pub fn existing_database(server: bool, file: &str, address: &str, name: &str) ->
     }
 }
 
-/// Применяет настройки интерфейса: тема и скругление глобальные, окно тоже запоминает выбор.
-/// Готовит второй экземпляр окна как окно документа (страница 3): текущие настройки вида и размер.
-pub fn prepare_doc_window(window: &AppWindow) {
-    apply_settings(window, Settings::load());
-    window.set_page(3);
-    window
-        .window()
-        .set_size(slint::LogicalSize::new(1100.0, 760.0));
-}
+/// Размер дополнительного окна с вкладками.
+pub const HOST_SIZE: slint::LogicalSize = slint::LogicalSize {
+    width: 1000.0,
+    height: 700.0,
+};
 
 /// Дополнительное окно с вкладками (страница 4): те же настройки вида, что у главного.
 pub fn prepare_host_window(window: &AppWindow, settings: Settings) {
     apply_settings(window, settings);
     window.set_page(4);
-    window
-        .window()
-        .set_size(slint::LogicalSize::new(1000.0, 700.0));
+    window.window().set_size(HOST_SIZE);
 }
 
+/// Применяет настройки интерфейса: тема и скругление глобальные, окно тоже запоминает выбор.
 fn apply_settings(window: &AppWindow, settings: Settings) {
+    // Каждому окну нужны маска и разбор поля даты; настройки применяются к каждому окну.
+    crate::date_input::install(window);
     window.global::<Theme>().set_dark(settings.dark);
     window
         .global::<Shape>()
@@ -391,13 +390,13 @@ struct Session {
 
 /// Подключает ядро при первом входе в главную: пока открывается демо-база (любая выбранная
 /// база), дальше `open_local` по пути выбранной. Ошибку показывает список поступлений.
-fn attach_core(app: &AppWindow, receipts: &crate::receipts_ui::ReceiptsUi) {
+fn attach_core(receipts: &crate::receipts_ui::ReceiptsUi) {
     if receipts.is_attached() {
         return;
     }
     match crate::local_base::open_demo() {
-        Ok(engine) => receipts.attach(app, engine),
-        Err(error) => receipts.show_error(app, &error.message),
+        Ok(engine) => receipts.attach(engine),
+        Err(error) => receipts.show_error(&error.message),
     }
 }
 
@@ -427,6 +426,9 @@ pub fn wire_tabs(
             }
             receipts.after(&app, &shell);
             refresh(&app, &shell);
+            drop(shell);
+            // Группу могли раскрыть: дерево в дополнительных окнах то же.
+            windows.refresh_hosts();
         }
     });
 
@@ -488,12 +490,7 @@ pub fn wire_tabs(
     });
 
     app.on_tab_drag_ended({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
         move |tab, x, y, out| {
             let Some(app) = app.upgrade() else { return };
             let Some(tab) = index(tab) else { return };
@@ -502,41 +499,17 @@ pub fn wire_tabs(
             if windows.drag_ended(&app, &shell, main, tab, &app, x, y, out) || !out {
                 return;
             }
-            // Запасной путь (чистый Wayland, документы): окно создаётся при отпускании.
-            let kind = shell
-                .borrow()
-                .tabs()
-                .get(tab)
-                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
-            match kind {
-                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
-                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
-                _ => {}
-            }
+            // Запасной путь (чистый Wayland): окно создаётся при отпускании.
+            windows.detach_from_main(&app, &shell, tab);
         }
     });
 
     app.on_tab_detached({
-        let (app, shell, receipts, windows) = (
-            app.as_weak(),
-            shell.clone(),
-            receipts.clone(),
-            windows.clone(),
-        );
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
         move |tab| {
             let Some(app) = app.upgrade() else { return };
             let Some(tab) = index(tab) else { return };
-            let kind = shell
-                .borrow()
-                .tabs()
-                .get(tab)
-                .map(|t| (t.doc.is_some(), crate::windows::Windows::can_detach(t)));
-            match kind {
-                // Документ выносится прежним способом: его состояние привязано к окну документа.
-                Some((true, _)) => receipts.detach(&app, &mut shell.borrow_mut(), tab),
-                Some((false, true)) => windows.detach_from_main(&app, &shell, tab),
-                _ => {}
-            }
+            windows.detach_from_main(&app, &shell, tab);
         }
     });
     app.on_tab_closed({
@@ -565,7 +538,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     apply_settings(&app, Settings::load());
     let shell = Rc::new(RefCell::new(Shell::demo()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
-    let windows = crate::windows::Windows::new();
+    let windows = crate::windows::Windows::new(&receipts);
     let directory = Rc::new(RefCell::new(Directory::demo()));
     refresh_users(&app, &directory.borrow());
     app.set_roles(ModelRc::new(VecModel::from(
@@ -603,7 +576,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if kind == LoginKind::None {
                 *shell.borrow_mut() = open_main(&app, &db.name, db.server);
                 receipts.after(&app, &shell.borrow());
-                attach_core(&app, &receipts);
+                attach_core(&receipts);
                 show_page(&app, PAGE_MAIN);
                 return;
             }
@@ -659,7 +632,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             }
             *shell.borrow_mut() = open_main(&app, &name, server);
             receipts.after(&app, &shell.borrow());
-            attach_core(&app, &receipts);
+            attach_core(&receipts);
             app.set_password("".into());
             app.set_repeat("".into());
             show_page(&app, PAGE_MAIN);
@@ -734,7 +707,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_theme_chosen({
-        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |dark| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -742,14 +715,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
-            receipts.each_detached(|window| apply_settings(window, settings));
             windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_radius_chosen({
-        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |radius| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -757,14 +729,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
-            receipts.each_detached(|window| apply_settings(window, settings));
             windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_density_chosen({
-        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |density| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -772,14 +743,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
-            receipts.each_detached(|window| apply_settings(window, settings));
             windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_font_chosen({
-        let (app, receipts, windows) = (app.as_weak(), receipts.clone(), windows.clone());
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |font| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -787,7 +757,6 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
-            receipts.each_detached(|window| apply_settings(window, settings));
             windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
@@ -834,44 +803,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    app.on_user_toggle({
-        let app = app.as_weak();
-        let directory = directory.clone();
-        move |row| {
-            let Some(app) = app.upgrade() else { return };
-            let result = index(row).map_or(Ok(()), |i| directory.borrow_mut().toggle(i));
-            app.set_user_message(result.err().unwrap_or_default().into());
-            refresh_users(&app, &directory.borrow());
-        }
-    });
-
-    app.on_user_add_confirmed({
-        let app = app.as_weak();
-        let directory = directory.clone();
-        move || {
-            let Some(app) = app.upgrade() else { return };
-            let role = index(app.get_nu_role())
-                .and_then(|i| ROLES.get(i).copied())
-                .unwrap_or(ROLES[1]);
-            let result = directory.borrow_mut().add(
-                app.get_nu_login().as_str(),
-                app.get_nu_name().as_str(),
-                role,
-            );
-            match result {
-                Err(message) => app.set_user_error(message.into()),
-                Ok(()) => {
-                    refresh_users(&app, &directory.borrow());
-                    app.set_user_message("".into());
-                    app.set_user_error("".into());
-                    app.set_nu_login("".into());
-                    app.set_nu_name("".into());
-                    app.set_nu_role(1);
-                    // Пароль пользователя здесь не храним: его задаст ядро (хэш Argon2id).
-                    app.set_nu_password("".into());
-                    app.set_nu_repeat("".into());
-                    app.set_adding_user(false);
-                }
+    wire_users(&app, &app, &directory, &windows);
+    windows.on_host_created({
+        let (main, directory, windows) = (app.as_weak(), directory.clone(), windows.clone());
+        move |window| {
+            if let Some(main) = main.upgrade() {
+                refresh_users(window, &directory.borrow());
+                window.set_roles(main.get_roles());
+                wire_users(window, &main, &directory, &windows);
             }
         }
     });
@@ -880,6 +819,67 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     app.show()?;
     slint::run_event_loop_until_quit()
+}
+
+/// Подключает «Пользователи и роли» к окну `window`. Справочник один: изменение видно во всех окнах.
+fn wire_users(
+    window: &AppWindow,
+    main: &AppWindow,
+    directory: &Rc<RefCell<Directory>>,
+    windows: &crate::windows::Windows,
+) {
+    let show_all = {
+        let (main, windows, directory) = (main.as_weak(), windows.clone(), directory.clone());
+        move || {
+            if let Some(main) = main.upgrade() {
+                refresh_users(&main, &directory.borrow());
+            }
+            windows.each(|host| refresh_users(host, &directory.borrow()));
+        }
+    };
+    window.on_user_toggle({
+        let (window, directory, show_all) = (window.as_weak(), directory.clone(), show_all.clone());
+        move |row| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let result = index(row).map_or(Ok(()), |i| directory.borrow_mut().toggle(i));
+            window.set_user_message(result.err().unwrap_or_default().into());
+            show_all();
+        }
+    });
+
+    window.on_user_add_confirmed({
+        let (window, directory) = (window.as_weak(), directory.clone());
+        move || {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let role = index(window.get_nu_role())
+                .and_then(|i| ROLES.get(i).copied())
+                .unwrap_or(ROLES[1]);
+            let result = directory.borrow_mut().add(
+                window.get_nu_login().as_str(),
+                window.get_nu_name().as_str(),
+                role,
+            );
+            match result {
+                Err(message) => window.set_user_error(message.into()),
+                Ok(()) => {
+                    show_all();
+                    window.set_user_message("".into());
+                    window.set_user_error("".into());
+                    window.set_nu_login("".into());
+                    window.set_nu_name("".into());
+                    window.set_nu_role(1);
+                    // Пароль пользователя здесь не храним: его задаст ядро (хэш Argon2id).
+                    window.set_nu_password("".into());
+                    window.set_nu_repeat("".into());
+                    window.set_adding_user(false);
+                }
+            }
+        }
+    });
 }
 
 fn quit_on_close() -> slint::CloseRequestResponse {

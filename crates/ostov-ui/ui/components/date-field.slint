@@ -27,32 +27,6 @@ global DateMath {
     }
 }
 
-// Часть даты в поле (день, месяц или год): нажатие открывает редактор именно этой части.
-component Segment inherits Rectangle {
-    in property <string> text;
-    in property <bool> active;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    background: root.active ? Theme.accent-soft : touch.has-hover && root.enabled ? Theme.surface-alt : transparent;
-    border-radius: Shape.control-radius - 2px;
-    width: label.preferred-width + 6px;
-    height: 24px;
-
-    label := Text {
-        text: root.text;
-        font-size: Theme.font-body;
-        color: !root.enabled ? Theme.disabled-text : root.active ? Theme.accent-text : Theme.text;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
 // Ячейка дня в календаре.
 component DayCell inherits Rectangle {
     in property <int> number;
@@ -90,9 +64,29 @@ export component DatePanel inherits Rectangle {
     in-out property <int> year: 2026;
     // Что сейчас выбирают: 0 день, 1 месяц, 2 год.
     in-out property <int> mode: 0;
+    // Порядок заполнения: что выбрали первым и вторым (-1: ещё нет). Порядок определяет начало:
+    // день → месяц → год, год → месяц → день, месяц → день → год; после третьей части окно
+    // закрывается.
+    in-out property <int> first: -1;
+    in-out property <int> second: -1;
     callback edited();
-    // День выбран окончательно: владелец закрывает панель.
-    callback day-picked();
+    // Все три части выбраны: владелец закрывает панель.
+    callback completed();
+
+    // Часть `part` (0 день, 1 месяц, 2 год) выбрана окончательно (клик по дню, выбор месяца или года).
+    function part-picked(part: int) {
+        if (root.first == -1) {
+            root.first = part;
+            // После дня и после года идёт месяц, после месяца день.
+            root.mode = part == 1 ? 0 : 1;
+        } else if (root.second == -1 && part != root.first) {
+            root.second = part;
+            // Остаётся третья часть (0 + 1 + 2 = 3).
+            root.mode = 3 - root.first - part;
+        } else if (part != root.first && part != root.second) {
+            root.completed();
+        }
+    }
 
     border-radius: Shape.control-radius;
     border-width: 1px;
@@ -117,8 +111,8 @@ export component DatePanel inherits Rectangle {
     }
 
 
-    // Шапка: стрелки листают месяц (только в режиме дней), название месяца и год
-    // переключают режим; повторное нажатие возвращает к дням.
+    // Шапка: стрелки листают месяц (только в режиме дней), число, название месяца и год
+    // переключают режим, не закрывая окно; повторное нажатие на месяц или год возвращает к дням.
     HorizontalLayout {
         x: 8px;
         y: 8px;
@@ -139,6 +133,23 @@ export component DatePanel inherits Rectangle {
                 enabled: root.mode == 0;
                 mouse-cursor: MouseCursor.pointer;
                 clicked => { root.shift-month(-1); }
+            }
+        }
+        Rectangle {
+            width: 40px;
+            background: day-touch.has-hover || root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: DateMath.two(root.day);
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 0 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            day-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = 0; }
             }
         }
         Rectangle {
@@ -227,7 +238,7 @@ export component DatePanel inherits Rectangle {
                 clicked => {
                     root.day = self.number;
                     root.edited();
-                    root.day-picked();
+                    root.part-picked(0);
                 }
             }
         }
@@ -238,7 +249,7 @@ export component DatePanel inherits Rectangle {
             moved(target) => { root.set-month(root.year, target + 1); }
             picked(target) => {
                 root.set-month(root.year, target + 1);
-                root.mode = 0;
+                root.part-picked(1);
             }
         }
 
@@ -249,16 +260,26 @@ export component DatePanel inherits Rectangle {
             moved(target) => { root.set-month(root.year-min + target, root.month); }
             picked(target) => {
                 root.set-month(root.year-min + target, root.month);
-                root.mode = 0;
+                root.part-picked(2);
             }
         }
     }
 }
 
-// Поле даты. День, месяц и год нажимаются отдельно, и под полем меняется меню выбора:
-// день это обычный календарь (месяц листается стрелками), месяц и год это вертикальные
-// списки, гаснущие к краям и не прокручиваемые бесконечно. Значения лежат числами:
-// строку «дд.мм.гггг» собирает владелец.
+// Маска и разбор даты, введённой одной строкой, считает Rust (src/date_input.rs): в Slint нет
+// работы с подстроками. `parts` отдаёт [день, месяц, год] для полной существующей даты, иначе пусто.
+export global DateInput {
+    pure callback mask(string) -> string;
+    pure callback parts(string) -> [int];
+    // Текст поля после нажатия клавиши (цифра, Backspace) при открытом календаре.
+    pure callback apply-key(string, string) -> string;
+}
+
+// Поле даты. Дата вводится одной строкой «дд.мм.гггг» (цифры, точки ставятся сами). Календарь
+// открывает иконка или двойной клик по полю; пока он открыт, ввод в поле продолжает работать и
+// календарь подстраивается. В календаре день это обычная сетка (месяц листается стрелками),
+// месяц и год это вертикальные списки; между ними можно переключаться, не закрывая меню.
+// Значения лежат числами: строку «дд.мм.гггг» собирает владелец.
 export component DateField inherits VerticalLayout {
     in property <string> label;
     in property <bool> enabled: true;
@@ -270,13 +291,53 @@ export component DateField inherits VerticalLayout {
     callback edited();
 
     private property <int> mode: 0;
+    private property <string> text: root.current();
+    // Календарь открылся от набора: набранное не сбрасывается, когда поле теряет фокус.
+    private property <bool> keep-text;
+    private property <int> seq-first: -1;
+    private property <int> seq-second: -1;
 
     spacing: Theme.space-4;
 
-    function open-with(new-mode: int) {
-        root.mode = new-mode;
+    pure function current() -> string {
+        DateMath.two(root.day) + "." + DateMath.two(root.month) + "." + root.year
+    }
+    function show-current() {
+        root.text = root.current();
+    }
+    // Полная существующая дата сразу попадает в поле и в календарь. `true`: дата принята.
+    function commit-text() -> bool {
+        let parts = DateInput.parts(root.text);
+        if (parts.length == 3 && parts[2] >= root.year-min && parts[2] <= root.year-max) {
+            root.day = parts[0];
+            root.month = parts[1];
+            root.year = parts[2];
+            root.edited();
+            return true;
+        }
+        return false;
+    }
+    // Календарь идёт за набором: после дня показывает месяцы, после месяца годы, а когда дата
+    // введена целиком, закрывается.
+    function typed-progress() {
+        let count = root.text.character-count;
+        let digits = count <= 2 ? count : count <= 5 ? count - 1 : count - 2;
+        root.seq-first = digits >= 2 ? 0 : -1;
+        root.seq-second = digits >= 4 ? 1 : -1;
+        root.mode = digits >= 4 ? 2 : digits >= 2 ? 1 : 0;
+        if (digits >= 8 && root.commit-text()) {
+            popup.close();
+        }
+    }
+    function open-calendar() {
+        root.mode = 0;
+        root.seq-first = -1;
+        root.seq-second = -1;
         popup.show();
     }
+    changed day => { root.show-current(); }
+    changed month => { root.show-current(); }
+    changed year => { root.show-current(); }
 
     if root.label != "" : Text {
         text: root.label;
@@ -289,28 +350,83 @@ export component DateField inherits VerticalLayout {
         height: Theme.control-md;
         border-radius: Shape.control-radius;
         border-width: 1px;
-        border-color: !root.enabled ? transparent : Theme.border-strong;
+        border-color: !root.enabled ? transparent : input.has-focus ? Theme.accent : Theme.border-strong;
         background: root.enabled ? Theme.surface : Theme.disabled-bg;
 
         HorizontalLayout {
-            padding-left: Theme.space-8;
-            padding-right: Theme.space-12;
+            padding-left: Theme.space-12;
+            padding-right: Theme.space-8;
             spacing: Theme.space-8;
-            VerticalLayout {
-                alignment: center;
-                HorizontalLayout {
-                    Segment { text: DateMath.two(root.day); enabled: root.enabled; clicked => { root.open-with(0); } }
-                    Text { text: "."; font-size: Theme.font-body; color: Theme.text-muted; vertical-alignment: center; }
-                    Segment { text: DateMath.two(root.month); enabled: root.enabled; clicked => { root.open-with(1); } }
-                    Text { text: "."; font-size: Theme.font-body; color: Theme.text-muted; vertical-alignment: center; }
-                    Segment { text: "" + root.year; enabled: root.enabled; clicked => { root.open-with(2); } }
+            input := TextInput {
+                text <=> root.text;
+                enabled: root.enabled;
+                single-line: true;
+                font-size: Theme.font-body;
+                color: root.enabled ? Theme.text : Theme.disabled-text;
+                vertical-alignment: center;
+                selection-background-color: Theme.accent;
+                horizontal-stretch: 1;
+                edited => {
+                    let masked = DateInput.mask(self.text);
+                    if (masked != self.text) {
+                        self.text = masked;
+                        // После точек курсор остаётся в конце строки.
+                        self.set-selection-offsets(self.text.character-count, self.text.character-count);
+                    }
+                    root.commit-text();
+                    // Ввод сразу открывает календарь: дальше цифры идут через него.
+                    root.keep-text = true;
+                    root.open-calendar();
+                    root.typed-progress();
+                }
+                accepted => { root.show-current(); }
+                changed has-focus => {
+                    if (self.has-focus) {
+                        self.select-all();
+                    } else if (root.keep-text) {
+                        root.keep-text = false;
+                    } else {
+                        // Недописанный или несуществующий ввод возвращается к текущей дате.
+                        root.show-current();
+                    }
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
+            // Иконка календаря: без подсветки, внутри границ поля.
             VerticalLayout {
                 alignment: center;
-                Icon { name: "calendar"; tint: Theme.text-muted; width: 16px; height: 16px; }
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    Icon {
+                        name: "calendar";
+                        tint: Theme.text-muted;
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
             }
+        }
+
+        // Двойной клик по полю открывает календарь; один клик ставит курсор в поле.
+        TouchArea {
+            x: 0px;
+            y: 0px;
+            width: parent.width - 32px;
+            height: parent.height;
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.text;
+            clicked => { input.focus(); }
+            double-clicked => { root.open-calendar(); }
+        }
+        // Иконка календаря открывает календарь одним щелчком.
+        TouchArea {
+            x: parent.width - 32px;
+            y: 0px;
+            width: 32px;
+            height: parent.height;
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.open-calendar(); }
         }
 
         popup := PopupWindow {
@@ -320,6 +436,21 @@ export component DateField inherits VerticalLayout {
             height: 292px;
             close-policy: PopupClosePolicy.close-on-click-outside;
 
+            // Календарь забирает клавиатуру у поля: набор цифр и Backspace пересылаются в поле,
+            // Enter и Escape закрывают календарь.
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if (event.text == Key.Return || event.text == Key.Escape) {
+                        popup.close();
+                        return accept;
+                    }
+                    root.text = DateInput.apply-key(root.text, event.text);
+                    root.commit-text();
+                    root.typed-progress();
+                    accept
+                }
+            }
             DatePanel {
                 year-min: root.year-min;
                 year-max: root.year-max;
@@ -327,8 +458,10 @@ export component DateField inherits VerticalLayout {
                 month <=> root.month;
                 year <=> root.year;
                 mode <=> root.mode;
+                first <=> root.seq-first;
+                second <=> root.seq-second;
                 edited => { root.edited(); }
-                day-picked => { popup.close(); }
+                completed => { popup.close(); }
             }
         }
     }

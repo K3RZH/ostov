@@ -1,18 +1,18 @@
 import { Theme } from "theme.slint";
 import { StartPage, RecentDb } from "screens/start-page.slint";
 import { LoginPage } from "screens/login-page.slint";
-import { MainPage, NavRow } from "screens/main-page.slint";
+import { MainPage } from "screens/main-page.slint";
+import { NavPanel, NavRow } from "components/nav-panel.slint";
 import { TabHost, TabItem } from "screens/tab-host.slint";
 import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
-import { ReceiptFormView } from "screens/receipts-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 
-// Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 3 это
-// отдельное окно документа, вынесенного из вкладки: только форма, остальное не создаётся.
+// Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
+// дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
 // Раньше было три окна, которые прятали и показывали по очереди: на GNOME/Wayland после этого
 // оставались невидимые окна. Размер окна при смене страницы задаёт Rust (src/app.rs).
 export component AppWindow inherits Window {
@@ -120,15 +120,15 @@ export component AppWindow inherits Window {
     out property <length> strip-tab-width: root.page == 4 ? host-tabs.strip-tab-width : main-page.strip-tab-width;
     // Страница 4 (дополнительное окно с вкладками): вернуть вкладку в главное окно.
     callback tab-returned(int);
-    // Страница 3 (окно документа): заголовок окна.
+    // Страница 4: заголовок окна.
     in property <string> doc-title;
 
     // Своя панель окна вместо системной: на главной странице её роль играет шапка, на остальных
     // тонкая полоса `WindowBar`. Края окна тянутся за `resize-border-width`.
     no-frame: true;
     resize-border-width: 6px;
-    // Окно-копия вкладки на время перетаскивания: поверх остальных, иначе GNOME прячет новое окно
-    // за активным.
+    // Окно идёт за указателем: поверх остальных (иначе GNOME прячет новое окно за активным)
+    // и меньше обычного (см. DRAG_SIZE в src/windows.rs).
     in property <bool> keep-on-top;
     always-on-top: root.keep-on-top;
     // Вместо «призрака» вкладки за указателем идёт настоящее окно.
@@ -137,13 +137,12 @@ export component AppWindow inherits Window {
 
     title: root.page == 0 ? "Ostov — Выбор базы"
         : root.page == 1 ? "Ostov — " + login-page.heading
-        : root.page == 3 ? root.doc-title + " — Ostov"
         : root.page == 4 ? root.doc-title + " — Ostov"
         : "Ostov — " + main-page.base-name;
     preferred-width: 1200px;
     preferred-height: 760px;
-    min-width: root.page == 2 ? 1000px : root.page == 3 || root.page == 4 ? 760px : 960px;
-    min-height: root.page == 0 ? 720px : root.page == 3 || root.page == 4 ? 520px : 600px;
+    min-width: root.keep-on-top ? 480px : root.page == 2 ? 1000px : root.page == 4 ? 760px : 960px;
+    min-height: root.keep-on-top ? 320px : root.page == 0 ? 720px : root.page == 4 ? 520px : 600px;
     default-font-family: "Open Sans";
     background: Theme.bg;
 
@@ -188,11 +187,23 @@ export component AppWindow inherits Window {
         user-add-clicked => { root.adding-user = true; }
     }
 
-    host-tabs := TabHost {
+    // Дополнительное окно: навигация (свёрнута до значков, пока не развернули) и вкладки. Пункт
+    // навигации открывает вкладку в этом же окне.
+    in-out property <bool> host-nav-collapsed: true;
+    host-nav := NavPanel {
         visible: root.page == 4;
         x: 0px;
         y: root.chrome-height;
-        width: root.width;
+        height: root.height - root.chrome-height;
+        rows: root.nav;
+        collapsed <=> root.host-nav-collapsed;
+        clicked(id) => { root.nav-clicked(id); }
+    }
+    host-tabs := TabHost {
+        visible: root.page == 4;
+        x: host-nav.width;
+        y: root.chrome-height;
+        width: root.width - host-nav.width;
         height: root.height - root.chrome-height;
         extra: true;
         tabs: root.tabs;
@@ -211,13 +222,6 @@ export component AppWindow inherits Window {
         tab-returned(i) => { root.tab-returned(i); }
         user-add-clicked => { root.adding-user = true; }
         user-toggle(i) => { root.user-toggle(i); }
-    }
-
-    if root.page == 3 : ReceiptFormView {
-        x: 0px;
-        y: root.chrome-height;
-        width: root.width;
-        height: root.height - root.chrome-height;
     }
 
     if root.creating && root.page == 0 : CreateDialog {

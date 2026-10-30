@@ -50,6 +50,118 @@ impl Column {
     }
 }
 
+/// Сортировка списка по нескольким колонкам. Порядок ключей это приоритет: он такой, в каком
+/// пользователь включал сортировку. У колонки три состояния: без сортировки, по возрастанию,
+/// по убыванию (щелчок по заголовку переключает по кругу, меню заголовка задаёт прямо).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sorting {
+    keys: Vec<(usize, bool)>,
+}
+
+impl Sorting {
+    /// Ключи по приоритету: колонка и признак «по убыванию».
+    pub fn keys(&self) -> &[(usize, bool)] {
+        &self.keys
+    }
+
+    fn position(&self, column: usize) -> Option<usize> {
+        self.keys.iter().position(|(c, _)| *c == column)
+    }
+
+    /// Состояние колонки: 0 нет, 1 по возрастанию, 2 по убыванию.
+    pub fn dir(&self, column: usize) -> i32 {
+        match self.position(column).map(|i| self.keys[i].1) {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        }
+    }
+
+    /// Приоритет колонки с единицы; 0, если сортировки нет.
+    pub fn priority(&self, column: usize) -> i32 {
+        self.position(column)
+            .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
+    }
+
+    /// Щелчок по заголовку: нет → по возрастанию (в конец очереди) → по убыванию → нет.
+    pub fn click(&mut self, column: usize) {
+        match self.position(column) {
+            None => self.keys.push((column, false)),
+            Some(i) if !self.keys[i].1 => self.keys[i].1 = true,
+            Some(i) => {
+                self.keys.remove(i);
+            }
+        }
+    }
+
+    /// Задаёт направление; новая колонка встаёт в конец очереди, у включённой место не меняется.
+    pub fn set(&mut self, column: usize, descending: bool) {
+        match self.position(column) {
+            Some(i) => self.keys[i].1 = descending,
+            None => self.keys.push((column, descending)),
+        }
+    }
+
+    pub fn clear(&mut self, column: usize) {
+        if let Some(i) = self.position(column) {
+            self.keys.remove(i);
+        }
+    }
+
+    pub fn clear_all(&mut self) {
+        self.keys.clear();
+    }
+
+    /// Меняет приоритет: `earlier` ставит колонку выше (раньше), иначе ниже.
+    pub fn shift(&mut self, column: usize, earlier: bool) {
+        let Some(i) = self.position(column) else {
+            return;
+        };
+        let j = if earlier {
+            i.checked_sub(1)
+        } else {
+            Some(i + 1).filter(|j| *j < self.keys.len())
+        };
+        if let Some(j) = j {
+            self.keys.swap(i, j);
+        }
+    }
+
+    /// Сравнивает две строки по всем ключам: первый различающийся ключ решает.
+    pub fn compare(&self, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
+        self.keys
+            .iter()
+            .map(|(column, descending)| compare_by(COLUMNS[*column], *descending, a, b))
+            .find(|order| order.is_ne())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// Сравнение по одной колонке. Пустой текст всегда в конце, как у ядра, в любом направлении.
+fn compare_by(column: Column, descending: bool, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let order = match column {
+        Column::Number => a.number.cmp(&b.number),
+        Column::Date => a.date.cmp(&b.date),
+        Column::Amount => a.amount.cmp(&b.amount),
+        Column::Status => a.posted.cmp(&b.posted),
+        Column::Supplier | Column::Warehouse => {
+            let (x, y) = if column == Column::Supplier {
+                (&a.supplier, &b.supplier)
+            } else {
+                (&a.warehouse, &b.warehouse)
+            };
+            match (x.is_empty(), y.is_empty()) {
+                (true, true) => return Ordering::Equal,
+                (true, false) => return Ordering::Greater,
+                (false, true) => return Ordering::Less,
+                _ => x.to_lowercase().cmp(&y.to_lowercase()),
+            }
+        }
+    };
+    if descending { order.reverse() } else { order }
+}
+
 /// Сумма «12 345,60»: неразрывные пробелы между разрядами.
 pub fn money(kopecks: i64) -> String {
     let rubles = (kopecks / 100).to_string();
@@ -74,7 +186,7 @@ impl Receipt {
         } else if self.posted {
             "Проведён"
         } else {
-            "Черновик"
+            "Записан"
         }
     }
 
@@ -206,4 +318,100 @@ pub fn positions(count: usize) -> String {
         "позиций"
     };
     format!("{count} {word}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(number: u32, supplier: &str, amount: i64, posted: bool, day: u8) -> Receipt {
+        Receipt {
+            id: i64::from(number),
+            number,
+            date: (2026, 1, day),
+            supplier: supplier.to_owned(),
+            warehouse: String::new(),
+            amount,
+            posted,
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn click_cycles_through_three_states() {
+        let mut sorting = Sorting::default();
+        assert_eq!(sorting.dir(2), 0);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 1);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 2);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 0);
+        assert!(sorting.keys().is_empty());
+    }
+
+    #[test]
+    fn priority_follows_the_order_of_setting() {
+        let mut sorting = Sorting::default();
+        sorting.click(5);
+        sorting.click(2);
+        sorting.click(1);
+        assert_eq!(
+            [5, 2, 1].map(|c| sorting.priority(c)),
+            [1, 2, 3],
+            "приоритет равен порядку включения"
+        );
+        // Повторный щелчок по включённой колонке место в очереди не меняет.
+        sorting.click(5);
+        assert_eq!((sorting.priority(5), sorting.dir(5)), (1, 2));
+        sorting.shift(1, true);
+        assert_eq!(
+            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
+            [5, 1, 2]
+        );
+        sorting.shift(5, true);
+        sorting.shift(2, false);
+        assert_eq!(
+            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
+            [5, 1, 2]
+        );
+        sorting.clear(1);
+        assert_eq!(sorting.priority(2), 2);
+        sorting.set(0, true);
+        assert_eq!((sorting.priority(0), sorting.dir(0)), (3, 2));
+        sorting.clear_all();
+        assert!(sorting.keys().is_empty());
+    }
+
+    #[test]
+    fn first_key_decides_then_the_next() {
+        // Статус, потом поставщик по убыванию, потом номер.
+        let mut rows = [
+            receipt(1, "Б", 10, true, 1),
+            receipt(2, "А", 10, false, 1),
+            receipt(3, "Б", 10, false, 1),
+            receipt(4, "Б", 10, false, 1),
+            receipt(5, "", 10, false, 1),
+        ];
+        let mut sorting = Sorting::default();
+        sorting.set(5, false);
+        sorting.set(2, true);
+        sorting.set(0, false);
+        rows.sort_by(|a, b| sorting.compare(a, b));
+        let numbers: Vec<u32> = rows.iter().map(|r| r.number).collect();
+        // Не проведённые первыми; среди них «Б» раньше «А», пустой поставщик в конце;
+        // одинаковые «Б» по номеру. Проведённый последним.
+        assert_eq!(numbers, [3, 4, 2, 5, 1]);
+    }
+
+    #[test]
+    fn empty_text_stays_last_in_both_directions() {
+        let (a, b) = (receipt(1, "", 0, false, 1), receipt(2, "Я", 0, false, 1));
+        for descending in [false, true] {
+            assert_eq!(
+                compare_by(Column::Supplier, descending, &a, &b),
+                std::cmp::Ordering::Greater
+            );
+        }
+    }
 }

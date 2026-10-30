@@ -21,13 +21,18 @@ global GridMetrics {
 
 component HeaderCell inherits Rectangle {
     in property <GridColumn> spec;
-    in property <bool> sorted;
-    in property <bool> desc;
+    // Состояние сортировки колонки: 0 нет, 1 по возрастанию, 2 по убыванию; приоритет с единицы.
+    in property <int> sort-dir;
+    in property <int> priority;
+    // Сортируют по нескольким колонкам: рядом со значком стоит номер приоритета.
+    in property <bool> multi;
     // У последней колонки ручки нет: её правый край это край таблицы.
     in property <bool> resizable: true;
     // Колонка, ручку которой тянут сейчас (подсвечивается).
     in property <bool> dragging;
     callback clicked();
+    // Правая кнопка: координаты нажатия в окне.
+    callback context(length, length);
     // Ручку тянут: начало, смещение мыши от точки нажатия (точное, ручка при этом не
     // движется), конец. Ширина меняется сразу, на каждом движении.
     callback drag-start();
@@ -42,6 +47,11 @@ component HeaderCell inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
 
     HorizontalLayout {
@@ -60,14 +70,21 @@ component HeaderCell inherits Rectangle {
             overflow: elide;
             horizontal-stretch: root.spec.right ? 0 : 1;
         }
-        if root.sorted : VerticalLayout {
+        if root.sort-dir != 0 : VerticalLayout {
             alignment: center;
             Icon {
-                name: root.desc ? "sort-desc" : "sort-asc";
+                name: root.sort-dir == 2 ? "sort-desc" : "sort-asc";
                 tint: Theme.accent-text;
                 width: 16px;
                 height: 16px;
             }
+        }
+        if root.sort-dir != 0 && root.multi : Text {
+            text: root.priority;
+            font-size: Theme.font-caption;
+            font-weight: 600;
+            color: Theme.accent-text;
+            vertical-alignment: center;
         }
     }
 
@@ -213,6 +230,7 @@ component GridRowView inherits Rectangle {
                 text: root.item.cells[i];
                 kind: root.item.cells[i] == "Проведён" ? ChipKind.posted
                     : root.item.cells[i] == "Черновик" ? ChipKind.draft
+                    : root.item.cells[i] == "Записан" ? ChipKind.saved
                     : ChipKind.neutral;
             }
         }
@@ -227,8 +245,13 @@ export component ErpGrid inherits Rectangle {
     in property <[GridColumn]> columns;
     in property <[GridRow]> rows;
     in property <string> empty-text: "Нет данных";
-    in property <int> sort-column: -1;
-    in property <bool> sort-desc;
+    // Сортировка по колонкам (список поступлений): направление и приоритет каждой колонки,
+    // сколько колонок отсортировано. Меню заголовка (правая кнопка) меняет сортировку.
+    in property <bool> sortable: false;
+    in property <[int]> sort-dirs;
+    in property <[int]> sort-priorities;
+    in property <int> sort-count: 0;
+    callback sort-action(int, string);
     // Шаг вех в строках (0: без вех). Для длинных списков задаёт вызывающий.
     in property <int> milestone-step: 0;
     // Свои вехи пользователя: отметки на полосе прокрутки.
@@ -262,6 +285,16 @@ export component ErpGrid inherits Rectangle {
     private property <length> menu-x;
     private property <length> menu-y;
     private property <int> menu-row: -1;
+    // Меню заголовка: для какой колонки и куда открыто.
+    private property <length> head-menu-x;
+    private property <length> head-menu-y;
+    private property <int> head-menu-col: -1;
+    pure function dir-of(i: int) -> int {
+        i >= 0 && i < root.sort-dirs.length ? root.sort-dirs[i] : 0
+    }
+    pure function priority-of(i: int) -> int {
+        i >= 0 && i < root.sort-priorities.length ? root.sort-priorities[i] : 0
+    }
 
     VerticalLayout {
         Rectangle {
@@ -276,11 +309,20 @@ export component ErpGrid inherits Rectangle {
                 padding-right: GridMetrics.track-width;
                 for col[i] in root.columns : HeaderCell {
                     spec: col;
-                    sorted: i == root.sort-column;
-                    desc: root.sort-desc;
+                    sort-dir: root.dir-of(i);
+                    priority: root.priority-of(i);
+                    multi: root.sort-count > 1;
                     resizable: i < root.columns.length - 1;
                     dragging: i == root.drag-index;
                     clicked => { root.sort-clicked(i); }
+                    context(ax, ay) => {
+                        if (root.sortable) {
+                            root.head-menu-col = i;
+                            root.head-menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
+                            root.head-menu-y = 36px;
+                            head-menu.show();
+                        }
+                    }
                     drag-start => {
                         root.drag-index = i;
                         root.resize-begin();
@@ -434,6 +476,30 @@ export component ErpGrid inherits Rectangle {
                     }
                 }
 
+            }
+        }
+    }
+
+    // Меню заголовка колонки: направление сортировки и приоритет среди отсортированных колонок.
+    head-menu := PopupWindow {
+        x: root.head-menu-x;
+        y: root.head-menu-y;
+        width: MenuMetrics.width;
+        height: MenuMetrics.height(6);
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        MenuPanel {
+            actions: [
+                { id: "asc", label: "По возрастанию", icon: "sort-asc", danger: false, enabled: root.dir-of(root.head-menu-col) != 1, divider: false },
+                { id: "desc", label: "По убыванию", icon: "sort-desc", danger: false, enabled: root.dir-of(root.head-menu-col) != 2, divider: false },
+                { id: "clear", label: "Убрать сортировку", icon: "close", danger: false, enabled: root.dir-of(root.head-menu-col) != 0, divider: false },
+                { id: "earlier", label: "Приоритет выше", icon: "arrow-up", danger: false, enabled: root.priority-of(root.head-menu-col) > 1, divider: true },
+                { id: "later", label: "Приоритет ниже", icon: "arrow-down", danger: false, enabled: root.priority-of(root.head-menu-col) > 0 && root.priority-of(root.head-menu-col) < root.sort-count, divider: false },
+                { id: "clear-all", label: "Сбросить всю сортировку", icon: "undo", danger: false, enabled: root.sort-count > 0, divider: true },
+            ];
+            chosen(id) => {
+                root.sort-action(root.head-menu-col, id);
+                head-menu.close();
             }
         }
     }

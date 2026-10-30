@@ -18,8 +18,10 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::engine::call_in_background;
 use crate::grid;
-use crate::receipts::{self, COLUMNS, Line, Receipt};
+use crate::receipts::{self, COLUMNS, Line, Receipt, Sorting};
 use crate::shell::{RECEIPTS_NODE, Shell};
+use crate::windows::Windows;
+use crate::workspace::{DocTabs, TabList, WindowId, WindowRef, Workspace};
 use crate::{AppWindow, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
 
 /// Ширины колонок списка в px: гибкая только «Поставщик», её ширина здесь минимум.
@@ -148,8 +150,8 @@ impl DocState {
 
 struct State {
     all: Vec<Receipt>,
-    /// Колонка и признак «по убыванию».
-    sort: Option<(usize, bool)>,
+    /// Сортировка по колонкам; порядок ключей это приоритет.
+    sorting: Sorting,
     query: String,
     /// Ядро, из которого читается список (пока не подключено: список пуст).
     engine: Option<Arc<dyn Engine>>,
@@ -162,8 +164,12 @@ struct State {
     docs: HashMap<u32, DocState>,
     /// Состояние формы окна, которому сейчас служит обработчик (см. `form_state`).
     form: FormCtx,
-    /// Документы, вынесенные из вкладок в отдельные окна.
-    detached: HashMap<u32, Detached>,
+    /// Главное окно: все окна показывают один и тот же список.
+    main: slint::Weak<AppWindow>,
+    /// Дополнительные окна с вкладками и состояние их форм.
+    hosts: HashMap<WindowId, HostWindow>,
+    /// Какие документы открыты во вкладках какого окна: документ живёт, пока открыт хотя бы в одном.
+    tab_docs: HashMap<WindowRef, HashSet<u32>>,
     /// Номера документов со своей вехой пользователя (в списке они не зависят от сортировки).
     marks: HashSet<u32>,
     /// Сколько показывать сообщение об ошибке действия над списком.
@@ -444,26 +450,76 @@ struct FormCtx {
     catalog_kind: Option<Catalog>,
 }
 
-/// Окно формы: вкладка главного окна или отдельное окно документа.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Target {
-    Main,
-    Doc(u32),
-}
+/// Окно формы и списка.
+type Target = WindowRef;
 
-/// Документ в отдельном окне: окно (второй `AppWindow`, страница 3) и состояние его формы.
-struct Detached {
+/// Дополнительное окно: само окно и состояние его формы.
+struct HostWindow {
     window: AppWindow,
     form: FormCtx,
 }
 
-/// Доступ к состоянию с формой нужного окна: у отдельного окна контекст формы подменяется на
+/// Вкладки окна, которому служит обработчик: у главного окна они в `Shell`, у дополнительного
+/// в `Windows`.
+#[derive(Clone)]
+struct Tabs {
+    target: Target,
+    shell: Rc<RefCell<Shell>>,
+    windows: Rc<RefCell<Option<Windows>>>,
+}
+
+impl Tabs {
+    fn with<R>(&self, f: impl FnOnce(&mut dyn DocTabs) -> R) -> Option<R> {
+        match self.target {
+            WindowRef::Main => Some(f(&mut *self.shell.borrow_mut())),
+            WindowRef::Extra(id) => self
+                .windows
+                .borrow()
+                .as_ref()?
+                .with_list(id, |list| f(list)),
+        }
+    }
+
+    fn windows(&self) -> Option<Windows> {
+        self.windows.borrow().clone()
+    }
+
+    /// Показывает изменения вкладок на экране.
+    fn refresh(&self, main: &AppWindow) {
+        match self.target {
+            WindowRef::Main => crate::app::refresh(main, &self.shell.borrow()),
+            WindowRef::Extra(id) => {
+                if let Some(windows) = self.windows() {
+                    windows.refresh_host(id);
+                }
+            }
+        }
+    }
+
+    /// Закрывает активную вкладку окна (форма закрыта кнопкой).
+    fn close_active(&self, main: &AppWindow, state: &RefCell<State>) {
+        match self.target {
+            WindowRef::Main => {
+                let mut shell = self.shell.borrow_mut();
+                close_active(main, &mut state.borrow_mut(), &mut shell);
+                crate::app::refresh(main, &shell);
+            }
+            WindowRef::Extra(id) => {
+                if let Some(windows) = self.windows() {
+                    windows.close_active_tab(main, &self.shell, id);
+                }
+            }
+        }
+    }
+}
+
+/// Доступ к состоянию с формой нужного окна: у дополнительного окна контекст формы подменяется на
 /// его собственный и возвращается назад, когда охрана освобождается (в том числе при раннем
 /// `return` в обработчике). Так одни и те же функции работают с любой формой.
 struct FormGuard<'a> {
     state: std::cell::RefMut<'a, State>,
-    /// Номер документа окна и контекст главной формы, пока тот подменён.
-    swapped: Option<(u32, FormCtx)>,
+    /// Номер окна и контекст главной формы, пока тот подменён.
+    swapped: Option<(WindowId, FormCtx)>,
 }
 
 impl std::ops::Deref for FormGuard<'_> {
@@ -481,11 +537,11 @@ impl std::ops::DerefMut for FormGuard<'_> {
 
 impl Drop for FormGuard<'_> {
     fn drop(&mut self) {
-        if let Some((number, main)) = self.swapped.take() {
-            let doc_form = std::mem::replace(&mut self.state.form, main);
+        if let Some((id, main)) = self.swapped.take() {
+            let host_form = std::mem::replace(&mut self.state.form, main);
             // Окно могли закрыть внутри обработчика: тогда его контекст некуда возвращать.
-            if let Some(detached) = self.state.detached.get_mut(&number) {
-                detached.form = doc_form;
+            if let Some(host) = self.state.hosts.get_mut(&id) {
+                host.form = host_form;
             }
         }
     }
@@ -494,14 +550,14 @@ impl Drop for FormGuard<'_> {
 fn form_state(state: &RefCell<State>, target: Target) -> FormGuard<'_> {
     let mut guard = state.borrow_mut();
     let swapped = match target {
-        Target::Main => None,
-        Target::Doc(number) => {
-            let doc_form = guard
-                .detached
-                .get_mut(&number)
-                .map(|d| std::mem::take(&mut d.form))
+        WindowRef::Main => None,
+        WindowRef::Extra(id) => {
+            let host_form = guard
+                .hosts
+                .get_mut(&id)
+                .map(|h| std::mem::take(&mut h.form))
                 .unwrap_or_default();
-            Some((number, std::mem::replace(&mut guard.form, doc_form)))
+            Some((id, std::mem::replace(&mut guard.form, host_form)))
         }
     };
     FormGuard {
@@ -546,7 +602,22 @@ impl Catalog {
     }
 }
 
+/// Все окна: список и справочники показаны в каждом.
+fn all_windows(state: &State) -> Vec<AppWindow> {
+    let mut windows: Vec<AppWindow> = state.main.upgrade().into_iter().collect();
+    windows.extend(state.hosts.values().map(|h| h.window.clone_strong()));
+    windows
+}
+
 impl State {
+    /// Окно, в котором документ открыт во вкладке.
+    fn owner_of(&self, number: u32) -> Option<Target> {
+        self.tab_docs
+            .iter()
+            .find(|(_, docs)| docs.contains(&number))
+            .map(|(target, _)| *target)
+    }
+
     /// Показанные строки: и порядок, и поиск делает ядро.
     fn visible(&self) -> Vec<&Receipt> {
         self.all.iter().collect()
@@ -554,12 +625,14 @@ impl State {
 
     /// Запрос списка по текущей сортировке и тексту поиска.
     fn request(&self) -> ListRequest {
+        // Ядро сортирует по одному полю (первому по приоритету); остальные ключи применяются
+        // к загруженным строкам здесь (`fetch_receipts`).
+        let first = self.sorting.keys().first();
         ListRequest {
-            order: self
-                .sort
-                .map(|(column, _)| COLUMN_FIELDS[column].to_owned()),
-            descending: self.sort.is_some_and(|(_, descending)| descending),
+            order: first.map(|(column, _)| COLUMN_FIELDS[*column].to_owned()),
+            descending: first.is_some_and(|(_, descending)| *descending),
             search: Some(self.query.trim().to_owned()).filter(|text| !text.is_empty()),
+            sorting: self.sorting.clone(),
         }
     }
 }
@@ -570,6 +643,8 @@ struct ListRequest {
     order: Option<String>,
     descending: bool,
     search: Option<String>,
+    /// Все ключи сортировки; при двух и больше строки досортировываются здесь.
+    sorting: Sorting,
 }
 
 /// Число из десятичного значения ядра в копейках (деньги в ядре: 2 знака; другое
@@ -651,6 +726,9 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
             _ => break,
         }
     }
+    if request.sorting.keys().len() > 1 {
+        receipts.sort_by(|a, b| request.sorting.compare(a, b));
+    }
     Ok((receipts, total))
 }
 
@@ -661,13 +739,7 @@ fn mark_deleted(engine: &dyn Engine, id: i64, deleted: bool) -> EngineResult<Sav
 }
 
 /// «Провести» или «Отменить проведение» строки списка: команда уходит в ядро.
-fn post_in_core(
-    app: &AppWindow,
-    state_rc: &Rc<RefCell<State>>,
-    state: &State,
-    number: u32,
-    post: bool,
-) {
+fn post_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32, post: bool) {
     let (Some(engine), Some(receipt)) = (
         state.engine.clone(),
         state.all.iter().find(|r| r.number == number),
@@ -675,7 +747,7 @@ fn post_in_core(
         return;
     };
     let id = receipt.id;
-    let (app, state_rc) = (app.as_weak(), state_rc.clone());
+    let state_rc = state_rc.clone();
     call_in_background(
         move || {
             if post {
@@ -685,51 +757,53 @@ fn post_in_core(
             }
         },
         move |result| {
-            let Some(app) = app.upgrade() else { return };
             let mut state = state_rc.borrow_mut();
             match result {
                 Ok(saved) => {
-                    show_notice(&app, &state, "");
-                    set_posted(&app, &mut state, number, post);
+                    show_notice(&state, "");
+                    set_posted(&mut state, number, post);
                     if let Some(doc) = state.docs.get_mut(&number) {
                         doc.version = saved.version;
                     }
                     if let Some(index) = state.all.iter().position(|r| r.number == number) {
-                        update_row(&app, &state, index);
+                        update_row(&state, index);
                     }
                 }
-                Err(error) => show_notice(&app, &state, &error.message),
+                Err(error) => show_notice(&state, &notice_text(number, &error.message)),
             }
         },
     );
 }
 
-/// Сообщение под списком; само пропадает через несколько секунд.
-fn show_notice(app: &AppWindow, state: &State, text: &str) {
-    app.global::<ReceiptsData>().set_notice(text.into());
+/// Текст ошибки действия над документом списка: с номером, чтобы было ясно, к чему она.
+fn notice_text(number: u32, message: &str) -> String {
+    format!("Документ № {number}: {message}")
+}
+
+/// Сообщение над списком; само пропадает через несколько секунд.
+fn show_notice(state: &State, text: &str) {
+    let windows = all_windows(state);
+    for window in &windows {
+        window.global::<ReceiptsData>().set_notice(text.into());
+    }
     if text.is_empty() {
         state.notice_timer.stop();
         return;
     }
-    let app = app.as_weak();
+    let windows: Vec<_> = windows.iter().map(ComponentHandle::as_weak).collect();
     state.notice_timer.start(
         slint::TimerMode::SingleShot,
-        std::time::Duration::from_secs(6),
+        std::time::Duration::from_secs(12),
         move || {
-            if let Some(app) = app.upgrade() {
-                app.global::<ReceiptsData>().set_notice("".into());
+            for window in windows.iter().filter_map(slint::Weak::upgrade) {
+                window.global::<ReceiptsData>().set_notice("".into());
             }
         },
     );
 }
 
 /// «Удалить» или «Восстановить» строку списка: команда уходит в ядро, строка меняется на месте.
-fn mark_deleted_in_core(
-    app: &AppWindow,
-    state_rc: &Rc<RefCell<State>>,
-    state: &State,
-    number: u32,
-) {
+fn mark_deleted_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32) {
     let (Some(engine), Some(receipt)) = (
         state.engine.clone(),
         state.all.iter().find(|r| r.number == number),
@@ -737,25 +811,24 @@ fn mark_deleted_in_core(
         return;
     };
     let (id, deleted) = (receipt.id, !receipt.deleted);
-    let (app, state_rc) = (app.as_weak(), state_rc.clone());
+    let state_rc = state_rc.clone();
     call_in_background(
         move || mark_deleted(&*engine, id, deleted),
         move |result| {
-            let Some(app) = app.upgrade() else { return };
             let mut state = state_rc.borrow_mut();
             match result {
                 Ok(saved) => {
-                    show_notice(&app, &state, "");
+                    show_notice(&state, "");
                     if let Some(doc) = state.docs.values_mut().find(|doc| doc.id == id) {
                         doc.version = saved.version;
                         doc.deleted = deleted;
                     }
                     if let Some(index) = state.all.iter().position(|r| r.id == id) {
                         state.all[index].deleted = deleted;
-                        update_row(&app, &state, index);
+                        update_row(&state, index);
                     }
                 }
-                Err(error) => show_notice(&app, &state, &error.message),
+                Err(error) => show_notice(&state, &notice_text(number, &error.message)),
             }
         },
     );
@@ -766,6 +839,7 @@ fn mark_deleted_in_core(
 pub struct ReceiptsUi {
     state: Rc<RefCell<State>>,
     shell: Rc<RefCell<Shell>>,
+    windows: Rc<RefCell<Option<Windows>>>,
 }
 
 impl ReceiptsUi {
@@ -775,23 +849,134 @@ impl ReceiptsUi {
         before(app, &mut self.state.borrow_mut(), shell);
     }
 
-    /// Выносит документ вкладки `tab` в отдельное окно (вкладки без документа не трогает).
-    pub fn detach(&self, app: &AppWindow, shell: &mut Shell, tab: usize) {
-        detach(app, &self.state, &self.shell, shell, tab);
-        crate::app::refresh(app, shell);
+    /// Общая оболочка: дерево навигации и вкладки главного окна.
+    pub fn shell(&self) -> Rc<RefCell<Shell>> {
+        self.shell.clone()
     }
 
-    /// Вызывает `f` для каждого отдельного окна документа (например, применить настройки).
-    pub fn each_detached(&self, f: impl Fn(&AppWindow)) {
-        for detached in self.state.borrow().detached.values() {
-            f(&detached.window);
+    /// Код окон сообщает о себе: формам дополнительных окон нужны их вкладки.
+    pub fn bind_windows(&self, windows: &Windows) {
+        *self.windows.borrow_mut() = Some(windows.clone());
+    }
+
+    /// Подключает список и форму к новому дополнительному окну.
+    pub fn host_opened(&self, window: &AppWindow, id: WindowId) {
+        let data = window.global::<ReceiptsData>();
+        data.set_columns(ModelRc::new(VecModel::from(list_columns())));
+        {
+            let state = self.state.borrow();
+            data.set_query(state.query.as_str().into());
+            publish_catalogs(window, &state);
+            publish_list(window, &state);
+        }
+        let main = self.state.borrow().main.clone();
+        let tabs = Tabs {
+            target: WindowRef::Extra(id),
+            shell: self.shell.clone(),
+            windows: self.windows.clone(),
+        };
+        wire_list(window, &main, &self.state, &tabs);
+        wire_form(window, main, &self.state, &tabs);
+        self.state.borrow_mut().hosts.insert(
+            id,
+            HostWindow {
+                window: window.clone_strong(),
+                form: FormCtx::default(),
+            },
+        );
+    }
+
+    /// Дополнительное окно закрылось. Документы здесь не забываются: его вкладка могла переехать
+    /// в другое окно, и новое место станет известно только в `sync`.
+    pub fn host_closed(&self, id: WindowId) {
+        let mut state = self.state.borrow_mut();
+        state.hosts.remove(&id);
+        state.tab_docs.remove(&WindowRef::Extra(id));
+    }
+
+    /// Окно закрыли вместе с вкладками: забывает документы, которые больше нигде не открыты.
+    pub fn forget_closed_docs(&self) {
+        forget_closed(&mut self.state.borrow_mut());
+    }
+
+    /// Поля форм всех окон попадают в документы. Вызывать, пока окна ещё на экране.
+    pub fn store_forms(&self, main: &AppWindow) {
+        store_form(main, &mut self.state.borrow_mut());
+        let hosts: Vec<(WindowId, AppWindow)> = self
+            .state
+            .borrow()
+            .hosts
+            .iter()
+            .map(|(id, host)| (*id, host.window.clone_strong()))
+            .collect();
+        for (id, window) in hosts {
+            store_form(&window, &mut form_state(&self.state, WindowRef::Extra(id)));
         }
     }
 
-    /// Отдельное окно документа (снимки экранов).
-    pub fn detached_window(&self, number: u32) -> Option<AppWindow> {
-        let state = self.state.borrow();
-        state.detached.get(&number).map(|d| d.window.clone_strong())
+    /// Вкладки переехали между окнами: каждая форма показывает активный документ своего окна.
+    pub fn sync(&self, main: &AppWindow, shell: &mut Shell, workspace: &mut Workspace) {
+        let ids = workspace.extra_ids();
+        {
+            let mut state = self.state.borrow_mut();
+            state.tab_docs.clear();
+            state.tab_docs.insert(WindowRef::Main, shell.documents());
+            for id in &ids {
+                if let Some(list) = workspace.list(*id) {
+                    state
+                        .tab_docs
+                        .insert(WindowRef::Extra(*id), list.documents());
+                }
+            }
+            forget_closed(&mut state);
+            mark_modified(&state, shell);
+            for id in &ids {
+                if let Some(list) = workspace.list_mut(*id) {
+                    mark_modified(&state, list);
+                }
+            }
+            after(main, &mut state, shell, WindowRef::Main);
+        }
+        for id in ids {
+            let target = WindowRef::Extra(id);
+            let window = self
+                .state
+                .borrow()
+                .hosts
+                .get(&id)
+                .map(|host| host.window.clone_strong());
+            if let (Some(window), Some(list)) = (window, workspace.list(id)) {
+                after(&window, &mut form_state(&self.state, target), list, target);
+            }
+        }
+    }
+
+    /// Перед сменой вкладки в дополнительном окне.
+    pub fn before_host(&self, id: WindowId, list: &mut TabList) {
+        let window = self.host_window(id);
+        if let Some(window) = window {
+            before(
+                &window,
+                &mut form_state(&self.state, WindowRef::Extra(id)),
+                list,
+            );
+        }
+    }
+
+    /// После смены вкладки в дополнительном окне.
+    pub fn after_host(&self, id: WindowId, list: &TabList) {
+        let target = WindowRef::Extra(id);
+        if let Some(window) = self.host_window(id) {
+            after(&window, &mut form_state(&self.state, target), list, target);
+        }
+    }
+
+    fn host_window(&self, id: WindowId) -> Option<AppWindow> {
+        self.state
+            .borrow()
+            .hosts
+            .get(&id)
+            .map(|host| host.window.clone_strong())
     }
 
     /// Подключено ли ядро.
@@ -800,36 +985,38 @@ impl ReceiptsUi {
     }
 
     /// Показывает ошибку подключения вместо списка.
-    pub fn show_error(&self, app: &AppWindow, message: &str) {
-        let data = app.global::<ReceiptsData>();
-        data.set_list_loading(false);
-        data.set_list_error(message.into());
+    pub fn show_error(&self, message: &str) {
+        for window in all_windows(&self.state.borrow()) {
+            let data = window.global::<ReceiptsData>();
+            data.set_list_loading(false);
+            data.set_list_error(message.into());
+        }
     }
 
     /// Подключает ядро и читает список в фоне.
-    pub fn attach(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
-        self.connect(app, engine);
-        reload(app, &self.state, false);
+    pub fn attach(&self, engine: Arc<dyn Engine>) {
+        self.connect(engine);
+        reload(&self.state, false);
     }
 
     /// Запоминает ядро и читает справочники (их мало, поэтому на месте).
-    fn connect(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
+    fn connect(&self, engine: Arc<dyn Engine>) {
         let mut state = self.state.borrow_mut();
         state.catalogs = load_catalogs(&*engine).unwrap_or_default();
         state.engine = Some(engine);
-        publish_all(app, &state);
+        publish_all(&state);
     }
 
     /// То же, но ждёт ответа на месте (снимки экранов и проверки).
-    pub fn attach_blocking(&self, app: &AppWindow, engine: Arc<dyn Engine>) {
-        self.connect(app, engine);
-        reload(app, &self.state, true);
+    pub fn attach_blocking(&self, engine: Arc<dyn Engine>) {
+        self.connect(engine);
+        reload(&self.state, true);
     }
 
     /// Вызывать ПОСЛЕ действия с вкладками: забывает закрытые документы и загружает форму
     /// документа, чья вкладка стала активной.
     pub fn after(&self, app: &AppWindow, shell: &Shell) {
-        after(app, &mut self.state.borrow_mut(), shell);
+        after(app, &mut self.state.borrow_mut(), shell, WindowRef::Main);
     }
 }
 
@@ -864,19 +1051,26 @@ fn list_menu(receipt: &Receipt, milestone: bool) -> Vec<MenuAction> {
             enabled: !receipt.deleted,
             ..item(post_id, post_label, post_icon)
         },
-        // Удаление в ядре это пометка (СТ-30); проведённый документ ядро не пометит.
+        // Сначала пометка на удаление (проведённый документ ядро не помечает: сначала отмена
+        // проведения), потом, у помеченного, снятие пометки или окончательное удаление.
+        // Окончательного удаления в ядре нет (решение СТ-30): пункт показан, но недоступен.
+        if receipt.deleted {
+            MenuAction {
+                divider: true,
+                ..item("delete", "Снять пометку удаления", "undo")
+            }
+        } else {
+            MenuAction {
+                divider: true,
+                danger: true,
+                enabled: !receipt.posted,
+                ..item("delete", "Пометить на удаление", "trash")
+            }
+        },
         MenuAction {
-            divider: true,
-            danger: !receipt.deleted,
-            ..item(
-                "delete",
-                if receipt.deleted {
-                    "Восстановить"
-                } else {
-                    "Удалить"
-                },
-                if receipt.deleted { "undo" } else { "trash" },
-            )
+            danger: true,
+            enabled: false,
+            ..item("purge", "Удалить", "trash")
         },
         MenuAction {
             divider: true,
@@ -1049,23 +1243,24 @@ fn mark_positions(visible: &[&Receipt], marks: &HashSet<u32>) -> Vec<GridMark> {
 
 /// Перечитывает список из ядра по текущей сортировке и поиску. Устаревший ответ (параметры
 /// успели сменить) отбрасывается. `blocking`: ждать ответа на месте.
-fn reload(app: &AppWindow, state: &Rc<RefCell<State>>, blocking: bool) {
+fn reload(state: &Rc<RefCell<State>>, blocking: bool) {
     let (engine, request, generation) = {
         let mut state = state.borrow_mut();
         let Some(engine) = state.engine.clone() else {
             return;
         };
         state.generation += 1;
+        for window in all_windows(&state) {
+            window.global::<ReceiptsData>().set_list_loading(true);
+        }
         (engine, state.request(), state.generation)
     };
-    app.global::<ReceiptsData>().set_list_loading(true);
     let apply = {
-        let (app, state) = (app.as_weak(), state.clone());
+        let state = state.clone();
         move |result: EngineResult<(Vec<Receipt>, u64)>| {
-            let Some(app) = app.upgrade() else { return };
             let mut state = state.borrow_mut();
             if state.generation == generation {
-                apply_list(&app, &mut state, result);
+                apply_list(&mut state, result);
             }
         }
     };
@@ -1077,27 +1272,37 @@ fn reload(app: &AppWindow, state: &Rc<RefCell<State>>, blocking: bool) {
 }
 
 /// Кладёт ответ ядра в список или показывает ошибку.
-fn apply_list(app: &AppWindow, state: &mut State, result: EngineResult<(Vec<Receipt>, u64)>) {
-    let data = app.global::<ReceiptsData>();
-    data.set_list_loading(false);
-    match result {
+fn apply_list(state: &mut State, result: EngineResult<(Vec<Receipt>, u64)>) {
+    let error = match result {
         Ok((rows, total)) => {
             state.total_all = usize::try_from(total).unwrap_or(usize::MAX);
             let next = rows.iter().map(|r| r.number).max().map_or(1, |n| n + 1);
             state.next_number = state.next_number.max(next);
             state.all = rows;
-            data.set_list_error("".into());
+            SharedString::new()
         }
         Err(error) => {
             state.all.clear();
-            data.set_list_error(error.message.as_str().into());
+            error.message.as_str().into()
         }
+    };
+    for window in all_windows(state) {
+        let data = window.global::<ReceiptsData>();
+        data.set_list_loading(false);
+        data.set_list_error(error.clone());
+        data.set_selected_row(-1);
     }
-    data.set_selected_row(-1);
-    refresh_list(app, state);
+    refresh_list(state);
 }
 
-fn refresh_list(app: &AppWindow, state: &State) {
+/// Показывает список во всех окнах.
+fn refresh_list(state: &State) {
+    for window in all_windows(state) {
+        publish_list(&window, state);
+    }
+}
+
+fn publish_list(app: &AppWindow, state: &State) {
     let data = app.global::<ReceiptsData>();
     let visible = state.visible();
     let rows: Vec<GridRow> = visible
@@ -1112,13 +1317,13 @@ fn refresh_list(app: &AppWindow, state: &State) {
     data.set_milestone_step(milestone_step(rows.len()));
     data.set_rows(ModelRc::new(VecModel::from(rows)));
     data.set_total(i32::try_from(state.total_all).unwrap_or(i32::MAX));
-    match state.sort {
-        Some((column, descending)) => {
-            data.set_sort_column(i32::try_from(column).unwrap_or(-1));
-            data.set_sort_desc(descending);
-        }
-        None => data.set_sort_column(-1),
-    }
+    let columns = 0..COLUMNS.len();
+    let ints = |values: Vec<i32>| ModelRc::new(VecModel::from(values));
+    data.set_sort_dirs(ints(
+        columns.clone().map(|c| state.sorting.dir(c)).collect(),
+    ));
+    data.set_sort_priorities(ints(columns.map(|c| state.sorting.priority(c)).collect()));
+    data.set_sort_count(i32::try_from(state.sorting.keys().len()).unwrap_or(0));
 }
 
 /// Показывает строки и итоги документа, открытого в форме.
@@ -1168,7 +1373,25 @@ fn store_form(app: &AppWindow, state: &mut State) {
         doc.content.supplier = data.get_form_supplier().to_string();
         doc.content.warehouse = data.get_form_warehouse().to_string();
         doc.content.date = form_date(&data);
+        show_status(app, doc);
     }
+}
+
+/// Статус документа на форме: «Проведён, изменён» значит, что после проведения в документ внесли
+/// правки и его надо провести заново; «Записан» значит, что документ записан без проведения.
+fn show_status(app: &AppWindow, doc: &DocState) {
+    let modified = doc.is_modified();
+    let (text, kind) = match (doc.saved, doc.posted, modified) {
+        (false, _, _) => ("Черновик", 2),
+        (true, true, true) => ("Проведён, изменён", 4),
+        (true, true, false) => ("Проведён", 1),
+        (true, false, true) => ("Записан, изменён", 4),
+        (true, false, false) => ("Записан", 3),
+    };
+    let data = app.global::<ReceiptsData>();
+    data.set_form_status(text.into());
+    data.set_form_status_kind(kind);
+    data.set_form_posted(doc.posted);
 }
 
 /// Показывает документ в форме окна `app` (поля, строки, заголовок окна).
@@ -1177,7 +1400,7 @@ fn fill_form(app: &AppWindow, doc: &DocState) {
     data.set_form_title(doc.title().into());
     data.set_form_error("".into());
     data.set_form_conflict(false);
-    data.set_form_posted(doc.posted);
+    show_status(app, doc);
     data.set_form_number(doc.number.to_string().into());
     let (year, month, day) = receipts::parse_date(&doc.content.date).unwrap_or(NEW_DOC_DATE);
     data.set_form_year(i32::from(year));
@@ -1209,37 +1432,46 @@ fn publish_catalogs(app: &AppWindow, state: &State) {
     data.set_goods(strings(&state.catalogs.goods_names()));
 }
 
-/// То же во всех окнах: главном и отдельных.
-fn publish_all(main: &AppWindow, state: &State) {
-    publish_catalogs(main, state);
-    for detached in state.detached.values() {
-        publish_catalogs(&detached.window, state);
+/// То же во всех окнах: главном и дополнительных.
+fn publish_all(state: &State) {
+    for window in all_windows(state) {
+        publish_catalogs(&window, state);
     }
 }
 
-/// Убирает окно: прячет (если оно ещё на экране) и освобождает чуть позже. Освобождать сразу
-/// нельзя: обработчик, из которого вызвали, может быть событием этого же окна.
-fn retire(window: AppWindow, hide: bool) {
-    if hide {
-        let _ = window.hide();
-    }
-    slint::Timer::single_shot(std::time::Duration::from_millis(100), move || drop(window));
-}
-
-fn before(app: &AppWindow, state: &mut State, shell: &mut Shell) {
+fn before(app: &AppWindow, state: &mut State, tabs: &mut dyn DocTabs) {
     store_form(app, state);
     if let Some(number) = state.form.loaded {
         let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
-        if let Some(tab) = shell.doc_tab(number).filter(|_| modified) {
-            shell.set_modified(tab, true);
+        if let Some(tab) = tabs.tab_of_doc(number).filter(|_| modified) {
+            tabs.set_tab_modified(tab, true);
         }
     }
 }
 
-fn after(app: &AppWindow, state: &mut State, shell: &Shell) {
-    let State { docs, detached, .. } = &mut *state;
-    docs.retain(|number, _| shell.doc_tab(*number).is_some() || detached.contains_key(number));
-    match shell.active_doc().filter(|n| state.docs.contains_key(n)) {
+/// Забывает документы, которые не открыты ни в одном окне.
+fn forget_closed(state: &mut State) {
+    let State { docs, tab_docs, .. } = state;
+    docs.retain(|number, _| tab_docs.values().any(|open| open.contains(number)));
+}
+
+/// Вкладка показывает, изменён ли её документ: вкладка могла приехать из другого окна.
+fn mark_modified(state: &State, tabs: &mut dyn DocTabs) {
+    for number in tabs.documents() {
+        let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
+        if let Some(tab) = tabs.tab_of_doc(number) {
+            tabs.set_tab_modified(tab, modified);
+        }
+    }
+}
+
+fn after(app: &AppWindow, state: &mut State, tabs: &dyn DocTabs, target: Target) {
+    state.tab_docs.insert(target, tabs.documents());
+    forget_closed(state);
+    match tabs
+        .active_document()
+        .filter(|n| state.docs.contains_key(n))
+    {
         Some(number) if state.form.loaded != Some(number) => load_doc(app, state, number),
         Some(_) => {}
         None => state.form.loaded = None,
@@ -1247,9 +1479,8 @@ fn after(app: &AppWindow, state: &mut State, shell: &Shell) {
 }
 
 /// Обновляет одну строку списка на месте (подписи, статус, приглушение, веху).
-fn update_row(app: &AppWindow, state: &State, index: usize) {
+fn update_row(state: &State, index: usize) {
     use slint::Model;
-    let data = app.global::<ReceiptsData>();
     let visible = state.visible();
     let Some(receipt) = visible.get(index) else {
         return;
@@ -1258,42 +1489,52 @@ fn update_row(app: &AppWindow, state: &State, index: usize) {
         milestone: state.marks.contains(&receipt.number),
         ..grid_row(receipt.cells(), receipt.deleted)
     };
-    data.get_rows().set_row_data(index, row);
+    for window in all_windows(state) {
+        let rows = window.global::<ReceiptsData>().get_rows();
+        if index < rows.row_count() {
+            rows.set_row_data(index, row.clone());
+        }
+    }
 }
 
 /// Проводит документ из списка или отменяет проведение; открытый документ получает тот же статус.
-fn set_posted(app: &AppWindow, state: &mut State, number: u32, posted: bool) {
+fn set_posted(state: &mut State, number: u32, posted: bool) {
     if let Some(receipt) = state.all.iter_mut().find(|r| r.number == number) {
         receipt.posted = posted;
     }
     if let Some(doc) = state.docs.get_mut(&number) {
         doc.posted = posted;
     }
-    if state.form.loaded == Some(number) {
-        app.global::<ReceiptsData>().set_form_posted(posted);
+    let Some(doc) = state.docs.get(&number) else {
+        return;
+    };
+    if state.form.loaded == Some(number)
+        && let Some(main) = state.main.upgrade()
+    {
+        show_status(&main, doc);
     }
-    if let Some(detached) = state.detached.get(&number) {
-        detached
-            .window
-            .global::<ReceiptsData>()
-            .set_form_posted(posted);
+    for host in state.hosts.values() {
+        if host.form.loaded == Some(number) {
+            show_status(&host.window, doc);
+        }
     }
 }
 
-/// Открывает документ в своей вкладке (создаёт его состояние, если вкладки ещё нет).
-fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) {
-    // Документ уже в своём окне: показываем его, вкладку не открываем.
-    if let Some(detached) = state.detached.get(&number) {
-        let _ = detached.window.show();
-        return;
-    }
-    before(app, state, shell);
+/// Открывает документ в своей вкладке окна `target` (создаёт его состояние, если вкладки ещё нет).
+fn open_doc(
+    app: &AppWindow,
+    state: &mut State,
+    tabs: &mut dyn DocTabs,
+    number: u32,
+    target: Target,
+) {
+    before(app, state, tabs);
     if !state.docs.contains_key(&number) {
         let doc = match state.all.iter().find(|r| r.number == number).map(|r| r.id) {
             Some(id) => match fetch_doc(state, id) {
                 Ok(doc) => doc,
                 Err(error) => {
-                    show_notice(app, state, &error.message);
+                    show_notice(state, &error.message);
                     return;
                 }
             },
@@ -1314,9 +1555,36 @@ fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) 
         .get(&number)
         .map(DocState::title)
         .unwrap_or_default();
-    shell.open_doc(RECEIPTS_NODE, number, title, "receipt");
-    after(app, state, shell);
-    crate::app::refresh(app, shell);
+    tabs.open_document(RECEIPTS_NODE, number, title, "receipt");
+    after(app, state, tabs, target);
+}
+
+/// Открывает документ из списка окна `tabs`. Уже открытый в другом окне документ показывается там:
+/// одна правка не должна идти в двух формах сразу.
+fn open_from_list(
+    app: &AppWindow,
+    main: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+    number: u32,
+) {
+    let owner = state.borrow().owner_of(number);
+    if let Some(owner) = owner.filter(|owner| *owner != tabs.target) {
+        if let Some(windows) = tabs.windows() {
+            windows.show_doc(main, &tabs.shell, owner, number);
+        }
+        return;
+    }
+    tabs.with(|list| {
+        open_doc(
+            app,
+            &mut form_state(state, tabs.target),
+            list,
+            number,
+            tabs.target,
+        );
+    });
+    tabs.refresh(main);
 }
 
 /// Записывает открытый документ в ядро (`action`: просто записать, провести или снять проведение
@@ -1324,7 +1592,7 @@ fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) 
 fn save_loaded(
     app: &AppWindow,
     state: &mut State,
-    shell: &mut Shell,
+    tabs: &mut dyn DocTabs,
     action: PostAction,
 ) -> EngineResult<()> {
     store_form(app, state);
@@ -1346,12 +1614,12 @@ fn save_loaded(
 
     // Новому документу ядро могло дать номер, отличный от временного: вкладка следует за ним.
     let mut key = number;
-    if loaded.number != number && !state.detached.contains_key(&number) {
+    if loaded.number != number {
         if let Some(doc) = state.docs.remove(&number) {
             state.docs.insert(loaded.number, doc);
         }
         state.form.loaded = Some(loaded.number);
-        shell.renumber_doc(number, loaded.number);
+        tabs.renumber(number, loaded.number);
         key = loaded.number;
     }
     state.next_number = state.next_number.max(loaded.number + 1);
@@ -1368,10 +1636,10 @@ fn save_loaded(
             state.total_all += 1;
         }
     }
-    if let Some(tab) = shell.doc_tab(key) {
-        shell.set_modified(tab, false);
+    if let Some(tab) = tabs.tab_of_doc(key) {
+        tabs.set_tab_modified(tab, false);
     }
-    shell.set_doc_title(key, title);
+    tabs.set_title_of_doc(key, title);
     Ok(())
 }
 
@@ -1397,101 +1665,11 @@ fn show_form_result(app: &AppWindow, result: &EngineResult<()>) {
     }
 }
 
-/// Закрывает вкладку активного документа.
+/// Закрывает вкладку активного документа главного окна.
 fn close_active(app: &AppWindow, state: &mut State, shell: &mut Shell) {
     let active = shell.active_tab();
     shell.close_tab(active);
-    after(app, state, shell);
-}
-
-/// Закрывает документ в отдельном окне (как закрытие вкладки). `hide`: окно ещё на экране
-/// (закрытие крестиком прячет его само).
-fn close_detached(main: &AppWindow, state: &mut State, shell: &Shell, number: u32, hide: bool) {
-    if let Some(detached) = state.detached.remove(&number) {
-        retire(detached.window, hide);
-    }
-    after(main, state, shell);
-}
-
-/// Возвращает документ из отдельного окна в закреплённую вкладку главного окна.
-fn dock(main: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) {
-    if let Some(detached) = state.detached.remove(&number) {
-        retire(detached.window, true);
-    }
-    let (title, modified) = state
-        .docs
-        .get(&number)
-        .map(|doc| (doc.title(), doc.is_modified()))
-        .unwrap_or_default();
-    shell.open_doc(RECEIPTS_NODE, number, title, "receipt");
-    if let Some(tab) = shell.doc_tab(number) {
-        shell.pin_tab(tab);
-        shell.set_modified(tab, modified);
-    }
-    after(main, state, shell);
-}
-
-/// Выносит документ вкладки `tab` в отдельное окно. Окно это второй `AppWindow` на странице 3
-/// (только форма) со своим `ReceiptsData`; состояние документов общее.
-fn detach(
-    main: &AppWindow,
-    state_rc: &Rc<RefCell<State>>,
-    shell_rc: &Rc<RefCell<Shell>>,
-    shell: &mut Shell,
-    tab: usize,
-) {
-    let Some(number) = shell.tabs().get(tab).and_then(|t| t.doc) else {
-        return;
-    };
-    let mut state = state_rc.borrow_mut();
-    // Поля формы главного окна сначала попадают в документ.
-    before(main, &mut state, shell);
-    if !state.docs.contains_key(&number) || state.detached.contains_key(&number) {
-        return;
-    }
-    let Ok(window) = AppWindow::new() else { return };
-    crate::app::prepare_doc_window(&window);
-    window.global::<ReceiptsData>().set_detached(true);
-    publish_catalogs(&window, &state);
-    if let Some(doc) = state.docs.get(&number) {
-        fill_form(&window, doc);
-    }
-    wire_form(
-        &window,
-        main.as_weak(),
-        state_rc,
-        shell_rc,
-        Target::Doc(number),
-    );
-    // Закрытие окна крестиком закрывает документ, как закрытие вкладки.
-    window.window().on_close_requested({
-        let (main, state, shell) = (main.as_weak(), state_rc.clone(), shell_rc.clone());
-        move || {
-            if let Some(main) = main.upgrade() {
-                close_detached(
-                    &main,
-                    &mut state.borrow_mut(),
-                    &shell.borrow(),
-                    number,
-                    false,
-                );
-            }
-            slint::CloseRequestResponse::HideWindow
-        }
-    });
-    let _ = window.show();
-    state.detached.insert(
-        number,
-        Detached {
-            window,
-            form: FormCtx {
-                loaded: Some(number),
-                ..FormCtx::default()
-            },
-        },
-    );
-    shell.close_tab(tab);
-    after(main, &mut state, shell);
+    after(app, state, shell, WindowRef::Main);
 }
 
 /// Меняет состав табличной части открытого документа. `edit` возвращает `None`, если менять
@@ -1499,7 +1677,7 @@ fn detach(
 fn change_lines(
     app: &AppWindow,
     state: &mut State,
-    shell: &mut Shell,
+    tabs: &mut dyn DocTabs,
     edit: impl FnOnce(&mut Vec<Line>) -> Option<Option<usize>>,
 ) {
     let data = app.global::<ReceiptsData>();
@@ -1511,8 +1689,7 @@ fn change_lines(
     };
     render_lines(app, doc);
     data.set_line_selected(select.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1));
-    before(app, state, shell);
-    crate::app::refresh(app, shell);
+    before(app, state, tabs);
 }
 
 /// Открывает окно строки: пустое для новой или с данными для правки.
@@ -1552,7 +1729,7 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
 pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
     let state = Rc::new(RefCell::new(State {
         all: Vec::new(),
-        sort: None,
+        sorting: Sorting::default(),
         query: String::new(),
         engine: None,
         generation: 0,
@@ -1560,7 +1737,9 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         next_number: 1,
         docs: HashMap::new(),
         form: FormCtx::default(),
-        detached: HashMap::new(),
+        main: app.as_weak(),
+        hosts: HashMap::new(),
+        tab_docs: HashMap::new(),
         marks: HashSet::new(),
         notice_timer: slint::Timer::default(),
         catalogs: Catalogs::default(),
@@ -1568,22 +1747,68 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
     let data = app.global::<ReceiptsData>();
     data.set_columns(ModelRc::new(VecModel::from(list_columns())));
     publish_catalogs(app, &state.borrow());
-    refresh_list(app, &state.borrow());
+    refresh_list(&state.borrow());
+    let windows = Rc::new(RefCell::new(None));
+    let tabs = Tabs {
+        target: WindowRef::Main,
+        shell: shell.clone(),
+        windows: windows.clone(),
+    };
+    wire_list(app, &app.as_weak(), &state, &tabs);
+    wire_form(app, app.as_weak(), &state, &tabs);
 
+    ReceiptsUi {
+        state,
+        shell,
+        windows,
+    }
+}
+
+/// Подключает действия списка к окну `app`. Список общий: сортировка и поиск действуют во всех
+/// окнах, а новый документ открывается в этом же окне.
+fn wire_list(
+    app: &AppWindow,
+    main: &slint::Weak<AppWindow>,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+) {
+    let data = app.global::<ReceiptsData>();
+
+    // Щелчок по заголовку: нет → по возрастанию → по убыванию → нет; колонка встаёт в конец
+    // очереди приоритета. Меню заголовка задаёт направление и приоритет прямо.
     data.on_sort({
-        let (app, state) = (app.as_weak(), state.clone());
+        let state = state.clone();
         move |column| {
-            let Some(app) = app.upgrade() else { return };
+            let Some(column) = usize::try_from(column).ok().filter(|c| *c < COLUMNS.len()) else {
+                return;
+            };
+            state.borrow_mut().sorting.click(column);
+            reload(&state, false);
+        }
+    });
+    data.on_dismiss_notice({
+        let state = state.clone();
+        move || show_notice(&state.borrow(), "")
+    });
+    data.on_sort_action({
+        let state = state.clone();
+        move |column, id| {
             let Some(column) = usize::try_from(column).ok().filter(|c| *c < COLUMNS.len()) else {
                 return;
             };
             {
-                let mut state = state.borrow_mut();
-                let descending = matches!(state.sort, Some((current, false)) if current == column);
-                state.sort = Some((column, descending));
+                let sorting = &mut state.borrow_mut().sorting;
+                match id.as_str() {
+                    "asc" => sorting.set(column, false),
+                    "desc" => sorting.set(column, true),
+                    "clear" => sorting.clear(column),
+                    "clear-all" => sorting.clear_all(),
+                    "earlier" => sorting.shift(column, true),
+                    "later" => sorting.shift(column, false),
+                    _ => return,
+                }
             }
-            // Сортирует ядро: значок в шапке обновится вместе с ответом.
-            reload(&app, &state, false);
+            reload(&state, false);
         }
     });
 
@@ -1620,15 +1845,15 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
             let Some(window) = app.upgrade() else { return };
             state.borrow_mut().query = query.to_string();
             window.global::<ReceiptsData>().set_selected_row(-1);
-            let (app, state) = (app.clone(), state.clone());
+            // Текст поиска один на все окна, как и сам список.
+            for other in all_windows(&state.borrow()) {
+                other.global::<ReceiptsData>().set_query(query.clone());
+            }
+            let state = state.clone();
             pause.start(
                 slint::TimerMode::SingleShot,
                 std::time::Duration::from_millis(250),
-                move || {
-                    if let Some(window) = app.upgrade() {
-                        reload(&window, &state, false);
-                    }
-                },
+                move || reload(&state, false),
             );
         }
     });
@@ -1651,93 +1876,90 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
 
     // Действия меню строки. Строка меняется на месте: прокрутка и выбор остаются как были.
     data.on_action({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move |row, id| {
-            let Some(app) = app.upgrade() else { return };
-            let state_rc = state.clone();
-            let mut state = state.borrow_mut();
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let Some(index) = usize::try_from(row).ok() else {
                 return;
             };
-            let Some(number) = state.visible().get(index).map(|r| r.number) else {
+            let Some(number) = state.borrow().visible().get(index).map(|r| r.number) else {
                 return;
             };
             match id.as_str() {
-                "edit" => open_doc(&app, &mut state, &mut shell.borrow_mut(), number),
+                "edit" => open_from_list(&app, &main, &state, &tabs, number),
                 "post" | "unpost" => {
-                    post_in_core(&app, &state_rc, &state, number, id == "post");
+                    post_in_core(&state, &state.borrow(), number, id == "post");
                     return;
                 }
                 "delete" => {
-                    mark_deleted_in_core(&app, &state_rc, &state, number);
+                    mark_deleted_in_core(&state, &state.borrow(), number);
                     return;
                 }
                 "milestone" => {
+                    let mut state = state.borrow_mut();
                     if !state.marks.remove(&number) {
                         state.marks.insert(number);
                     }
-                    let marks = mark_positions(&state.visible(), &state.marks);
-                    app.global::<ReceiptsData>()
-                        .set_marks(ModelRc::new(VecModel::from(marks)));
+                    for window in all_windows(&state) {
+                        let marks = mark_positions(&state.visible(), &state.marks);
+                        window
+                            .global::<ReceiptsData>()
+                            .set_marks(ModelRc::new(VecModel::from(marks)));
+                    }
                 }
                 _ => return,
             }
-            update_row(&app, &state, index);
+            update_row(&state.borrow(), index);
         }
     });
 
     data.on_open({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move |row| {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let picked = usize::try_from(row)
                 .ok()
-                .and_then(|i| state.visible().get(i).map(|r| r.number));
+                .and_then(|i| state.borrow().visible().get(i).map(|r| r.number));
             if let Some(number) = picked {
-                open_doc(&app, &mut state, &mut shell.borrow_mut(), number);
+                open_from_list(&app, &main, &state, &tabs, number);
             }
         }
     });
 
     data.on_create({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            let number = state
-                .engine
-                .as_ref()
-                .and_then(|engine| last_number(&**engine).ok())
-                .map_or(state.next_number, |last| (last + 1).max(state.next_number));
-            state.next_number = number + 1;
-            open_doc(&app, &mut state, &mut shell.borrow_mut(), number);
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let number = {
+                let mut state = state.borrow_mut();
+                let number = state
+                    .engine
+                    .as_ref()
+                    .and_then(|engine| last_number(&**engine).ok())
+                    .map_or(state.next_number, |last| (last + 1).max(state.next_number));
+                state.next_number = number + 1;
+                number
+            };
+            open_from_list(&app, &main, &state, &tabs, number);
         }
     });
-
-    wire_form(app, app.as_weak(), &state, &shell, Target::Main);
-
-    ReceiptsUi { state, shell }
 }
 
-/// Закрывает форму: вкладку главного окна или документ в отдельном окне.
-fn close_form(main: &AppWindow, state: &mut State, shell: &mut Shell, target: Target) {
-    match target {
-        Target::Main => close_active(main, state, shell),
-        Target::Doc(number) => close_detached(main, state, shell, number, true),
-    }
-}
-
-/// Подключает действия формы документа (кнопки, строки, справочники) к окну `app`: вкладке
-/// главного окна (`Target::Main`) или отдельному окну документа. `main` это главное окно,
-/// где живут список и вкладки.
+/// Подключает действия формы документа (кнопки, строки, справочники) к окну `app`. `main` это
+/// главное окно, `tabs` вкладки окна `app`.
 fn wire_form(
     app: &AppWindow,
     main: slint::Weak<AppWindow>,
     state: &Rc<RefCell<State>>,
-    shell: &Rc<RefCell<Shell>>,
-    target: Target,
+    tabs: &Tabs,
 ) {
+    let target = tabs.target;
     let data = app.global::<ReceiptsData>();
     let lines_snapshot: Snapshot = Rc::default();
 
@@ -1765,55 +1987,68 @@ fn wire_form(
         move || *snapshot.borrow_mut() = None
     });
 
-    // Действия формы. Список и вкладки обновляются в главном окне (`main`), поэтому у отдельного
-    // окна документа обработчики работают с двумя окнами сразу.
+    // Действия формы. Список обновляется во всех окнах, вкладки в окне этой формы.
     data.on_form_save({
-        let (app, main, state, shell) = (app.as_weak(), main.clone(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
             let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
                 return;
             };
-            let mut shell = shell.borrow_mut();
-            let result = {
-                let mut state = form_state(&state, target);
-                let result = save_loaded(&app, &mut state, &mut shell, PostAction::Write);
-                if result.is_ok()
-                    && let Some(number) = state.form.loaded
-                {
-                    load_doc(&app, &mut state, number);
-                }
-                result
-            };
+            let result = tabs
+                .with(|list| {
+                    let mut state = form_state(&state, target);
+                    let result = save_loaded(&app, &mut state, list, PostAction::Write);
+                    if result.is_ok()
+                        && let Some(number) = state.form.loaded
+                    {
+                        load_doc(&app, &mut state, number);
+                    }
+                    result
+                })
+                .unwrap_or(Ok(()));
             show_form_result(&app, &result);
-            refresh_list(&main, &state.borrow());
-            crate::app::refresh(&main, &shell);
+            refresh_list(&state.borrow());
+            tabs.refresh(&main);
         }
     });
 
     data.on_form_post({
-        let (app, main, state, shell) = (app.as_weak(), main.clone(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move |close| {
             let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
                 return;
             };
-            let mut shell = shell.borrow_mut();
-            let result = {
-                let mut state = form_state(&state, target);
-                let result = save_loaded(&app, &mut state, &mut shell, PostAction::Post);
-                if result.is_ok()
-                    && !close
-                    && let Some(number) = state.form.loaded
-                {
-                    load_doc(&app, &mut state, number);
-                }
-                result
-            };
+            let result = tabs
+                .with(|list| {
+                    let mut state = form_state(&state, target);
+                    let result = save_loaded(&app, &mut state, list, PostAction::Post);
+                    if result.is_ok()
+                        && !close
+                        && let Some(number) = state.form.loaded
+                    {
+                        load_doc(&app, &mut state, number);
+                    }
+                    result
+                })
+                .unwrap_or(Ok(()));
             show_form_result(&app, &result);
+            refresh_list(&state.borrow());
             if close && result.is_ok() {
-                close_form(&main, &mut state.borrow_mut(), &mut shell, target);
+                tabs.close_active(&main, &state);
             }
-            refresh_list(&main, &state.borrow());
-            crate::app::refresh(&main, &shell);
+            tabs.refresh(&main);
+        }
+    });
+
+    // Поле формы изменили: правки попадают в документ, статус и точка на вкладке обновляются.
+    data.on_form_edited({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move || {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            tabs.with(|list| before(&app, &mut form_state(&state, target), list));
+            tabs.refresh(&main);
         }
     });
 
@@ -1838,42 +2073,13 @@ fn wire_form(
     });
 
     data.on_form_close({
-        let (app, main, state, shell) = (app.as_weak(), main.clone(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
             let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
                 return;
             };
-            let mut shell = shell.borrow_mut();
-            before(&app, &mut form_state(&state, target), &mut shell);
-            close_form(&main, &mut state.borrow_mut(), &mut shell, target);
-            crate::app::refresh(&main, &shell);
-        }
-    });
-
-    // Из вкладки в отдельное окно (кнопка на форме).
-    data.on_form_detach({
-        let (main, state_rc, shell_rc) = (main.clone(), state.clone(), shell.clone());
-        move || {
-            let Some(main) = main.upgrade() else { return };
-            let mut shell = shell_rc.borrow_mut();
-            let tab = shell.active_tab();
-            detach(&main, &state_rc, &shell_rc, &mut shell, tab);
-            crate::app::refresh(&main, &shell);
-        }
-    });
-
-    // Из отдельного окна обратно в панель вкладок.
-    data.on_form_dock({
-        let (app, main, state, shell) = (app.as_weak(), main.clone(), state.clone(), shell.clone());
-        move || {
-            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
-                return;
-            };
-            let Target::Doc(number) = target else { return };
-            let mut shell = shell.borrow_mut();
-            store_form(&app, &mut form_state(&state, target));
-            dock(&main, &mut state.borrow_mut(), &mut shell, number);
-            crate::app::refresh(&main, &shell);
+            tabs.with(|list| before(&app, &mut form_state(&state, target), list));
+            tabs.close_active(&main, &state);
         }
     });
 
@@ -1898,22 +2104,22 @@ fn wire_form(
     });
 
     data.on_line_delete({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let selected = app.global::<ReceiptsData>().get_line_selected();
             if let Ok(index) = usize::try_from(selected) {
-                change_lines(
-                    &app,
-                    &mut form_state(&state, target),
-                    &mut shell.borrow_mut(),
-                    |lines| {
+                tabs.with(|list| {
+                    change_lines(&app, &mut form_state(&state, target), list, |lines| {
                         (index < lines.len()).then(|| {
                             lines.remove(index);
                             None
                         })
-                    },
-                );
+                    });
+                });
+                tabs.refresh(&main);
             }
         }
     });
@@ -1940,42 +2146,47 @@ fn wire_form(
     });
 
     data.on_line_action({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move |row, id| {
-            let Some(app) = app.upgrade() else { return };
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let Some(index) = usize::try_from(row).ok() else {
                 return;
             };
-            let (mut state, mut shell) = (form_state(&state, target), shell.borrow_mut());
-            match id.as_str() {
-                "edit" => open_line_dialog(&app, &mut state, Some(index)),
-                "add" => open_line_dialog(&app, &mut state, None),
-                // Каждое изменение состава возвращает, какую строку выделить после него.
-                "copy" => change_lines(&app, &mut state, &mut shell, |lines| {
-                    let line = lines.get(index)?.clone();
-                    lines.insert(index + 1, line);
-                    Some(Some(index + 1))
-                }),
-                "up" => change_lines(&app, &mut state, &mut shell, |lines| {
-                    (index > 0 && index < lines.len()).then(|| {
-                        lines.swap(index, index - 1);
-                        Some(index - 1)
-                    })
-                }),
-                "down" => change_lines(&app, &mut state, &mut shell, |lines| {
-                    (index + 1 < lines.len()).then(|| {
-                        lines.swap(index, index + 1);
-                        Some(index + 1)
-                    })
-                }),
-                "delete" => change_lines(&app, &mut state, &mut shell, |lines| {
-                    (index < lines.len()).then(|| {
-                        lines.remove(index);
-                        None
-                    })
-                }),
-                _ => {}
-            }
+            tabs.with(|list| {
+                let mut state = form_state(&state, target);
+                match id.as_str() {
+                    "edit" => open_line_dialog(&app, &mut state, Some(index)),
+                    "add" => open_line_dialog(&app, &mut state, None),
+                    // Каждое изменение состава возвращает, какую строку выделить после него.
+                    "copy" => change_lines(&app, &mut state, list, |lines| {
+                        let line = lines.get(index)?.clone();
+                        lines.insert(index + 1, line);
+                        Some(Some(index + 1))
+                    }),
+                    "up" => change_lines(&app, &mut state, list, |lines| {
+                        (index > 0 && index < lines.len()).then(|| {
+                            lines.swap(index, index - 1);
+                            Some(index - 1)
+                        })
+                    }),
+                    "down" => change_lines(&app, &mut state, list, |lines| {
+                        (index + 1 < lines.len()).then(|| {
+                            lines.swap(index, index + 1);
+                            Some(index + 1)
+                        })
+                    }),
+                    "delete" => change_lines(&app, &mut state, list, |lines| {
+                        (index < lines.len()).then(|| {
+                            lines.remove(index);
+                            None
+                        })
+                    }),
+                    _ => {}
+                }
+            });
+            tabs.refresh(&main);
         }
     });
 
@@ -1999,7 +2210,7 @@ fn wire_form(
     });
 
     data.on_catalog_confirm({
-        let (app, main, state) = (app.as_weak(), main.clone(), state.clone());
+        let (app, state) = (app.as_weak(), state.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let mut state = form_state(&state, target);
@@ -2056,9 +2267,7 @@ fn wire_form(
                     data.set_line_name(name.into());
                 }
             }
-            if let Some(main) = main.upgrade() {
-                publish_all(&main, &state);
-            }
+            publish_all(&state);
             state.form.catalog_kind = None;
             data.set_catalog_open(false);
         }
@@ -2087,9 +2296,11 @@ fn wire_form(
     });
 
     data.on_line_confirm({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, state, tabs) = (app.as_weak(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let data = app.global::<ReceiptsData>();
             let name = data.get_line_name().to_string();
             let quantity = receipts::parse_decimal(&data.get_line_quantity(), 3).filter(|q| *q > 0);
@@ -2109,18 +2320,21 @@ fn wire_form(
             let (Some(quantity), Some(price)) = (quantity, price) else {
                 return;
             };
-            let mut state = form_state(&state, target);
-            let unit = state.catalogs.unit_of(&name).to_owned();
-            let line = Line::new(&name, &unit, quantity, price);
-            let editing = state.form.editing_line;
-            data.set_line_open(false);
-            change_lines(&app, &mut state, &mut shell.borrow_mut(), |lines| {
-                match editing.filter(|i| *i < lines.len()) {
-                    Some(index) => lines[index] = line,
-                    None => lines.push(line),
-                }
-                Some(None)
+            tabs.with(|list| {
+                let mut state = form_state(&state, target);
+                let unit = state.catalogs.unit_of(&name).to_owned();
+                let line = Line::new(&name, &unit, quantity, price);
+                let editing = state.form.editing_line;
+                data.set_line_open(false);
+                change_lines(&app, &mut state, list, |lines| {
+                    match editing.filter(|i| *i < lines.len()) {
+                        Some(index) => lines[index] = line,
+                        None => lines.push(line),
+                    }
+                    Some(None)
+                });
             });
+            tabs.refresh(&main);
         }
     });
 }

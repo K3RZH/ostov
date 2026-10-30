@@ -6,12 +6,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, Model, PhysicalPosition};
+use slint::{ComponentHandle, LogicalSize, Model, PhysicalPosition};
 
 use crate::AppWindow;
-use crate::app::{current_settings, prepare_host_window, refresh, set_tabs, tab_items};
+use crate::TabItem;
+use crate::app::{
+    HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_tabs, tab_items,
+};
+use crate::receipts_ui::ReceiptsUi;
 use crate::shell::{Shell, Tab};
-use crate::workspace::{Change, WindowId, WindowRef, Workspace};
+use crate::workspace::{Change, TabList, WindowId, WindowRef, Workspace};
 
 /// Перетаскивание вкладки между окнами на общих координатах экрана.
 struct DragState {
@@ -19,14 +23,19 @@ struct DragState {
     whole: bool,
     /// Окно-копия, идущее за указателем (вкладка вышла за панель).
     follower: Option<WindowId>,
-    /// Где указатель был внутри окна в начале перетаскивания (физические пиксели).
-    grab: (f32, f32),
+    /// Размер окна, которое тащат целиком: на время перетаскивания оно уменьшается.
+    restore: Option<LogicalSize>,
 }
+
+/// Что подключить к каждому новому окну.
+type HostSetup = Rc<dyn Fn(&AppWindow)>;
 
 struct Inner {
     workspace: Workspace,
     hosts: HashMap<WindowId, AppWindow>,
     drag: Option<DragState>,
+    /// Что подключить к каждому новому окну, кроме форм (например, пользователей).
+    host_setup: Option<HostSetup>,
 }
 
 /// Журнал перетаскивания для разбора странностей в живых окнах: включается переменной
@@ -56,8 +65,14 @@ fn drag_log(text: &str) {
 
 /// Высота панели вкладок (логические пиксели).
 const STRIP_HEIGHT: f32 = 40.0;
-/// Где в новом окне вкладка: указатель встаёт на её середину (логические пиксели).
+/// Где в окне вкладка, которую тащат: указатель встаёт на её середину (логические пиксели).
 const FOLLOWER_GRAB: (f32, f32) = (128.0, 56.0);
+/// Размер окна на время перетаскивания. Оконный менеджер не даёт программно вывести окно за край
+/// экрана (mutter держит его целиком на экране): большое окно упёрлось бы и отстало от указателя.
+const DRAG_SIZE: LogicalSize = LogicalSize {
+    width: 640.0,
+    height: 420.0,
+};
 
 /// Положения окон и указателя в общих координатах экрана известны на Windows, macOS и X11.
 /// На чистом Wayland приложение их не знает.
@@ -101,11 +116,19 @@ fn strip_hit(window: &AppWindow, point: (f32, f32)) -> Option<usize> {
 #[derive(Clone)]
 pub struct Windows {
     inner: Rc<RefCell<Inner>>,
+    receipts: ReceiptsUi,
+    /// Дерево навигации общее; у каждого окна своя подсветка выбранного пункта.
+    shell: Rc<RefCell<Shell>>,
 }
 
-impl Default for Windows {
-    fn default() -> Self {
-        Self::new()
+/// Переносит строку модели вкладок окна с `from` на `to` (индекс после переноса).
+fn move_row(window: &AppWindow, from: usize, to: usize) {
+    let model = window.get_tabs();
+    if let Some(rows) = model.as_any().downcast_ref::<slint::VecModel<TabItem>>()
+        && from < rows.row_count()
+    {
+        let row = rows.remove(from);
+        rows.insert(to.min(rows.row_count()), row);
     }
 }
 
@@ -117,14 +140,29 @@ fn retire(window: AppWindow) {
 }
 
 impl Windows {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(receipts: &ReceiptsUi) -> Self {
+        let windows = Self {
             inner: Rc::new(RefCell::new(Inner {
                 workspace: Workspace::new(),
                 hosts: HashMap::new(),
                 drag: None,
+                host_setup: None,
             })),
-        }
+            receipts: receipts.clone(),
+            shell: receipts.shell(),
+        };
+        receipts.bind_windows(&windows);
+        windows
+    }
+
+    /// Что подключить к каждому новому окну, кроме списка и форм документов.
+    pub fn on_host_created(&self, setup: impl Fn(&AppWindow) + 'static) {
+        self.inner.borrow_mut().host_setup = Some(Rc::new(setup));
+    }
+
+    /// Доступ к вкладкам дополнительного окна.
+    pub fn with_list<R>(&self, id: WindowId, f: impl FnOnce(&mut TabList) -> R) -> Option<R> {
+        self.inner.borrow_mut().workspace.list_mut(id).map(f)
     }
 
     /// Для тестового стенда: окна по модели, окна на экране и число вкладок в каждом окне модели.
@@ -156,11 +194,6 @@ impl Windows {
 
     pub fn set_active(&self, window: WindowRef) {
         self.inner.borrow_mut().workspace.set_active(window);
-    }
-
-    /// Вкладку можно вынести в окно: список и пользователи пока привязаны к главному окну.
-    pub fn can_detach(tab: &Tab) -> bool {
-        !matches!(tab.view, "users" | "receipts")
     }
 
     /// Вызывает `f` для каждого дополнительного окна (настройки темы и вида).
@@ -220,8 +253,10 @@ impl Windows {
         point: (f32, f32),
         exclude: &[WindowRef],
     ) -> Option<(WindowRef, usize)> {
+        // Сначала дополнительные окна: обычно они лежат поверх главного.
         self.all_windows(main)
             .into_iter()
+            .rev()
             .filter(|(window_ref, _)| !exclude.contains(window_ref))
             .find_map(|(window_ref, window)| strip_hit(&window, point).map(|at| (window_ref, at)))
     }
@@ -255,13 +290,9 @@ impl Windows {
         if !global_coords() {
             return;
         }
-        // Документы и вкладки со своим состоянием двигаются другим путём.
         let Some(tab) = self.tab_at(shell, source, index) else {
             return;
         };
-        if tab.doc.is_some() || !Self::can_detach(&tab) {
-            return;
-        }
         let scale = source_window.window().scale_factor();
         let point = pointer_global(source_window, x, y);
         drag_log(&format!(
@@ -270,7 +301,7 @@ impl Windows {
             point.0,
             point.1
         ));
-        let (whole, follower, grab) = {
+        let (whole, follower) = {
             let mut inner = self.inner.borrow_mut();
             if inner.drag.is_none() {
                 let whole = matches!(source, WindowRef::Extra(id)
@@ -278,24 +309,33 @@ impl Windows {
                 inner.drag = Some(DragState {
                     whole,
                     follower: None,
-                    grab: (x * scale, y * scale),
+                    restore: whole.then(|| {
+                        source_window
+                            .window()
+                            .size()
+                            .to_logical(source_window.window().scale_factor())
+                    }),
                 });
+                if whole {
+                    source_window.set_keep_on_top(true);
+                    source_window.window().set_maximized(false);
+                    source_window.window().set_size(DRAG_SIZE);
+                }
             }
             match inner.drag.as_ref() {
-                Some(drag) => (drag.whole, drag.follower, drag.grab),
+                Some(drag) => (drag.whole, drag.follower),
                 None => return,
             }
         };
         if whole {
-            drag_log(&format!(
-                "  целое окно -> ({:.0},{:.0})",
-                point.0 - grab.0,
-                point.1 - grab.1
-            ));
-            source_window.window().set_position(PhysicalPosition::new(
-                (point.0 - grab.0) as i32,
-                (point.1 - grab.1) as i32,
-            ));
+            let (x, y) = (
+                point.0 - FOLLOWER_GRAB.0 * scale,
+                point.1 - FOLLOWER_GRAB.1 * scale,
+            );
+            drag_log(&format!("  целое окно -> ({x:.0},{y:.0})"));
+            source_window
+                .window()
+                .set_position(PhysicalPosition::new(x as i32, y as i32));
             self.highlight(main, self.find_target(main, point, &[source]));
             return;
         }
@@ -303,17 +343,13 @@ impl Windows {
         if out && follower.is_none() {
             let id = self.inner.borrow_mut().workspace.open_extra(tab);
             drag_log(&format!("  создано окно-копия {id}"));
-            self.open_host(main, shell, id);
-            self.refresh_host(id);
-            // Окно-копия поверх остальных, а вместо «призрака» вкладки идёт оно само.
-            if let Some(window) = self.inner.borrow().hosts.get(&id) {
-                window.set_keep_on_top(true);
-            }
+            self.open_host(main, shell, id, true);
             source_window.set_follower_active(true);
             if let Some(drag) = self.inner.borrow_mut().drag.as_mut() {
                 drag.follower = Some(id);
             }
             follower = Some(id);
+            self.apply(main, shell, Change::default());
         } else if !out && let Some(id) = follower {
             // Вернулись в панель исходного окна: окно-копия не нужно.
             let change = self.inner.borrow_mut().workspace.cancel_detach(id);
@@ -358,14 +394,6 @@ impl Windows {
             "ended {source:?} tab={index} local=({x:.0},{y:.0}) out={out}"
         ));
         let state = self.inner.borrow_mut().drag.take();
-        // Окно, которое осталось жить, снова обычное.
-        if let Some(window) = state
-            .as_ref()
-            .and_then(|s| s.follower)
-            .and_then(|id| self.inner.borrow().hosts.get(&id).map(|w| w.clone_strong()))
-        {
-            window.set_keep_on_top(false);
-        }
         let Some(state) = state.filter(|_| global_coords()) else {
             return false;
         };
@@ -379,6 +407,18 @@ impl Windows {
             "  состояние={:?} цель={target:?}",
             state.follower.map(|f| (f, state.whole))
         ));
+        // Окно, которое остаётся жить, снова обычное и своего размера.
+        if let Some(size) = state.restore {
+            source_window.set_keep_on_top(false);
+            source_window.window().set_size(size);
+        }
+        if let (Some(id), None) = (state.follower, target) {
+            let window = self.inner.borrow().hosts.get(&id).map(|w| w.clone_strong());
+            if let Some(window) = window {
+                window.set_keep_on_top(false);
+                window.window().set_size(HOST_SIZE);
+            }
+        }
         let change = {
             let mut inner = self.inner.borrow_mut();
             let mut shell = shell.borrow_mut();
@@ -389,7 +429,9 @@ impl Windows {
                 (Some(id), None) => {
                     Some(inner.workspace.finish_detach(&mut shell, source, index, id))
                 }
-                (None, Some((to, at))) if state.whole || out => {
+                // Отпустили над панелью другого окна: вкладка переезжает, даже если указатель не
+                // выходил за свою панель (окна стоят рядом на одной высоте).
+                (None, Some((to, at))) => {
                     inner.workspace.move_tab(&mut shell, source, index, to, at)
                 }
                 _ => None,
@@ -401,6 +443,59 @@ impl Windows {
         true
     }
 
+    /// Закрывает активную вкладку дополнительного окна.
+    pub fn close_active_tab(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, id: WindowId) {
+        let change = {
+            let mut inner = self.inner.borrow_mut();
+            let active = inner.workspace.list(id).map(TabList::active);
+            active.map(|active| inner.workspace.close_tab(id, active))
+        };
+        if let Some(change) = change {
+            self.apply(main, shell, change);
+        }
+    }
+
+    /// Возвращает вкладку дополнительного окна в главное.
+    fn return_tab(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, id: WindowId, tab: usize) {
+        let change = self.inner.borrow_mut().workspace.move_tab(
+            &mut shell.borrow_mut(),
+            WindowRef::Extra(id),
+            tab,
+            WindowRef::Main,
+            usize::MAX,
+        );
+        if let Some(change) = change {
+            self.apply(main, shell, change);
+        }
+    }
+
+    /// Показывает вкладку документа в окне, где он уже открыт.
+    pub fn show_doc(
+        &self,
+        main: &AppWindow,
+        shell: &Rc<RefCell<Shell>>,
+        window: WindowRef,
+        doc: u32,
+    ) {
+        match window {
+            WindowRef::Main => {
+                let mut shell = shell.borrow_mut();
+                if let Some(tab) = shell.doc_tab(doc) {
+                    shell.select_tab(tab);
+                }
+            }
+            WindowRef::Extra(id) => {
+                self.with_list(id, |list| {
+                    if let Some(tab) = list.doc_tab(doc) {
+                        list.select(tab);
+                    }
+                });
+            }
+        }
+        self.set_active(window);
+        self.apply(main, shell, Change::default());
+    }
+
     /// Меняет порядок вкладок внутри окна: `to` это новый индекс вкладки после переноса.
     pub fn reorder(
         &self,
@@ -410,7 +505,12 @@ impl Windows {
         from: usize,
         to: usize,
     ) {
-        if from == to {
+        // Над чужой панелью вкладку не переставляют: её сейчас перенесёт `drag_ended`.
+        let over_other = self
+            .all_windows(main)
+            .iter()
+            .any(|(_, window)| window.get_drop_target());
+        if from == to || over_other {
             return;
         }
         // Модель принимает место вставки до изъятия вкладки.
@@ -421,6 +521,17 @@ impl Windows {
                 .workspace
                 .move_tab(&mut shell.borrow_mut(), window, from, window, at)
         };
+        if change.is_some() {
+            // Строка переезжает вместе с вкладкой: соседи остаются на своих местах, а не
+            // меняются содержимым (иначе при отпускании видно рывок и повторную анимацию).
+            let window = match window {
+                WindowRef::Main => Some(main.clone_strong()),
+                WindowRef::Extra(id) => self.host(id),
+            };
+            if let Some(window) = window {
+                move_row(&window, from, to);
+            }
+        }
         if let Some(change) = change {
             self.apply(main, shell, change);
         }
@@ -428,15 +539,23 @@ impl Windows {
 
     /// Применяет изменение набора окон и обновляет все окна.
     fn apply(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, change: Change) {
+        // Поля форм попадают в документы, пока окна ещё на экране.
+        self.receipts.store_forms(main);
         for id in change.closed {
+            self.receipts.host_closed(id);
             let window = self.inner.borrow_mut().hosts.remove(&id);
             if let Some(window) = window {
                 retire(window);
             }
         }
         if let Some(id) = change.opened {
-            self.open_host(main, shell, id);
+            self.open_host(main, shell, id, false);
         }
+        self.receipts.sync(
+            main,
+            &mut shell.borrow_mut(),
+            &mut self.inner.borrow_mut().workspace,
+        );
         refresh(main, &shell.borrow());
         let ids: Vec<WindowId> = self.inner.borrow().hosts.keys().copied().collect();
         for id in ids {
@@ -444,12 +563,40 @@ impl Windows {
         }
     }
 
-    fn refresh_host(&self, id: WindowId) {
+    /// Обновляет дополнительные окна (например, раскрыли группу навигации).
+    pub fn refresh_hosts(&self) {
+        let ids: Vec<WindowId> = self.inner.borrow().hosts.keys().copied().collect();
+        for id in ids {
+            self.refresh_host(id);
+        }
+    }
+
+    /// Пункт навигации в дополнительном окне: группа раскрывается, остальное открывается вкладкой
+    /// в этом окне.
+    fn host_nav(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, id: WindowId, node: usize) {
+        if shell.borrow().is_group(node) {
+            shell.borrow_mut().toggle_group(node);
+        } else if let Some(tab) = shell.borrow().node_tab(node) {
+            self.with_list(id, |list| list.open_node(tab));
+            self.set_active(WindowRef::Extra(id));
+        }
+        self.apply(main, shell, Change::default());
+    }
+
+    /// Показывает вкладки дополнительного окна.
+    pub fn refresh_host(&self, id: WindowId) {
         let inner = self.inner.borrow();
         let (Some(window), Some(list)) = (inner.hosts.get(&id), inner.workspace.list(id)) else {
             return;
         };
         set_tabs(window, tab_items(list.tabs()));
+        // Дерево навигации общее, выбранный пункт свой: по активной вкладке этого окна.
+        if let Ok(shell) = self.shell.try_borrow() {
+            let selected = list.tabs().get(list.active()).map(|tab| tab.node);
+            window.set_nav(slint::ModelRc::new(slint::VecModel::from(nav_items(
+                shell.nav_rows_for(selected),
+            ))));
+        }
         window.set_active_tab(i32::try_from(list.active()).unwrap_or_default());
         let title = list
             .tabs()
@@ -459,10 +606,35 @@ impl Windows {
         window.set_doc_title(title.into());
     }
 
-    fn open_host(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, id: WindowId) {
+    /// Создаёт окно `id`. `dragging`: окно идёт за указателем, поверх остальных и уменьшенное.
+    fn open_host(
+        &self,
+        main: &AppWindow,
+        shell: &Rc<RefCell<Shell>>,
+        id: WindowId,
+        dragging: bool,
+    ) {
         let Ok(window) = AppWindow::new() else { return };
         prepare_host_window(&window, current_settings(main));
+        if dragging {
+            window.set_keep_on_top(true);
+            window.window().set_size(DRAG_SIZE);
+        }
+        let setup = self.inner.borrow().host_setup.clone();
+        if let Some(setup) = setup {
+            setup(&window);
+        }
+        self.receipts.host_opened(&window, id);
 
+        window.on_nav_clicked({
+            let (this, shell, main) = (self.clone(), shell.clone(), main.as_weak());
+            move |node| {
+                let (Ok(node), Some(main)) = (usize::try_from(node), main.upgrade()) else {
+                    return;
+                };
+                this.host_nav(&main, &shell, id, node);
+            }
+        });
         window.on_tab_selected({
             let this = self.clone();
             move |tab| {
@@ -473,7 +645,9 @@ impl Windows {
                     let mut inner = this.inner.borrow_mut();
                     inner.workspace.set_active(WindowRef::Extra(id));
                     if let Some(list) = inner.workspace.list_mut(id) {
+                        this.receipts.before_host(id, list);
                         list.select(tab);
+                        this.receipts.after_host(id, list);
                     }
                 }
                 this.refresh_host(id);
@@ -551,19 +725,7 @@ impl Windows {
                 let (Ok(tab), Some(main)) = (usize::try_from(tab), main.upgrade()) else {
                     return;
                 };
-                let change = {
-                    let mut inner = this.inner.borrow_mut();
-                    inner.workspace.move_tab(
-                        &mut shell.borrow_mut(),
-                        WindowRef::Extra(id),
-                        tab,
-                        WindowRef::Main,
-                        usize::MAX,
-                    )
-                };
-                if let Some(change) = change {
-                    this.apply(&main, &shell, change);
-                }
+                this.return_tab(&main, &shell, id, tab);
             }
         });
         // Закрытие окна крестиком закрывает его вкладки.
@@ -575,6 +737,8 @@ impl Windows {
                     inner.workspace.close_window(id);
                     inner.hosts.remove(&id)
                 };
+                this.receipts.host_closed(id);
+                this.receipts.forget_closed_docs();
                 if let Some(window) = removed {
                     slint::Timer::single_shot(Duration::from_millis(100), move || drop(window));
                 }

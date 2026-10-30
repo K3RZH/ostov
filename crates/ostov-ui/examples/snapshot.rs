@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let window = app_window(2)?;
             let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::demo()));
             let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
-            receipts.attach_blocking(&window, snapshot_engine()?);
+            receipts.attach_blocking(snapshot_engine()?);
             {
                 let mut shell = shell.borrow_mut();
                 shell.click(2);
@@ -143,26 +143,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if matches!(screen.as_str(), "doc-window" | "doc-dock" | "doc-close") {
                 // Документ вынесен из вкладки в отдельное окно: снимаем его окно.
                 window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
-                let number = {
-                    let mut shell = shell.borrow_mut();
-                    let tab = shell.active_tab();
-                    let number = shell.tabs().get(tab).and_then(|t| t.doc);
-                    receipts.detach(&window, &mut shell, tab);
-                    number
-                };
-                let doc_window = number
-                    .and_then(|n| receipts.detached_window(n))
+                let windows = ostov_ui::windows::Windows::new(&receipts);
+                let tab = shell.borrow().active_tab();
+                windows.detach_from_main(&window, &shell, tab);
+                let doc_window = windows
+                    .debug_state()
+                    .0
+                    .first()
+                    .and_then(|id| windows.host(*id))
                     .ok_or("окно документа не создано")?;
                 if screen == "doc-window" {
                     return save(&doc_window, dark, &path);
                 }
-                // Возврат во вкладки или закрытие кнопками окна: проверка, что вкладки и документ
-                // в порядке (в обычном приложении это делают кнопки на форме).
-                let data = doc_window.global::<ostov_ui::ReceiptsData>();
+                // Возврат в главное окно (меню вкладки) или закрытие кнопкой формы: проверка, что
+                // вкладки и документ в порядке.
                 if screen == "doc-dock" {
-                    data.invoke_form_dock();
+                    doc_window.invoke_tab_returned(0);
                 } else {
-                    data.invoke_form_close();
+                    doc_window
+                        .global::<ostov_ui::ReceiptsData>()
+                        .invoke_form_close();
                 }
                 let titles: Vec<String> = shell
                     .borrow()
@@ -229,7 +229,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell.click(4);
                 shell.click(6);
             }
-            let windows = ostov_ui::windows::Windows::new();
+            let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            let windows = ostov_ui::windows::Windows::new(&receipts);
             windows.detach_from_main(&window, &shell, 1);
             let mut result = Ok(());
             windows.each(|host| result = save(host, dark, &path));

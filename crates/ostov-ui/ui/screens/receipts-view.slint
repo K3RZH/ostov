@@ -5,6 +5,7 @@ import { TextField } from "../components/text-field.slint";
 import { Select } from "../components/select.slint";
 import { DateField } from "../components/date-field.slint";
 import { MenuAction } from "../components/context-menu.slint";
+import { IconButton } from "../components/icon-button.slint";
 import { ErpGrid, GridColumn, GridMark, GridRow } from "../components/erp-grid.slint";
 
 // Данные и события экрана «Поступления»: список и форма документа.
@@ -19,14 +20,19 @@ export global ReceiptsData {
     in property <string> list-error;
     // Сообщение об ошибке действия над списком (пусто: нет).
     in property <string> notice;
+    callback dismiss-notice();
     // Ошибка записи или проведения документа над формой; при конфликте версий есть «Перечитать».
     in property <string> form-error;
     in property <bool> form-conflict;
     callback form-reload();
     in property <int> milestone-step;
     in property <[GridMark]> marks;
-    in property <int> sort-column: -1;
-    in property <bool> sort-desc;
+    // Сортировка по колонкам: направление (0 нет, 1 по возрастанию, 2 по убыванию), приоритет
+    // с единицы (0 нет) и сколько колонок отсортировано.
+    in property <[int]> sort-dirs;
+    in property <[int]> sort-priorities;
+    in property <int> sort-count;
+    callback sort-action(int, string);
     in-out property <int> selected-row: -1;
     in-out property <string> query;
     callback sort(int);
@@ -50,7 +56,15 @@ export global ReceiptsData {
 
     // Форма документа
     in property <string> form-title;
+    // Статус документа на форме: текст и вид чипа (0 нейтральный, 1 проведён, 2 черновик,
+    // 3 записан, 4 проведён и изменён).
+    in property <string> form-status;
+    // Документ проведён: «Записать» не показывается (ядро не принимает запись проведённого без
+    // перепроведения), «Провести» называется «Перепровести».
     in property <bool> form-posted;
+    in property <int> form-status-kind;
+    // Поле формы изменили: статус пересчитывается («Проведён, изменён»).
+    callback form-edited();
     in-out property <string> form-number;
     in-out property <int> form-day: 1;
     in-out property <int> form-month: 1;
@@ -96,10 +110,6 @@ export global ReceiptsData {
     callback form-post(bool);
     callback form-save();
     callback form-close();
-    // Отдельное окно: документ в своём окне (detached) или во вкладке главного окна.
-    in-out property <bool> detached;
-    callback form-detach();
-    callback form-dock();
 }
 
 component ReceiptList inherits VerticalLayout {
@@ -132,6 +142,29 @@ component ReceiptList inherits VerticalLayout {
             edited(text) => { ReceiptsData.query-changed(text); }
         }
     }
+    // Ошибка действия над списком (не удалось отменить проведение, пометить): заметной полосой.
+    if ReceiptsData.notice != "" : Rectangle {
+        border-radius: Shape.surface-radius;
+        background: Theme.danger-soft;
+        height: notice-row.preferred-height + 2 * Theme.space-8;
+        notice-row := HorizontalLayout {
+            padding: Theme.space-8;
+            spacing: Theme.space-12;
+            Text {
+                text: ReceiptsData.notice;
+                font-size: Theme.font-body;
+                color: Theme.danger;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            IconButton {
+                icon: "close";
+                control-size: 24px;
+                clicked => { ReceiptsData.dismiss-notice(); }
+            }
+        }
+    }
     ErpGrid {
         vertical-stretch: 1;
         columns: ReceiptsData.columns;
@@ -142,8 +175,11 @@ component ReceiptList inherits VerticalLayout {
         actions: ReceiptsData.menu-actions;
         menu-opening(i) => { ReceiptsData.menu-opening(i); }
         action-chosen(i, id) => { ReceiptsData.action(i, id); }
-        sort-column: ReceiptsData.sort-column;
-        sort-desc: ReceiptsData.sort-desc;
+        sortable: true;
+        sort-dirs: ReceiptsData.sort-dirs;
+        sort-priorities: ReceiptsData.sort-priorities;
+        sort-count: ReceiptsData.sort-count;
+        sort-action(i, id) => { ReceiptsData.sort-action(i, id); }
         selected-row <=> ReceiptsData.selected-row;
         resize-begin => { ReceiptsData.resize-begin-list(); }
         resize-column(i, delta, width) => { ReceiptsData.resize-list(i, delta, width); }
@@ -158,13 +194,6 @@ component ReceiptList inherits VerticalLayout {
             text: "Показано " + ReceiptsData.rows.length + " из " + ReceiptsData.total;
             font-size: Theme.font-caption;
             color: Theme.text-muted;
-        }
-        if ReceiptsData.notice != "" : Text {
-            text: ReceiptsData.notice;
-            font-size: Theme.font-caption;
-            color: Theme.danger;
-            horizontal-alignment: left;
-            overflow: elide;
         }
     }
 }
@@ -185,31 +214,28 @@ component ReceiptForm inherits VerticalLayout {
         VerticalLayout {
             alignment: center;
             Chip {
-                text: ReceiptsData.form-posted ? "Проведён" : "Черновик";
-                kind: ReceiptsData.form-posted ? ChipKind.posted : ChipKind.draft;
+                text: ReceiptsData.form-status;
+                kind: ReceiptsData.form-status-kind == 1 ? ChipKind.posted
+                    : ReceiptsData.form-status-kind == 2 ? ChipKind.draft
+                    : ReceiptsData.form-status-kind == 3 ? ChipKind.saved
+                    : ReceiptsData.form-status-kind == 4 ? ChipKind.changed
+                    : ChipKind.neutral;
             }
         }
     }
     HorizontalLayout {
         spacing: Theme.space-8;
         Button {
-            text: "Провести и закрыть";
+            text: ReceiptsData.form-posted ? "Перепровести и закрыть" : "Провести и закрыть";
             kind: ButtonKind.primary;
             clicked => { ReceiptsData.form-post(true); }
         }
-        Button { text: "Провести"; clicked => { ReceiptsData.form-post(false); } }
-        Button { text: "Записать"; clicked => { ReceiptsData.form-save(); } }
+        Button {
+            text: ReceiptsData.form-posted ? "Перепровести" : "Провести";
+            clicked => { ReceiptsData.form-post(false); }
+        }
+        if !ReceiptsData.form-posted : Button { text: "Записать"; clicked => { ReceiptsData.form-save(); } }
         Rectangle { }
-        if !ReceiptsData.detached : Button {
-            text: "В отдельное окно";
-            kind: ButtonKind.text;
-            clicked => { ReceiptsData.form-detach(); }
-        }
-        if ReceiptsData.detached : Button {
-            text: "Вернуть во вкладки";
-            kind: ButtonKind.text;
-            clicked => { ReceiptsData.form-dock(); }
-        }
         Button { text: "Закрыть"; kind: ButtonKind.text; clicked => { ReceiptsData.form-close(); } }
     }
     if ReceiptsData.form-error != "" : Rectangle {
@@ -249,6 +275,7 @@ component ReceiptForm inherits VerticalLayout {
                 day <=> ReceiptsData.form-day;
                 month <=> ReceiptsData.form-month;
                 year <=> ReceiptsData.form-year;
+                edited => { ReceiptsData.form-edited(); }
             }
             Select {
                 width: 180px;
@@ -256,6 +283,7 @@ component ReceiptForm inherits VerticalLayout {
                 options: ReceiptsData.warehouses;
                 addable: true;
                 text <=> ReceiptsData.form-warehouse;
+                selected(_) => { ReceiptsData.form-edited(); }
                 add-requested => { ReceiptsData.catalog-add(0); }
             }
             Select {
@@ -264,6 +292,7 @@ component ReceiptForm inherits VerticalLayout {
                 options: ReceiptsData.suppliers;
                 addable: true;
                 text <=> ReceiptsData.form-supplier;
+                selected(_) => { ReceiptsData.form-edited(); }
                 add-requested => { ReceiptsData.catalog-add(1); }
             }
         }

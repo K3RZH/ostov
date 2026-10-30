@@ -4,15 +4,114 @@
 //! (вынесенные вкладки) в `TabList`. Модель не знает про Slint: Slint-окна создаёт и закрывает
 //! код интерфейса по результату операций (`Change`).
 
+use std::collections::HashSet;
+
 use crate::shell::{Shell, Tab};
 
 pub type WindowId = u32;
 
 /// Окно: главное или дополнительное.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowRef {
     Main,
     Extra(WindowId),
+}
+
+/// Вкладки одного окна глазами форм документов: главное окно держит их в `Shell`, дополнительное
+/// в `TabList`, а форма работает с любым.
+pub trait DocTabs {
+    fn tab_list(&self) -> &[Tab];
+    fn active_index(&self) -> usize;
+    fn select_index(&mut self, index: usize);
+    fn close_index(&mut self, index: usize);
+    fn set_tab_modified(&mut self, index: usize, modified: bool);
+    fn set_title_of_doc(&mut self, doc: u32, title: String);
+    fn renumber(&mut self, old: u32, new: u32);
+    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str);
+
+    fn tab_of_doc(&self, doc: u32) -> Option<usize> {
+        self.tab_list().iter().position(|t| t.doc == Some(doc))
+    }
+
+    fn active_document(&self) -> Option<u32> {
+        self.tab_list().get(self.active_index()).and_then(|t| t.doc)
+    }
+
+    fn documents(&self) -> HashSet<u32> {
+        self.tab_list().iter().filter_map(|t| t.doc).collect()
+    }
+}
+
+impl DocTabs for Shell {
+    fn tab_list(&self) -> &[Tab] {
+        self.tabs()
+    }
+    fn active_index(&self) -> usize {
+        self.active_tab()
+    }
+    fn select_index(&mut self, index: usize) {
+        self.select_tab(index);
+    }
+    fn close_index(&mut self, index: usize) {
+        self.close_tab(index);
+    }
+    fn set_tab_modified(&mut self, index: usize, modified: bool) {
+        self.set_modified(index, modified);
+    }
+    fn set_title_of_doc(&mut self, doc: u32, title: String) {
+        self.set_doc_title(doc, title);
+    }
+    fn renumber(&mut self, old: u32, new: u32) {
+        self.renumber_doc(old, new);
+    }
+    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+        self.open_doc(node, doc, title, view);
+    }
+}
+
+impl DocTabs for TabList {
+    fn tab_list(&self) -> &[Tab] {
+        self.tabs()
+    }
+    fn active_index(&self) -> usize {
+        self.active()
+    }
+    fn select_index(&mut self, index: usize) {
+        self.select(index);
+    }
+    fn close_index(&mut self, index: usize) {
+        self.take(index);
+    }
+    fn set_tab_modified(&mut self, index: usize, modified: bool) {
+        self.set_modified(index, modified);
+    }
+    fn set_title_of_doc(&mut self, doc: u32, title: String) {
+        self.set_doc_title(doc, title);
+    }
+    fn renumber(&mut self, old: u32, new: u32) {
+        self.renumber_doc(old, new);
+    }
+    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+        // Значок документа берём у вкладки его списка.
+        let icon = self
+            .tabs
+            .iter()
+            .find(|t| t.node == node)
+            .map_or("file", |t| t.icon);
+        self.open_doc(
+            node,
+            doc,
+            Tab {
+                title,
+                icon,
+                node,
+                view,
+                doc: Some(doc),
+                preview: false,
+                modified: false,
+            },
+        );
+    }
 }
 
 /// Что изменилось в наборе окон: интерфейс создаёт и закрывает окна по этому списку.
@@ -82,6 +181,20 @@ impl TabList {
             self.active = parent.unwrap_or_else(|| index.min(self.tabs.len().saturating_sub(1)));
         }
         Some(closed)
+    }
+
+    /// Открывает пункт навигации: уже открытая вкладка выбирается, иначе вкладка встаёт в конец.
+    pub fn open_node(&mut self, tab: Tab) {
+        match self
+            .tabs
+            .iter()
+            .position(|t| t.node == tab.node && t.doc.is_none())
+        {
+            Some(index) => self.active = index,
+            None => {
+                self.insert(self.tabs.len(), tab);
+            }
+        }
     }
 
     /// Открывает документ: уже открытый выбирается, новый встаёт рядом с вкладкой своего списка.

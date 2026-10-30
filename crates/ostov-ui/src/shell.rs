@@ -150,7 +150,12 @@ impl Shell {
 
     /// Видимые строки дерева (свёрнутые группы скрывают потомков).
     pub fn nav_rows(&self) -> Vec<NavRowData> {
-        let selected = self.selected_node();
+        self.nav_rows_for(self.selected_node())
+    }
+
+    /// То же для окна, у которого выбран другой узел (дополнительные окна показывают дерево
+    /// навигации с выбором по своей активной вкладке).
+    pub fn nav_rows_for(&self, selected: Option<usize>) -> Vec<NavRowData> {
         let mut order = Vec::with_capacity(self.nodes.len());
         self.tree_order(None, &mut order);
         order
@@ -179,6 +184,33 @@ impl Shell {
 
     pub fn active_tab(&self) -> usize {
         self.active
+    }
+
+    pub fn is_group(&self, id: usize) -> bool {
+        self.nodes.get(id).is_some_and(|node| node.is_group)
+    }
+
+    /// Раскрывает или сворачивает группу дерева (общее для всех окон).
+    pub fn toggle_group(&mut self, id: usize) {
+        if self.is_group(id) && !self.expanded.remove(&id) {
+            self.expanded.insert(id);
+        }
+    }
+
+    /// Вкладка для пункта дерева (избранное ведёт на основной пункт); у группы вкладки нет.
+    pub fn node_tab(&self, id: usize) -> Option<Tab> {
+        let node = self.nodes.get(id).filter(|node| !node.is_group)?;
+        let target = node.link.unwrap_or(id);
+        let node = &self.nodes[target];
+        Some(Tab {
+            title: node.title.to_owned(),
+            icon: node.icon,
+            node: target,
+            view: node.view,
+            doc: None,
+            preview: false,
+            modified: false,
+        })
     }
 
     /// Клик по строке дерева: группа раскрывается или сворачивается, пункт открывает вкладку.

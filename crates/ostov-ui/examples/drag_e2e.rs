@@ -112,7 +112,7 @@ impl Rig {
             shell.pin_tab(active);
         }
         let receipts = ostov_ui::receipts_ui::setup(&main, shell.clone());
-        let windows = Windows::new();
+        let windows = Windows::new(&receipts);
         ostov_ui::app::wire_tabs(&main, &shell, &receipts, &windows);
         ostov_ui::app::refresh(&main, &shell.borrow());
         Self {
@@ -133,7 +133,7 @@ impl Rig {
             .borrow()
             .tabs()
             .iter()
-            .position(|t| !matches!(t.view, "users" | "receipts"))
+            .position(|t| t.view != "receipts")
             .unwrap_or(0)
     }
 
@@ -365,7 +365,7 @@ fn main() {
         }
     }
 
-    println!("\nсценарий 6: вкладка со списком (состояние в главном окне)");
+    println!("\nсценарий 6: вкладка со списком выносится, как любая другая");
     {
         if let Some(i) = rig.list_tab() {
             let before_main = rig.shell.borrow().tabs().len();
@@ -383,6 +383,12 @@ fn main() {
                 st.0.len(),
                 before_main,
                 rig.shell.borrow().tabs().len()
+            );
+            let now = rig.shell.borrow().tabs().len();
+            rig.check(
+                "список ушёл из главного окна",
+                now + 1 == before_main,
+                format!("{now}"),
             );
             rig.consistent("после вытаскивания списка", total);
         } else {
