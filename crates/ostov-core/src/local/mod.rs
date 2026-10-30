@@ -9,8 +9,9 @@ mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions, TryLockError};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
     Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage, NewAdmin,
@@ -22,10 +23,10 @@ use ostov_store::{Driver, Value};
 pub use config::{Config, DocumentConfig, warehouse};
 use convert::{error, fields_from_api, fields_to_api, invalid};
 
-use crate::list::{MILESTONE_STEP, Milestones};
+use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
     Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction,
-    insert_and_post, list, posting,
+    insert_and_post, posting,
 };
 
 pub struct LocalEngine {
@@ -33,6 +34,8 @@ pub struct LocalEngine {
     config: Config,
     /// Вехи по токену списка; сбрасываются при любой записи.
     milestones: Mutex<HashMap<String, Milestones>>,
+    /// Справочник → его поле-название: по нему ссылки сортируются и ищутся.
+    titles: TitleColumns,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
 }
@@ -44,8 +47,17 @@ enum Object<'a> {
 
 impl LocalEngine {
     pub fn new(db: Box<dyn Driver + Send>, config: Config) -> Self {
+        let titles = config
+            .catalogs
+            .iter()
+            .filter_map(|(table, c)| {
+                let field = c.fields().iter().find(|f| f.kind == FieldKind::Text)?;
+                Some((table.clone(), field.name.clone()))
+            })
+            .collect();
         Self {
             db: Mutex::new(db),
+            titles,
             config,
             milestones: Mutex::new(HashMap::new()),
             _lock: None,
@@ -57,8 +69,37 @@ impl LocalEngine {
         self
     }
 
-    fn db(&self) -> EngineResult<MutexGuard<'_, Box<dyn Driver + Send>>> {
-        self.db.lock().map_err(|_| broken())
+    // Если команда упала с паникой, транзакция уже откачена (см. `in_transaction`),
+    // поэтому соединение можно брать и после «отравленного» замка.
+    fn db(&self) -> MutexGuard<'_, Box<dyn Driver + Send>> {
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn milestones(&self) -> MutexGuard<'_, HashMap<String, Milestones>> {
+        self.milestones
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Паника внутри команды становится ошибкой `Internal`, а не падением потока интерфейса.
+    fn guarded<T>(&self, command: &str, f: impl FnOnce() -> EngineResult<T>) -> EngineResult<T> {
+        match catch_unwind(AssertUnwindSafe(f)) {
+            Ok(result) => result,
+            Err(payload) => {
+                let why = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_owned())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                // Вехи могли остаться недостроенными — проще построить заново.
+                self.milestones().clear();
+                Err(EngineError {
+                    code: ErrorCode::Internal,
+                    message: "Внутренняя ошибка ядра, действие отменено. Повторите; если не поможет — сообщите разработчикам.".into(),
+                    details: format!("паника в команде {command}: {why}"),
+                })
+            }
+        }
     }
 
     fn object(&self, name: &str) -> EngineResult<Object<'_>> {
@@ -89,9 +130,7 @@ impl LocalEngine {
     }
 
     fn forget_lists(&self) {
-        if let Ok(mut m) = self.milestones.lock() {
-            m.clear();
-        }
+        self.milestones().clear();
     }
 
     fn page(
@@ -213,8 +252,8 @@ fn saved_element(e: &Element) -> Saved {
     }
 }
 
-impl Engine for LocalEngine {
-    fn hello(&self) -> EngineResult<HelloInfo> {
+impl LocalEngine {
+    fn run_hello(&self) -> EngineResult<HelloInfo> {
         Ok(HelloInfo {
             protocol_version: PROTOCOL_VERSION,
             config_name: self.config.name.clone(),
@@ -225,33 +264,35 @@ impl Engine for LocalEngine {
         })
     }
 
-    fn list(&self, q: &ostov_api::ListQuery) -> EngineResult<ListPage> {
+    fn run_list(&self, q: &ostov_api::ListQuery) -> EngineResult<ListPage> {
         let source = self.source(&q.object)?;
         let query = ListQuery {
             order: q.order.clone(),
             descending: q.descending,
             search: q.search.clone(),
         };
-        let mut db = self.db()?;
-        let page = list(
+        let mut db = self.db();
+        let page = list_titled(
             &mut **db,
             source,
             &query,
             q.after_key.as_deref(),
             window(q.size),
+            &self.titles,
         )
         .map_err(error)?;
         self.page(&mut **db, source, token(&q.object, &query), page)
     }
 
-    fn seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
+    fn run_seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
         let (object, query) = parse_token(token)?;
         let source = self.source(&object)?;
-        let mut db = self.db()?;
-        let mut cache = self.milestones.lock().map_err(|_| broken())?;
+        let mut db = self.db();
+        let mut cache = self.milestones();
         if !cache.contains_key(token) {
             let built =
-                Milestones::build(&mut **db, source, &query, MILESTONE_STEP).map_err(error)?;
+                Milestones::build_titled(&mut **db, source, &query, MILESTONE_STEP, &self.titles)
+                    .map_err(error)?;
             cache.insert(token.to_owned(), built);
         }
         let marks = cache.get(token).ok_or_else(broken)?;
@@ -262,8 +303,8 @@ impl Engine for LocalEngine {
         self.page(&mut **db, source, token.to_owned(), page)
     }
 
-    fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
-        let mut db = self.db()?;
+    fn run_get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
+        let mut db = self.db();
         let missing =
             || EngineError::new(ErrorCode::NotFound, format!("в {object} нет записи {id}"));
         match self.object(object)? {
@@ -315,9 +356,9 @@ impl Engine for LocalEngine {
         }
     }
 
-    fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+    fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
         let mut fields = fields_from_api(&data.fields)?;
-        let mut db = self.db()?;
+        let mut db = self.db();
         let db = &mut **db;
         let saved = match self.object(object)? {
             Object::Catalog(c) => {
@@ -385,14 +426,14 @@ impl Engine for LocalEngine {
         Ok(saved)
     }
 
-    fn mark_deleted(
+    fn run_mark_deleted(
         &self,
         object: &str,
         id: i64,
         version: i64,
         deleted: bool,
     ) -> EngineResult<Saved> {
-        let mut db = self.db()?;
+        let mut db = self.db();
         let saved = match self.object(object)? {
             Object::Catalog(c) => saved_element(
                 &c.mark_deleted(&mut **db, id, version, deleted)
@@ -408,9 +449,9 @@ impl Engine for LocalEngine {
         Ok(saved)
     }
 
-    fn post(&self, document: &str, id: i64) -> EngineResult<Saved> {
+    fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db()?;
+        let mut db = self.db();
         posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule).map_err(error)?;
         let doc = cfg
             .kind
@@ -421,9 +462,9 @@ impl Engine for LocalEngine {
         Ok(saved_doc(&doc))
     }
 
-    fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
+    fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db()?;
+        let mut db = self.db();
         posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id).map_err(error)?;
         let doc = cfg
             .kind
@@ -432,6 +473,48 @@ impl Engine for LocalEngine {
             .ok_or_else(broken)?;
         self.forget_lists();
         Ok(saved_doc(&doc))
+    }
+}
+
+impl Engine for LocalEngine {
+    fn hello(&self) -> EngineResult<HelloInfo> {
+        self.guarded("Hello", || self.run_hello())
+    }
+
+    fn list(&self, q: &ostov_api::ListQuery) -> EngineResult<ListPage> {
+        self.guarded("List", || self.run_list(q))
+    }
+
+    fn seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
+        self.guarded("Seek", || self.run_seek(token, position, size))
+    }
+
+    fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
+        self.guarded("Get", || self.run_get(object, id))
+    }
+
+    fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+        self.guarded("Save", || self.run_save(object, data, post))
+    }
+
+    fn mark_deleted(
+        &self,
+        object: &str,
+        id: i64,
+        version: i64,
+        deleted: bool,
+    ) -> EngineResult<Saved> {
+        self.guarded("MarkDeleted", || {
+            self.run_mark_deleted(object, id, version, deleted)
+        })
+    }
+
+    fn post(&self, document: &str, id: i64) -> EngineResult<Saved> {
+        self.guarded("Post", || self.run_post(document, id))
+    }
+
+    fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
+        self.guarded("Unpost", || self.run_unpost(document, id))
     }
 }
 

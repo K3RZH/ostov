@@ -358,3 +358,125 @@ fn base_opens_only_once() {
     let again = LocalConnector.open_local(&base.path, None).unwrap();
     assert!(again.hello().is_ok());
 }
+
+fn title(v: &Value) -> Option<String> {
+    match v {
+        Value::Ref { title, .. } => title.clone(),
+        _ => None,
+    }
+}
+
+#[test]
+fn receipts_search_by_supplier_number_and_date() {
+    let base = Base::new("search");
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let farm = add(&*engine, "suppliers", "Ферма");
+    for supplier in [mill, farm, mill] {
+        engine
+            .save(
+                "receipt",
+                &receipt(main, supplier, &[(flour, 1000, 100)]),
+                PostAction::Write,
+            )
+            .unwrap();
+    }
+    let found = |s: &str| {
+        let q = ListQuery {
+            search: Some(s.into()),
+            ..query("receipt", 10)
+        };
+        engine.list(&q).unwrap()
+    };
+    // Регистр не важен, в том числе для кириллицы.
+    assert_eq!(found("мельн").total, Some(2));
+    assert_eq!(found("МЕЛЬН").total, Some(2));
+    assert_eq!(found("Мельн").total, Some(2));
+    assert_eq!(found("основ").total, Some(3));
+    assert_eq!(found("Основ").total, Some(3));
+    assert_eq!(found("2026-10").total, Some(3));
+    // Число ищется точно по номеру и как подстрока в дате: «2» есть и в «2026-10-30».
+    let by_number = found("2");
+    assert!(
+        by_number
+            .rows
+            .iter()
+            .any(|r| r.values["number"] == Value::Int(2))
+    );
+    assert_eq!(found("ничего такого").total, Some(0));
+}
+
+#[test]
+fn receipts_sort_by_supplier_title_across_pages() {
+    let base = Base::new("sort");
+    let engine = LocalConnector.create_demo(&base.path, 400).unwrap();
+    for descending in [false, true] {
+        let q = ListQuery {
+            order: Some("supplier".into()),
+            descending,
+            ..query("receipt", 37)
+        };
+        let mut titles = Vec::new();
+        let mut page = engine.list(&q).unwrap();
+        let token = page.token.clone();
+        loop {
+            titles.extend(page.rows.iter().map(|r| title(&r.values["supplier"])));
+            let Some(key) = page.next_key.clone() else {
+                break;
+            };
+            page = engine
+                .list(&ListQuery {
+                    after_key: Some(key),
+                    ..q.clone()
+                })
+                .unwrap();
+        }
+        assert_eq!(titles.len(), 400);
+        let mut sorted = titles.clone();
+        sorted.sort();
+        if descending {
+            sorted.reverse();
+        }
+        assert_eq!(titles, sorted);
+
+        let jump = engine.seek(&token, 150, 37).unwrap();
+        let jumped: Vec<_> = jump
+            .rows
+            .iter()
+            .map(|r| title(&r.values["supplier"]))
+            .collect();
+        assert_eq!(jumped, titles[150..187].to_vec());
+    }
+}
+
+#[test]
+fn panic_in_command_becomes_error_and_engine_keeps_working() {
+    let base = Base::new("panic");
+    let mut config = super::warehouse().unwrap();
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    config.create_tables(&mut db).unwrap();
+    if let Some(receipt) = config.documents.get_mut("receipt") {
+        receipt.rule = |_| panic!("ошибка в правиле проведения");
+    }
+    let engine = super::LocalEngine::new(Box::new(db), config);
+
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    let doc = receipt(main, mill, &[(flour, 1000, 100)]);
+
+    let err = engine.save("receipt", &doc, PostAction::Post).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(
+        err.details.contains("ошибка в правиле проведения"),
+        "{}",
+        err.details
+    );
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(0));
+
+    // Тот же движок дальше работает: документ записывается без проведения.
+    engine.save("receipt", &doc, PostAction::Write).unwrap();
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(1));
+}
