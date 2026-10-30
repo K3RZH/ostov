@@ -571,6 +571,23 @@ impl Windows {
         }
     }
 
+    /// Открывает раздел навигации закреплённой вкладкой в дополнительном окне.
+    pub fn open_node(
+        &self,
+        main: &AppWindow,
+        shell: &Rc<RefCell<Shell>>,
+        id: WindowId,
+        node: usize,
+    ) {
+        self.host_nav(main, shell, id, node);
+    }
+
+    /// Обновляет главное и дополнительные окна после изменения вкладок главного окна.
+    pub fn refresh_all(&self, main: &AppWindow) {
+        refresh(main, &self.shell.borrow());
+        self.refresh_hosts();
+    }
+
     /// Пункт навигации в дополнительном окне: группа раскрывается, остальное открывается вкладкой
     /// в этом окне.
     fn host_nav(&self, main: &AppWindow, shell: &Rc<RefCell<Shell>>, id: WindowId, node: usize) {

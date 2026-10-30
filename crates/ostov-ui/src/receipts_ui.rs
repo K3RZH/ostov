@@ -18,11 +18,11 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::engine::call_in_background;
 use crate::grid;
-use crate::receipts::{self, COLUMNS, Line, Receipt, Sorting};
+use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt, Sorting};
 use crate::shell::{RECEIPTS_NODE, Shell};
 use crate::windows::Windows;
 use crate::workspace::{DocTabs, TabList, WindowId, WindowRef, Workspace};
-use crate::{AppWindow, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
+use crate::{AppWindow, DocLink, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
 
 /// Ширины колонок списка в px: гибкая только «Поставщик», её ширина здесь минимум.
 /// Дальше ширины меняет пользователь перетаскиванием (это делает сама таблица).
@@ -780,11 +780,28 @@ fn notice_text(number: u32, message: &str) -> String {
     format!("Документ № {number}: {message}")
 }
 
-/// Сообщение над списком; само пропадает через несколько секунд.
+/// Документы из предупреждения в виде ссылок для Slint.
+fn doc_links(refs: &[DocRef]) -> ModelRc<DocLink> {
+    ModelRc::new(VecModel::from(
+        refs.iter()
+            .map(|doc| DocLink {
+                title: doc.title().into(),
+                kind: doc.object().into(),
+                number: i32::try_from(doc.number).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// Сообщение над списком; само пропадает через несколько секунд. Документы, которые названы в
+/// тексте ядра, показываются ссылками.
 fn show_notice(state: &State, text: &str) {
     let windows = all_windows(state);
+    let (shown, refs) = receipts::split_blockers(text);
     for window in &windows {
-        window.global::<ReceiptsData>().set_notice(text.into());
+        let data = window.global::<ReceiptsData>();
+        data.set_notice(shown.as_str().into());
+        data.set_notice_links(doc_links(&refs));
     }
     if text.is_empty() {
         state.notice_timer.stop();
@@ -796,7 +813,9 @@ fn show_notice(state: &State, text: &str) {
         std::time::Duration::from_secs(12),
         move || {
             for window in windows.iter().filter_map(slint::Weak::upgrade) {
-                window.global::<ReceiptsData>().set_notice("".into());
+                let data = window.global::<ReceiptsData>();
+                data.set_notice("".into());
+                data.set_notice_links(doc_links(&[]));
             }
         },
     );
@@ -1561,12 +1580,16 @@ fn open_doc(
 
 /// Открывает документ из списка окна `tabs`. Уже открытый в другом окне документ показывается там:
 /// одна правка не должна идти в двух формах сразу.
+///
+/// `new_tab`: документ открывается именно новой вкладкой (из ссылки в предупреждении): текущая
+/// вкладка закрепляется, чтобы её не заменили, и новая тоже.
 fn open_from_list(
     app: &AppWindow,
     main: &AppWindow,
     state: &Rc<RefCell<State>>,
     tabs: &Tabs,
     number: u32,
+    new_tab: bool,
 ) {
     let owner = state.borrow().owner_of(number);
     if let Some(owner) = owner.filter(|owner| *owner != tabs.target) {
@@ -1576,6 +1599,9 @@ fn open_from_list(
         return;
     }
     tabs.with(|list| {
+        if new_tab {
+            list.pin_index(list.active_index());
+        }
         open_doc(
             app,
             &mut form_state(state, tabs.target),
@@ -1583,8 +1609,55 @@ fn open_from_list(
             number,
             tabs.target,
         );
+        if new_tab {
+            list.pin_index(list.active_index());
+        }
     });
     tabs.refresh(main);
+}
+
+/// Нажатие на документ в предупреждении. Поступления открываются своей формой в новой вкладке;
+/// формы других документов (например, расхода) в интерфейсе пока нет, поэтому открывается их
+/// раздел.
+fn open_link(
+    app: &AppWindow,
+    main: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+    kind: &str,
+    number: u32,
+) {
+    if kind == "receipt" {
+        let known = {
+            let state = state.borrow();
+            state.docs.contains_key(&number) || state.all.iter().any(|r| r.number == number)
+        };
+        if known {
+            open_from_list(app, main, state, tabs, number, true);
+        } else {
+            show_notice(
+                &state.borrow(),
+                &format!("Поступление №{number} не найдено в списке."),
+            );
+        }
+        return;
+    }
+    let node = tabs.shell.borrow().node_for_object(kind);
+    let (Some(node), Some(windows)) = (node, tabs.windows()) else {
+        return;
+    };
+    match tabs.target {
+        WindowRef::Main => {
+            {
+                let mut shell = tabs.shell.borrow_mut();
+                shell.click(node);
+                let active = shell.active_tab();
+                shell.pin_tab(active);
+            }
+            windows.refresh_all(main);
+        }
+        WindowRef::Extra(id) => windows.open_node(main, &tabs.shell, id, node),
+    }
 }
 
 /// Записывает открытый документ в ядро (`action`: просто записать, провести или снять проведение
@@ -1649,6 +1722,7 @@ fn show_form_result(app: &AppWindow, result: &EngineResult<()>) {
     match result {
         Ok(()) => {
             data.set_form_error("".into());
+            data.set_form_error_links(doc_links(&[]));
             data.set_form_conflict(false);
         }
         Err(error) if error.code == ErrorCode::VersionConflict => {
@@ -1659,7 +1733,9 @@ fn show_form_result(app: &AppWindow, result: &EngineResult<()>) {
             data.set_form_conflict(true);
         }
         Err(error) => {
-            data.set_form_error(error.message.as_str().into());
+            let (shown, refs) = receipts::split_blockers(&error.message);
+            data.set_form_error(shown.as_str().into());
+            data.set_form_error_links(doc_links(&refs));
             data.set_form_conflict(false);
         }
     }
@@ -1786,6 +1862,18 @@ fn wire_list(
             reload(&state, false);
         }
     });
+    // Документ из предупреждения (в полосе над списком или над формой) открывается новой вкладкой.
+    data.on_open_link({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move |kind, number| {
+            let (Some(app), Some(main), Ok(number)) =
+                (app.upgrade(), main.upgrade(), u32::try_from(number))
+            else {
+                return;
+            };
+            open_link(&app, &main, &state, &tabs, kind.as_str(), number);
+        }
+    });
     data.on_dismiss_notice({
         let state = state.clone();
         move || show_notice(&state.borrow(), "")
@@ -1888,7 +1976,7 @@ fn wire_list(
                 return;
             };
             match id.as_str() {
-                "edit" => open_from_list(&app, &main, &state, &tabs, number),
+                "edit" => open_from_list(&app, &main, &state, &tabs, number, false),
                 "post" | "unpost" => {
                     post_in_core(&state, &state.borrow(), number, id == "post");
                     return;
@@ -1925,7 +2013,7 @@ fn wire_list(
                 .ok()
                 .and_then(|i| state.borrow().visible().get(i).map(|r| r.number));
             if let Some(number) = picked {
-                open_from_list(&app, &main, &state, &tabs, number);
+                open_from_list(&app, &main, &state, &tabs, number, false);
             }
         }
     });
@@ -1946,7 +2034,7 @@ fn wire_list(
                 state.next_number = number + 1;
                 number
             };
-            open_from_list(&app, &main, &state, &tabs, number);
+            open_from_list(&app, &main, &state, &tabs, number, false);
         }
     });
 }
@@ -2361,7 +2449,7 @@ mod tests {
     fn document_goes_through_the_core() {
         let path = std::env::temp_dir().join(format!("ostov-ui-doc-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let engine = ostov_core::LocalConnector
+        let engine = ostov_core::LocalConnector::default()
             .create_demo(path.to_str().unwrap_or_default(), 50)
             .unwrap();
         let catalogs = load_catalogs(&*engine).unwrap();
@@ -2420,7 +2508,9 @@ mod tests {
             std::env::temp_dir().join(format!("ostov-ui-test-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let text = path.to_str().unwrap_or_default();
-        let engine = ostov_core::LocalConnector.create_demo(text, 50).unwrap();
+        let engine = ostov_core::LocalConnector::default()
+            .create_demo(text, 50)
+            .unwrap();
 
         let (all, total) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
         assert_eq!((all.len(), total), (50, 50));

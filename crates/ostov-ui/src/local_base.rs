@@ -30,11 +30,11 @@ pub fn open_demo() -> EngineResult<Arc<dyn Engine>> {
         .to_str()
         .ok_or_else(|| unavailable("Путь к базе не в UTF-8."))?;
     if path.exists() {
-        return LocalConnector.open_local(text, None);
+        return LocalConnector::default().open_local(text, None);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| unavailable(&format!("Не удалось создать каталог базы: {e}.")))?;
     }
-    LocalConnector.create_demo(text, DEMO_RECEIPTS)
+    LocalConnector::default().create_demo(text, DEMO_RECEIPTS)
 }

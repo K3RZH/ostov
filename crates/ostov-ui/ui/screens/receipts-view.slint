@@ -8,6 +8,10 @@ import { MenuAction } from "../components/context-menu.slint";
 import { IconButton } from "../components/icon-button.slint";
 import { ErpGrid, GridColumn, GridMark, GridRow } from "../components/erp-grid.slint";
 
+// Документ, названный в предупреждении (например, расход, который мешает перепровести приход):
+// показывается ссылкой, нажатие открывает его в новой вкладке. kind это имя объекта в ядре.
+export struct DocLink { title: string, kind: string, number: int }
+
 // Данные и события экрана «Поступления»: список и форма документа.
 // Состояние ведёт Rust (src/receipts_ui.rs), здесь только свойства и колбэки.
 export global ReceiptsData {
@@ -20,9 +24,13 @@ export global ReceiptsData {
     in property <string> list-error;
     // Сообщение об ошибке действия над списком (пусто: нет).
     in property <string> notice;
+    in property <[DocLink]> notice-links;
     callback dismiss-notice();
+    // Документ из предупреждения открывается в новой вкладке: вид (имя объекта в ядре) и номер.
+    callback open-link(string, int);
     // Ошибка записи или проведения документа над формой; при конфликте версий есть «Перечитать».
     in property <string> form-error;
+    in property <[DocLink]> form-error-links;
     in property <bool> form-conflict;
     callback form-reload();
     in property <int> milestone-step;
@@ -112,6 +120,84 @@ export global ReceiptsData {
     callback form-close();
 }
 
+// Ссылка на документ в предупреждении.
+component DocLinkText inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    width: label.preferred-width;
+    height: label.preferred-height;
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        color: Theme.accent-text;
+    }
+    // Подчёркивание: в этой версии Slint у Text нет свойства подчёркивания.
+    Rectangle {
+        y: label.preferred-height - 1px;
+        height: touch.has-hover ? 2px : 1px;
+        background: Theme.accent-text;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Полоса ошибки или предупреждения: текст, документы ссылками, кнопка действия или крестик.
+component AlertBanner inherits Rectangle {
+    in property <string> text;
+    in property <[DocLink]> links;
+    in property <bool> closable;
+    in property <string> action-text;
+    callback dismissed();
+    callback action();
+    callback link-clicked(string, int);
+
+    border-radius: Shape.surface-radius;
+    background: Theme.danger-soft;
+    height: content.preferred-height;
+
+    content := VerticalLayout {
+        padding: Theme.space-8;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: root.text;
+                font-size: Theme.font-body;
+                color: Theme.danger;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if root.action-text != "" : Button {
+                text: root.action-text;
+                clicked => { root.action(); }
+            }
+            if root.closable : IconButton {
+                icon: "close";
+                control-size: 24px;
+                clicked => { root.dismissed(); }
+            }
+        }
+        if root.links.length > 0 : HorizontalLayout {
+            alignment: start;
+            spacing: Theme.space-12;
+            Text {
+                text: "Документы:";
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            for link in root.links : DocLinkText {
+                text: link.title;
+                clicked => { root.link-clicked(link.kind, link.number); }
+            }
+        }
+    }
+}
+
 component ReceiptList inherits VerticalLayout {
     padding: Theme.space-24;
     spacing: Theme.space-16;
@@ -143,27 +229,12 @@ component ReceiptList inherits VerticalLayout {
         }
     }
     // Ошибка действия над списком (не удалось отменить проведение, пометить): заметной полосой.
-    if ReceiptsData.notice != "" : Rectangle {
-        border-radius: Shape.surface-radius;
-        background: Theme.danger-soft;
-        height: notice-row.preferred-height + 2 * Theme.space-8;
-        notice-row := HorizontalLayout {
-            padding: Theme.space-8;
-            spacing: Theme.space-12;
-            Text {
-                text: ReceiptsData.notice;
-                font-size: Theme.font-body;
-                color: Theme.danger;
-                wrap: word-wrap;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-            IconButton {
-                icon: "close";
-                control-size: 24px;
-                clicked => { ReceiptsData.dismiss-notice(); }
-            }
-        }
+    if ReceiptsData.notice != "" : AlertBanner {
+        text: ReceiptsData.notice;
+        links: ReceiptsData.notice-links;
+        closable: true;
+        dismissed => { ReceiptsData.dismiss-notice(); }
+        link-clicked(kind, number) => { ReceiptsData.open-link(kind, number); }
     }
     ErpGrid {
         vertical-stretch: 1;
@@ -238,26 +309,12 @@ component ReceiptForm inherits VerticalLayout {
         Rectangle { }
         Button { text: "Закрыть"; kind: ButtonKind.text; clicked => { ReceiptsData.form-close(); } }
     }
-    if ReceiptsData.form-error != "" : Rectangle {
-        border-radius: Shape.surface-radius;
-        background: Theme.danger-soft;
-        height: banner-row.preferred-height + 2 * Theme.space-8;
-        banner-row := HorizontalLayout {
-            padding: Theme.space-8;
-            spacing: Theme.space-12;
-            Text {
-                text: ReceiptsData.form-error;
-                font-size: Theme.font-body;
-                color: Theme.danger;
-                wrap: word-wrap;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-            if ReceiptsData.form-conflict : Button {
-                text: "Перечитать";
-                clicked => { ReceiptsData.form-reload(); }
-            }
-        }
+    if ReceiptsData.form-error != "" : AlertBanner {
+        text: ReceiptsData.form-error;
+        links: ReceiptsData.form-error-links;
+        action-text: ReceiptsData.form-conflict ? "Перечитать" : "";
+        action => { ReceiptsData.form-reload(); }
+        link-clicked(kind, number) => { ReceiptsData.open-link(kind, number); }
     }
     Rectangle {
         border-radius: Shape.surface-radius;

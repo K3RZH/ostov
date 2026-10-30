@@ -51,7 +51,7 @@ fn snapshot_engine() -> Result<std::sync::Arc<dyn ostov_api::Engine>, Box<dyn st
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
     let text = path.to_str().ok_or("путь не в UTF-8")?;
-    Ok(ostov_core::LocalConnector.create_demo(text, 2000)?)
+    Ok(ostov_core::LocalConnector::default().create_demo(text, 2000)?)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

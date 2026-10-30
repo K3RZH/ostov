@@ -28,6 +28,8 @@ pub trait DocTabs {
     fn set_title_of_doc(&mut self, doc: u32, title: String);
     fn renumber(&mut self, old: u32, new: u32);
     fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str);
+    /// Закрепляет вкладку: следующее открытие её не заменит.
+    fn pin_index(&mut self, index: usize);
 
     fn tab_of_doc(&self, doc: u32) -> Option<usize> {
         self.tab_list().iter().position(|t| t.doc == Some(doc))
@@ -67,6 +69,9 @@ impl DocTabs for Shell {
     fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
         self.open_doc(node, doc, title, view);
     }
+    fn pin_index(&mut self, index: usize) {
+        self.pin_tab(index);
+    }
 }
 
 impl DocTabs for TabList {
@@ -90,6 +95,9 @@ impl DocTabs for TabList {
     }
     fn renumber(&mut self, old: u32, new: u32) {
         self.renumber_doc(old, new);
+    }
+    fn pin_index(&mut self, _index: usize) {
+        // Вкладки дополнительного окна всегда закреплены.
     }
     fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
         // Значок документа берём у вкладки его списка.

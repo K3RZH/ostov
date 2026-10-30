@@ -162,6 +162,58 @@ fn compare_by(column: Column, descending: bool, a: &Receipt, b: &Receipt) -> std
     if descending { order.reverse() } else { order }
 }
 
+/// Документ, названный в предупреждении ядра: вид («Расход») и номер.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRef {
+    pub kind: String,
+    pub number: u32,
+}
+
+impl DocRef {
+    /// Имя объекта в ядре по названию вида документа; неизвестный вид: пусто.
+    pub fn object(&self) -> &'static str {
+        match self.kind.as_str() {
+            "Поступление" => "receipt",
+            "Расход" => "issue",
+            _ => "",
+        }
+    }
+
+    /// Подпись ссылки: «Расход №1».
+    pub fn title(&self) -> String {
+        format!("{} №{}", self.kind, self.number)
+    }
+}
+
+/// Фраза ядра о документах, которые мешают («Списывают в этот день: Расход №1, Поступление №54.»).
+const BLOCKERS: &str = " Списывают в этот день: ";
+
+/// Отделяет документы от текста предупреждения: текст без перечня и список ссылок. Пока ядро
+/// отдаёт только строку, ссылки разбираются из неё; когда появятся структурные ссылки в ошибке
+/// (запрос к ядру в Вызовы-ядра-из-ostov-ui.md), заменить эту функцию. «Этот документ» не ссылка:
+/// он и так открыт. Если ссылок нет, текст остаётся как пришёл.
+pub fn split_blockers(message: &str) -> (String, Vec<DocRef>) {
+    let Some((text, tail)) = message.split_once(BLOCKERS) else {
+        return (message.to_owned(), Vec::new());
+    };
+    let refs: Vec<DocRef> = tail
+        .trim_end_matches('.')
+        .split(", ")
+        .filter_map(|item| {
+            let (kind, number) = item.rsplit_once(" №")?;
+            Some(DocRef {
+                kind: kind.trim().to_owned(),
+                number: number.trim().parse().ok()?,
+            })
+        })
+        .collect();
+    if refs.is_empty() {
+        (message.to_owned(), Vec::new())
+    } else {
+        (text.to_owned(), refs)
+    }
+}
+
 /// Сумма «12 345,60»: неразрывные пробелы между разрядами.
 pub fn money(kopecks: i64) -> String {
     let rubles = (kopecks / 100).to_string();
@@ -335,6 +387,32 @@ mod tests {
             posted,
             deleted: false,
         }
+    }
+
+    #[test]
+    fn blockers_become_links() {
+        let message = "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000. Списывают в этот день: Расход №1, Поступление №54.";
+        let (text, refs) = split_blockers(message);
+        assert_eq!(
+            text,
+            "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000."
+        );
+        assert_eq!(
+            refs.iter().map(DocRef::title).collect::<Vec<_>>(),
+            ["Расход №1", "Поступление №54"]
+        );
+        assert_eq!(refs[0].object(), "issue");
+        assert_eq!(refs[1].object(), "receipt");
+    }
+
+    #[test]
+    fn this_document_is_not_a_link() {
+        let message = "Не хватает остатка на 15.01.2026: Товар «Мука» — Количество стало бы −3,000. Списывают в этот день: этот документ.";
+        assert_eq!(split_blockers(message), (message.to_owned(), Vec::new()));
+        assert_eq!(
+            split_blockers("Другая ошибка."),
+            ("Другая ошибка.".to_owned(), Vec::new())
+        );
     }
 
     #[test]

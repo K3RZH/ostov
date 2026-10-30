@@ -186,6 +186,15 @@ impl Shell {
         self.active
     }
 
+    /// Раздел навигации, где живут документы этого вида (имя объекта в ядре).
+    pub fn node_for_object(&self, object: &str) -> Option<usize> {
+        match object {
+            "receipt" => Some(RECEIPTS_NODE),
+            "issue" => Some(4),
+            _ => None,
+        }
+    }
+
     pub fn is_group(&self, id: usize) -> bool {
         self.nodes.get(id).is_some_and(|node| node.is_group)
     }
