@@ -16,10 +16,10 @@ use crate::{
     list_users, rights, set_active, set_password, set_role, system_rights, verify,
 };
 
-const GOOD_PASSWORD: &str = "правильный-пароль";
+pub(crate) const GOOD_PASSWORD: &str = "правильный-пароль";
 
 /// Чистые базы с таблицей пользователей: SQLite и, если задан `OSTOV_PG_URL`, PostgreSQL.
-fn bases(test: &str) -> Vec<Box<dyn Driver>> {
+pub(crate) fn bases(test: &str) -> Vec<Box<dyn Driver>> {
     let mut bases: Vec<Box<dyn Driver>> = vec![Box::new(SqliteDriver::open_in_memory().unwrap())];
     if let Ok(url) = std::env::var("OSTOV_PG_URL") {
         let schema = format!("ostov_sec_{test}");
@@ -38,7 +38,7 @@ fn bases(test: &str) -> Vec<Box<dyn Driver>> {
 }
 
 /// Роли из настоящего `config/roles` плюс `manager` — не встроенная роль с правом `admin`.
-fn roles() -> Vec<RoleDef> {
+pub(crate) fn roles() -> Vec<RoleDef> {
     let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
     let mut roles = ostov_meta::load(&config).unwrap().roles;
     roles.push(RoleDef {
@@ -62,7 +62,7 @@ fn new_user(login: &str, role: &str) -> NewUser {
     }
 }
 
-fn add(db: &mut dyn Driver, login: &str, role: &str) -> User {
+pub(crate) fn add(db: &mut dyn Driver, login: &str, role: &str) -> User {
     add_user(db, &new_user(login, role), &roles()).unwrap()
 }
 
