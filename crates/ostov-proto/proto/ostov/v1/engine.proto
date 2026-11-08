@@ -1,0 +1,331 @@
+// Сетевой протокол Ostov (ADR-026): те же команды, что `ostov_api::Engine`, по gRPC поверх TLS.
+// Ошибка команды — gRPC-статус, в details которого лежит `Error` целиком.
+syntax = "proto3";
+
+package ostov.v1;
+
+service Engine {
+  rpc Hello(Empty) returns (HelloInfo);
+  rpc Login(Credentials) returns (LoginReply);
+  rpc Logout(Empty) returns (Empty);
+  rpc CreateFirstAdmin(Credentials) returns (LoginReply);
+  rpc GetMeta(Empty) returns (Meta);
+
+  rpc List(ListQuery) returns (ListPage);
+  rpc Seek(SeekRequest) returns (ListPage);
+  rpc Get(ObjectRef) returns (ObjectData);
+  rpc Save(SaveRequest) returns (Saved);
+  rpc MarkDeleted(MarkDeletedRequest) returns (Saved);
+  rpc Post(ObjectRef) returns (Saved);
+  rpc Unpost(ObjectRef) returns (Saved);
+  rpc RunReport(ReportQuery) returns (ListPage);
+
+  rpc StartImport(JobRequest) returns (JobId);
+  rpc StartExport(JobRequest) returns (JobId);
+  rpc GetSettings(SettingsKey) returns (Settings);
+  rpc SaveSettings(Settings) returns (Empty);
+
+  rpc AdminUsers(Empty) returns (UserList);
+  rpc AdminAddUser(NewUser) returns (Empty);
+  rpc AdminSetUserActive(UserActive) returns (Empty);
+  rpc AdminJournal(JournalRequest) returns (JournalList);
+  rpc AdminBackup(BackupRequest) returns (JobId);
+  rpc GetClosingDate(Empty) returns (ClosingDate);
+  rpc SetClosingDate(ClosingDate) returns (Empty);
+}
+
+message Empty {}
+
+// ---------------------------------------------------------------- значения
+
+message Value {
+  oneof kind {
+    Empty null = 1;
+    int64 int = 2;
+    string text = 3;
+    Decimal decimal = 4;
+    bool flag = 5;
+    // ГГГГ-ММ-ДД
+    string date = 6;
+    Ref ref = 7;
+  }
+}
+
+message Decimal {
+  int64 units = 1;
+  uint32 scale = 2;
+}
+
+message Ref {
+  int64 id = 1;
+  optional string title = 2;
+}
+
+message Fields {
+  map<string, Value> values = 1;
+}
+
+message Lines {
+  repeated Fields lines = 1;
+}
+
+// ---------------------------------------------------------------- ошибки
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_NOT_IMPLEMENTED = 1;
+  ERROR_CODE_UNAVAILABLE = 2;
+  ERROR_CODE_BAD_CREDENTIALS = 3;
+  ERROR_CODE_NEED_FIRST_ADMIN = 4;
+  ERROR_CODE_NEED_FILE_PASSWORD = 5;
+  ERROR_CODE_ALREADY_OPEN = 6;
+  ERROR_CODE_FORBIDDEN = 7;
+  ERROR_CODE_VERSION_CONFLICT = 8;
+  ERROR_CODE_PERIOD_CLOSED = 9;
+  ERROR_CODE_VALIDATION = 10;
+  ERROR_CODE_INCOMPATIBLE = 11;
+  ERROR_CODE_NOT_FOUND = 12;
+  ERROR_CODE_INTERNAL = 13;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+  string details = 3;
+}
+
+// ---------------------------------------------------------------- сессия и метаданные
+
+message HelloInfo {
+  uint32 protocol_version = 1;
+  string config_name = 2;
+  string config_version = 3;
+  uint32 config_format = 4;
+  bool login_required = 5;
+  bool first_run = 6;
+}
+
+message Credentials {
+  string login = 1;
+  string password = 2;
+}
+
+message LoginReply {
+  string login = 1;
+  string display_name = 2;
+  repeated string roles = 3;
+  // Токен сессии: клиент шлёт его в заголовке `authorization: Bearer <token>`.
+  string token = 4;
+}
+
+enum FieldType {
+  FIELD_TYPE_UNSPECIFIED = 0;
+  FIELD_TYPE_INT = 1;
+  FIELD_TYPE_TEXT = 2;
+  FIELD_TYPE_DECIMAL = 3;
+  FIELD_TYPE_DATE = 4;
+  FIELD_TYPE_REF = 5;
+}
+
+message FieldDef {
+  string name = 1;
+  string title = 2;
+  FieldType type = 3;
+  // Для FIELD_TYPE_DECIMAL.
+  uint32 scale = 4;
+  optional string target = 5;
+  bool required = 6;
+  bool read_only = 7;
+}
+
+message TablePartDef {
+  string name = 1;
+  string title = 2;
+  repeated FieldDef fields = 3;
+}
+
+message Rights {
+  bool read = 1;
+  bool create = 2;
+  bool update = 3;
+  bool post = 4;
+  bool unpost = 5;
+  bool delete = 6;
+}
+
+enum ObjectKind {
+  OBJECT_KIND_UNSPECIFIED = 0;
+  OBJECT_KIND_CATALOG = 1;
+  OBJECT_KIND_DOCUMENT = 2;
+}
+
+message ObjectMeta {
+  string name = 1;
+  string title = 2;
+  ObjectKind kind = 3;
+  optional string icon = 4;
+  repeated FieldDef fields = 5;
+  repeated TablePartDef table_parts = 6;
+  Rights rights = 7;
+}
+
+message MenuItem {
+  string title = 1;
+  optional string icon = 2;
+  optional string object = 3;
+  repeated MenuItem children = 4;
+}
+
+message Meta {
+  repeated MenuItem menu = 1;
+  repeated ObjectMeta objects = 2;
+  repeated string roles = 3;
+}
+
+// ---------------------------------------------------------------- списки и объекты
+
+message ListQuery {
+  string object = 1;
+  optional string order = 2;
+  bool descending = 3;
+  optional string search = 4;
+  optional bool posted = 5;
+  optional bool deleted = 6;
+  optional string after_key = 7;
+  uint32 size = 8;
+}
+
+message Row {
+  int64 id = 1;
+  Fields values = 2;
+}
+
+message ListPage {
+  repeated Row rows = 1;
+  optional string next_key = 2;
+  optional uint64 total = 3;
+  string token = 4;
+}
+
+message SeekRequest {
+  string token = 1;
+  uint64 position = 2;
+  uint32 size = 3;
+}
+
+message ObjectRef {
+  string object = 1;
+  int64 id = 2;
+}
+
+message ObjectData {
+  optional int64 id = 1;
+  int64 version = 2;
+  optional int64 number = 3;
+  bool posted = 4;
+  bool deleted = 5;
+  Fields fields = 6;
+  map<string, Lines> tables = 7;
+}
+
+enum PostAction {
+  POST_ACTION_WRITE = 0;
+  POST_ACTION_POST = 1;
+  POST_ACTION_UNPOST = 2;
+}
+
+message SaveRequest {
+  string object = 1;
+  ObjectData data = 2;
+  PostAction post = 3;
+}
+
+message MarkDeletedRequest {
+  string object = 1;
+  int64 id = 2;
+  int64 version = 3;
+  bool deleted = 4;
+}
+
+message Saved {
+  int64 id = 1;
+  int64 version = 2;
+  optional int64 number = 3;
+}
+
+message ReportQuery {
+  string report = 1;
+  Fields params = 2;
+  optional string after_key = 3;
+  uint32 size = 4;
+}
+
+// ---------------------------------------------------------------- прочее
+
+message JobRequest {
+  string format = 1;
+  string path = 2;
+}
+
+message JobId {
+  string id = 1;
+}
+
+message SettingsKey {
+  string key = 1;
+}
+
+message Settings {
+  string key = 1;
+  // Нет поля — настроек под ключом нет.
+  optional Fields values = 2;
+}
+
+message UserInfo {
+  string login = 1;
+  string display_name = 2;
+  string role = 3;
+  bool active = 4;
+}
+
+message UserList {
+  repeated UserInfo users = 1;
+}
+
+message NewUser {
+  string login = 1;
+  string display_name = 2;
+  string role = 3;
+  string password = 4;
+}
+
+message UserActive {
+  string login = 1;
+  bool active = 2;
+}
+
+message JournalRequest {
+  optional string after_key = 1;
+  uint32 size = 2;
+}
+
+message JournalEntry {
+  int64 id = 1;
+  string when = 2;
+  string user = 3;
+  string object = 4;
+  string action = 5;
+  string details = 6;
+}
+
+message JournalList {
+  repeated JournalEntry entries = 1;
+}
+
+message BackupRequest {
+  string target = 1;
+}
+
+message ClosingDate {
+  optional string date = 1;
+}

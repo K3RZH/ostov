@@ -1,0 +1,20 @@
+[package]
+name = "ostov-proto"
+description = "Сетевой протокол Ostov: .proto, сгенерированный gRPC-код и перевод в типы ostov-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ostov-api = { path = "../ostov-api" }
+prost = "=0.14.4"
+tonic = "=0.14.9"
+tonic-prost = "=0.14.9"
+
+[build-dependencies]
+protox = "=0.10.0"
+tonic-prost-build = "=0.14.9"
