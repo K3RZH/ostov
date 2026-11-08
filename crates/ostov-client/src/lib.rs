@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
-    Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
+    BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
     JournalEntry, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PostAction,
     ReportQuery, Saved, SessionInfo, UserInfo,
 };
@@ -212,6 +212,21 @@ impl Engine for RemoteEngine {
         Ok(self
             .call(s, |mut c, r| async move { c.save(r).await })?
             .into())
+    }
+
+    fn save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        let b = pb::SaveBatchRequest {
+            items: items
+                .iter()
+                .map(|i| pb::SaveRequest {
+                    object: i.object.clone(),
+                    data: Some(i.data.clone().into()),
+                    post: pb::PostAction::from(i.post).into(),
+                })
+                .collect(),
+        };
+        let list = self.call(b, |mut c, r| async move { c.save_batch(r).await })?;
+        Ok(list.saved.into_iter().map(Into::into).collect())
     }
 
     fn mark_deleted(

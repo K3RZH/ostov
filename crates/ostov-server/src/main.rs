@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use ostov_core::local::Rules;
 use ostov_server::{Base, CERT_FILE, Connect, Hub, Tls, serve};
 use ostov_store::Driver;
 
@@ -90,6 +91,38 @@ fn database(url: String) -> Connect {
     }
 }
 
+/// Логика документов: `.py` из конфигурации, если они есть и сервер собран с Python.
+fn rules(
+    config: &std::path::Path,
+    model: &ostov_model::Config,
+) -> Result<Option<Arc<dyn Rules + Send + Sync>>, String> {
+    let scripts = model
+        .documents
+        .iter()
+        .any(|d| ostov_py::script_path(config, &d.name).exists());
+    if !scripts {
+        return Ok(None);
+    }
+    if !ostov_py::PYTHON_ENABLED {
+        eprintln!(
+            "Ostov: предупреждение — в конфигурации есть .py, но сервер собран без Python:              работают встроенные правила документов"
+        );
+        return Ok(None);
+    }
+    let rules = ostov_py::PyRules::load(config, model).map_err(|errors| {
+        let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        format!(
+            "ошибки в логике документов:
+{}",
+            lines.join(
+                "
+"
+            )
+        )
+    })?;
+    Ok(Some(Arc::new(rules)))
+}
+
 fn run() -> Result<(), String> {
     let args = Args::parse(std::env::args().skip(1))?;
     let url = std::env::var("OSTOV_DB_URL")
@@ -99,9 +132,18 @@ fn run() -> Result<(), String> {
         format!("ошибки в конфигурации:\n{}", lines.join("\n"))
     })?;
     let title = model.title.clone();
+    let rules = rules(&args.config, &model)?;
+    let logic = if rules.is_some() {
+        "Python"
+    } else {
+        "встроенная"
+    };
+    let mut base = Base::new(database(url), model);
+    if let Some(rules) = rules {
+        base = base.with_rules(rules);
+    }
     // До рантайма: Hub ходит в базу синхронно.
-    let hub = Hub::start(Base::new(database(url), model))
-        .map_err(|e| format!("{} ({})", e.message, e.details))?;
+    let hub = Hub::start(base).map_err(|e| format!("{} ({})", e.message, e.details))?;
     let tls = Tls::load_or_create(&args.tls, &args.hosts).map_err(|e| e.to_string())?;
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
@@ -110,7 +152,7 @@ fn run() -> Result<(), String> {
             .await
             .map_err(|e| format!("не удалось занять {}: {e}", args.listen))?;
         println!(
-            "Ostov: сервер «{title}» слушает {}. Сертификат для клиентов: {}",
+            "Ostov: сервер «{title}» слушает {}, логика документов: {logic}. Сертификат для клиентов: {}",
             args.listen,
             args.tls.join(CERT_FILE).display()
         );

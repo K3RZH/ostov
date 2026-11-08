@@ -120,6 +120,25 @@ impl Remote for Service {
         .await
     }
 
+    async fn save_batch(&self, req: Request<pb::SaveBatchRequest>) -> Reply<pb::SavedList> {
+        self.with(req, |e, b| {
+            let items = b
+                .items
+                .into_iter()
+                .map(|s| {
+                    Ok(api::BatchItem {
+                        object: s.object,
+                        data: api::ObjectData::try_from(s.data.unwrap_or_default())?,
+                        post: post_action_from_pb(s.post)?,
+                    })
+                })
+                .collect::<EngineResult<Vec<_>>>()?;
+            let saved = e.save_batch(&items)?.into_iter().map(Into::into).collect();
+            Ok(pb::SavedList { saved })
+        })
+        .await
+    }
+
     async fn mark_deleted(&self, req: Request<pb::MarkDeletedRequest>) -> Reply<pb::Saved> {
         self.with(req, |e, m| {
             Ok(e.mark_deleted(&m.object, m.id, m.version, m.deleted)?

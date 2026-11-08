@@ -9,12 +9,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Логика документов из config/documents/*.py; без фичи — встроенные правила.
+python = ["ostov-py/python"]
+
 [dependencies]
 ostov-api = { path = "../ostov-api" }
 ostov-core = { path = "../ostov-core" }
 ostov-meta = { path = "../ostov-meta" }
 ostov-model = { path = "../ostov-model" }
 ostov-proto = { path = "../ostov-proto" }
+ostov-py = { path = "../ostov-py" }
 ostov-sec = { path = "../ostov-sec" }
 ostov-store = { path = "../ostov-store", features = ["postgres", "sqlite"] }
 rcgen = "=0.14.10"

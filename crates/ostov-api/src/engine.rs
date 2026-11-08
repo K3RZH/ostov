@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry, ListPage, ListQuery, Meta,
-    NewUser, ObjectData, PostAction, ReportQuery, Saved, SessionInfo, UserInfo,
+    BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry, ListPage,
+    ListQuery, Meta, NewUser, ObjectData, PostAction, ReportQuery, Saved, SessionInfo, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -40,6 +40,11 @@ pub trait Engine: Send + Sync {
     /// с проведения в той же транзакции.
     fn save(&self, _object: &str, _data: &ObjectData, _post: PostAction) -> EngineResult<Saved> {
         Err(EngineError::not_implemented("Save"))
+    }
+    /// Несколько записей одной транзакцией: упала одна — не записалось ничего (импорт).
+    /// Ошибка начинается с «Запись N:», N — номер в `items` с единицы.
+    fn save_batch(&self, _items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        Err(EngineError::not_implemented("SaveBatch"))
     }
     /// Пометка на удаление или её снятие (СТ-30: удаление — это пометка).
     fn mark_deleted(
