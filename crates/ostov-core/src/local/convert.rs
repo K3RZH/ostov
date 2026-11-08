@@ -58,12 +58,19 @@ pub fn error(e: CoreError) -> EngineError {
     if let CoreError::Security(e) = e {
         return super::access::sec_error(e);
     }
+    if let CoreError::Script { message, details } = e {
+        return EngineError {
+            code: ErrorCode::Validation,
+            message,
+            details,
+        };
+    }
     let code = match &e {
         CoreError::VersionConflict { .. } => ErrorCode::VersionConflict,
         CoreError::NotFound { .. } => ErrorCode::NotFound,
         CoreError::PeriodClosed { .. } => ErrorCode::PeriodClosed,
         CoreError::Incompatible(_) => ErrorCode::Incompatible,
-        CoreError::Security(_) => ErrorCode::Internal,
+        CoreError::Security(_) | CoreError::Script { .. } => ErrorCode::Internal,
         CoreError::NegativeBalance(_) | CoreError::Invalid(_) => ErrorCode::Validation,
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.

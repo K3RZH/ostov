@@ -21,6 +21,12 @@ pub enum CoreError {
         date: String,
         closed_through: String,
     },
+    /// Ошибка в логике конфигурации (Python): `message` — человеку, `details` — трассировка
+    /// для журнала разработчика (НТ-Н2).
+    Script {
+        message: String,
+        details: String,
+    },
     /// Пользователи и вход (`ostov-sec`).
     Security(ostov_sec::SecError),
     /// Конфигурация не ложится на базу без потери данных (реструктуризация).
@@ -57,6 +63,7 @@ impl fmt::Display for CoreError {
                 "период по {closed_through} закрыт: документ от {date} менять нельзя"
             ),
             Self::Security(e) => write!(f, "{e}"),
+            Self::Script { message, .. } => write!(f, "{message}"),
             Self::Incompatible(msg) | Self::Invalid(msg) => write!(f, "{msg}"),
         }
     }

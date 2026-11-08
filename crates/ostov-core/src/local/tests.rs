@@ -1888,3 +1888,41 @@ fn journal_keeps_who_did_what() {
         ErrorCode::Forbidden
     );
 }
+
+#[test]
+fn script_error_keeps_trace_in_details() {
+    struct Failing;
+    impl crate::PostingRule for Failing {
+        fn movements(&self, _: &crate::Document) -> Result<crate::Moves, crate::CoreError> {
+            Err(crate::CoreError::Script {
+                message: "Ошибка в логике документа «Поступление»: ValueError: x".into(),
+                details: "Traceback (most recent call last): ...".into(),
+            })
+        }
+    }
+    struct Rules;
+    impl super::Rules for Rules {
+        fn rule(&self, _: &ostov_model::DocumentDef) -> Option<Box<dyn crate::PostingRule>> {
+            Some(Box::new(Failing))
+        }
+    }
+    let base = Base::new("script-error");
+    let engine = LocalConnector::default()
+        .with_rules(Arc::new(Rules))
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let err = engine
+        .save(
+            "receipt",
+            &receipt(main, mill, &[(flour, 1_000, 100)]),
+            PostAction::Post,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.starts_with("Ошибка в логике документа"));
+    assert!(err.details.starts_with("Traceback"));
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(0));
+}
