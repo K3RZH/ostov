@@ -5,6 +5,7 @@ fields:
   - name: name
     title: Наименование
     type: text
+    required: true
   - name: unit
     title: Единица измерения
     type: text

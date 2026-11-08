@@ -7,9 +7,11 @@ fields:
   - name: date
     title: Дата
     type: date
+    required: true
   - name: warehouse
     title: Склад
     type: ref(warehouses)
+    required: true
 tables:
   - name: lines
     title: Товары
@@ -17,6 +19,8 @@ tables:
       - name: goods
         title: Товар
         type: ref(goods)
+        required: true
       - name: qty
         title: Количество
         type: decimal(3)
+        required: true

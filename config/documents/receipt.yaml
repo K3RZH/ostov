@@ -7,12 +7,15 @@ fields:
   - name: date
     title: Дата
     type: date
+    required: true
   - name: supplier
     title: Поставщик
     type: ref(suppliers)
+    required: true
   - name: warehouse
     title: Склад
     type: ref(warehouses)
+    required: true
   - name: amount
     title: Сумма
     type: decimal(2)
@@ -24,9 +27,11 @@ tables:
       - name: goods
         title: Товар
         type: ref(goods)
+        required: true
       - name: qty
         title: Количество
         type: decimal(3)
+        required: true
       - name: price
         title: Цена
         type: decimal(2)
