@@ -38,11 +38,7 @@ pub struct User {
     pub version: i64,
 }
 
-/// Создаёт `ostov_users`, если её нет.
-///
-/// # Errors
-/// Ошибка базы.
-pub fn create_tables(db: &mut dyn Driver) -> Result<(), SecError> {
+pub(crate) fn create_table(db: &mut dyn Driver) -> Result<(), SecError> {
     let d = db.dialect();
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} ({} {}, login TEXT NOT NULL UNIQUE, \
@@ -288,14 +284,13 @@ fn update(db: &mut dyn Driver, user: &User, columns: &[(&str, Value)]) -> Result
 /// не теряются. Счётчик — не правка администратора, версию не меняет.
 fn count_failure(db: &mut dyn Driver, id: i64) -> Result<i64, SecError> {
     let d = db.dialect();
-    let table = table(d);
-    let increment = format!(
-        "UPDATE {table} SET failed = failed + 1 WHERE id = {}",
+    // RETURNING есть и в PostgreSQL, и в SQLite с 3.35.
+    let sql = format!(
+        "UPDATE {} SET failed = failed + 1 WHERE id = {} RETURNING failed",
+        table(d),
         d.placeholder(1)
     );
-    let read = format!("SELECT failed FROM {table} WHERE id = {}", d.placeholder(1));
-    db.execute(&increment, &[Value::Int(id)])?;
-    let row = db.query(&read, &[Value::Int(id)])?.into_iter().next();
+    let row = db.query(&sql, &[Value::Int(id)])?.into_iter().next();
     int(row.and_then(|row| row.into_iter().next()), "failed")
 }
 
