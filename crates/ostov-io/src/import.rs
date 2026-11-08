@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use ostov_api::{
-    Engine, EngineError, FieldDef, FieldKind, Fields, ListQuery, Meta, ObjectData, ObjectKind,
-    ObjectMeta, PostAction, Value,
+    BatchItem, Engine, EngineError, FieldDef, FieldKind, Fields, ListQuery, Meta, ObjectData,
+    ObjectKind, ObjectMeta, PostAction, Value,
 };
 
 use crate::values::{excel_day_to_iso, parse_date, parse_decimal};
@@ -166,8 +166,9 @@ pub fn plan(engine: &dyn Engine, table: &Table, mapping: &Mapping) -> Result<Pla
     })
 }
 
-/// Записывает проверенный план. Пока в `Engine` нет `save_batch`, объекты пишутся по одному:
-/// при ошибке уже записанные остаются, а `Written::failure` говорит, на чём остановились.
+/// Записывает проверенный план одной транзакцией (`Engine::save_batch`, Дизайн §12): упала
+/// хоть одна запись — не записано ничего, ни объекты, ни журнал. `Written::failure` — на каком
+/// объекте (строки таблицы) и с какой ошибкой ядра.
 ///
 /// # Errors
 /// В плане есть ошибки — ничего не пишется.
@@ -178,32 +179,51 @@ pub fn write(engine: &dyn Engine, plan: &Plan) -> Result<Written, IoError> {
             plan.errors.len()
         )));
     }
-    let action = if plan.post {
+    if plan.items.is_empty() {
+        return Ok(Written {
+            saved: 0,
+            ids: Vec::new(),
+            failure: None,
+        });
+    }
+    let post = if plan.post {
         PostAction::Post
     } else {
         PostAction::Write
     };
-    let mut ids = Vec::with_capacity(plan.items.len());
-    for item in &plan.items {
-        match engine.save(&plan.object, &item.data, action) {
-            Ok(saved) => ids.push(saved.id),
-            Err(error) => {
-                return Ok(Written {
-                    saved: ids.len(),
-                    ids,
-                    failure: Some(WriteFailure {
-                        rows: item.rows.clone(),
-                        error,
-                    }),
-                });
-            }
+    let batch: Vec<BatchItem> = plan
+        .items
+        .iter()
+        .map(|item| BatchItem {
+            object: plan.object.clone(),
+            data: item.data.clone(),
+            post,
+        })
+        .collect();
+    match engine.save_batch(&batch) {
+        Ok(saved) => Ok(Written {
+            saved: saved.len(),
+            ids: saved.into_iter().map(|s| s.id).collect(),
+            failure: None,
+        }),
+        Err(error) => {
+            let rows = failed_record(&error.message)
+                .and_then(|n| plan.items.get(n.checked_sub(1)?))
+                .map(|item| item.rows.clone())
+                .unwrap_or_default();
+            Ok(Written {
+                saved: 0,
+                ids: Vec::new(),
+                failure: Some(WriteFailure { rows, error }),
+            })
         }
     }
-    Ok(Written {
-        saved: ids.len(),
-        ids,
-        failure: None,
-    })
+}
+
+/// Номер записи из ошибки `save_batch`: «Запись 3: …» → 3 (с единицы).
+fn failed_record(message: &str) -> Option<usize> {
+    let rest = message.strip_prefix("Запись ")?;
+    rest.split(':').next()?.trim().parse().ok()
 }
 
 pub(crate) fn find_object<'a>(meta: &'a Meta, name: &str) -> Result<&'a ObjectMeta, IoError> {

@@ -500,3 +500,102 @@ fn formula_noise_huge_numbers_and_blank_rows() {
         Value::Date("2026-01-10".into())
     );
 }
+
+#[test]
+fn failure_in_last_record_writes_nothing_at_all() {
+    let base = Base::new("import-atomic");
+    let engine = base.engine();
+    engine
+        .create_first_admin("boss", "admin-password-1")
+        .unwrap();
+    stock_directory(&*engine);
+    let flour = add_named(&*engine, "goods", "Мука");
+    let main = add_named(&*engine, "warehouses", "Основной");
+    let mill = add_named(&*engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &common::receipt("2026-01-10", main, mill, &[(flour, 5_000, 100)]),
+            ostov_api::PostAction::Post,
+        )
+        .unwrap();
+    let journal_before = engine.admin_journal(None, 1000).unwrap().len();
+
+    // Два расхода: первый в пределах остатка, второй (последний) уводит муку в минус.
+    let path = base.file("issues.xlsx");
+    let rows: &[&[In]] = &[
+        &[
+            In::T("Р-1"),
+            In::T("2026-01-11"),
+            In::T("Основной"),
+            In::T("Мука"),
+            In::N(3.0),
+        ],
+        &[
+            In::T("Р-2"),
+            In::T("2026-01-12"),
+            In::T("Основной"),
+            In::T("Мука"),
+            In::N(4.0),
+        ],
+    ];
+    write_xlsx(
+        &path,
+        &[(
+            "Расход",
+            &["Номер", "Дата", "Склад", "Товар", "Количество"],
+            rows,
+        )],
+    );
+    let table = read_xlsx(&path, &Limits::default()).unwrap();
+    let mut mapping = suggest(&engine.get_meta().unwrap(), "issue", &table).unwrap();
+    mapping.group_by = Some(0);
+    mapping.post = true;
+    let checked = plan(&*engine, &table, &mapping).unwrap();
+    assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+    assert_eq!(checked.items.len(), 2);
+
+    let written = write(&*engine, &checked).unwrap();
+    let failure = written.failure.unwrap();
+    assert_eq!(failure.rows, [3], "упала запись 2 — строка 3 в Excel");
+    assert!(
+        failure.error.message.starts_with("Запись 2:"),
+        "{}",
+        failure.error.message
+    );
+    assert!(
+        failure.error.message.contains("Не хватает остатка"),
+        "{}",
+        failure.error.message
+    );
+    assert_eq!((written.saved, written.ids.len()), (0, 0));
+
+    let issues = ListQuery {
+        object: "issue".into(),
+        size: 10,
+        ..ListQuery::default()
+    };
+    assert_eq!(
+        engine.list(&issues).unwrap().total,
+        Some(0),
+        "и первый расход не записан"
+    );
+    assert_eq!(
+        engine.admin_journal(None, 1000).unwrap().len(),
+        journal_before,
+        "журнал не тронут"
+    );
+}
+
+fn add_named(engine: &dyn Engine, object: &str, name: &str) -> i64 {
+    let query = ListQuery {
+        object: object.into(),
+        search: Some(name.into()),
+        size: 10,
+        ..ListQuery::default()
+    };
+    match engine.list(&query).unwrap().rows.first() {
+        Some(row) => row.id,
+        None => add(engine, object, &[("name", text(name))]),
+    }
+}
