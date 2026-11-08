@@ -1,0 +1,25 @@
+[package]
+name = "ostov-server"
+description = "Сервер режима 2: команды Engine по gRPC поверх TLS, сессии входа, ядро на PostgreSQL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ostov-api = { path = "../ostov-api" }
+ostov-core = { path = "../ostov-core" }
+ostov-model = { path = "../ostov-model" }
+ostov-proto = { path = "../ostov-proto" }
+ostov-sec = { path = "../ostov-sec" }
+ostov-store = { path = "../ostov-store", features = ["postgres"] }
+rcgen = "=0.14.10"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio-stream = { version = "=0.1.19", features = ["net"] }
+tonic = { version = "=0.14.9", features = ["tls-ring"] }
+
+[dev-dependencies]
+ostov-store = { path = "../ostov-store", features = ["postgres", "sqlite"] }

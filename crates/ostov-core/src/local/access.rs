@@ -55,6 +55,11 @@ impl Need {
 }
 
 impl LocalEngine {
+    /// Кто вошёл в этот экземпляр ядра. Сервер держит по экземпляру на сессию и ведёт их по этому.
+    pub fn current_user(&self) -> Option<User> {
+        self.access().user.clone()
+    }
+
     pub(super) fn access(&self) -> MutexGuard<'_, Access> {
         self.access.lock().unwrap_or_else(PoisonError::into_inner)
     }
