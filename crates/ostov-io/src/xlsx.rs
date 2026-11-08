@@ -7,6 +7,12 @@ use calamine::{Data, Reader, Xlsx, open_workbook};
 use crate::values::excel_day_to_iso;
 use crate::{Cell, IoError, Limits, Table};
 
+/// Степень сжатия проверяется у файлов больше этого: маленький файл бомбой не бывает,
+/// а мелкие служебные XML сжимаются сильно и дали бы ложный отказ.
+const RATIO_CHECK_FROM: u64 = 1024 * 1024;
+/// В настоящем xlsx десятки файлов; тысячи — уже атака на оглавление.
+const MAX_ENTRIES: usize = 10_000;
+
 /// Читает первый лист: заголовки и строки. Список всех листов — в `Table::sheets`.
 ///
 /// # Errors
@@ -25,6 +31,7 @@ pub fn read_xlsx_sheet(
     limits: &Limits,
 ) -> Result<Table, IoError> {
     check_file_size(path, limits)?;
+    check_archive(path, limits)?;
     let mut book: Xlsx<_> = open_workbook(path).map_err(|e| broken(path, &e))?;
     let sheets = book.sheet_names();
     let name = match sheet {
@@ -89,6 +96,42 @@ pub(crate) fn check_file_size(path: &Path, limits: &Limits) -> Result<(), IoErro
             "файл больше {} МБ",
             limits.max_file_bytes / (1024 * 1024)
         )));
+    }
+    Ok(())
+}
+
+/// Оглавление zip до распаковки: суммарный размер и степень сжатия каждого файла (zip-бомба).
+fn check_archive(path: &Path, limits: &Limits) -> Result<(), IoError> {
+    let file =
+        std::fs::File::open(path).map_err(|e| IoError::File(format!("{}: {e}", path.display())))?;
+    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .map_err(|e| IoError::File(format!("{}: не xlsx — не zip-архив ({e})", path.display())))?;
+    if archive.len() > MAX_ENTRIES {
+        return Err(IoError::Limit(format!(
+            "в xlsx больше {MAX_ENTRIES} файлов"
+        )));
+    }
+    let mut total: u64 = 0;
+    for index in 0..archive.len() {
+        let entry = archive.by_index_raw(index).map_err(|e| {
+            IoError::File(format!("{}: битое оглавление xlsx ({e})", path.display()))
+        })?;
+        let size = entry.size();
+        total = total.saturating_add(size);
+        let ratio = size / entry.compressed_size().max(1);
+        if size > RATIO_CHECK_FROM && ratio > limits.max_ratio {
+            return Err(IoError::Limit(format!(
+                "файл {} внутри xlsx сжат в {ratio} раз (допустимо {}): похоже на zip-бомбу",
+                entry.name().unwrap_or_default(),
+                limits.max_ratio
+            )));
+        }
+        if total > limits.max_unpacked_bytes {
+            return Err(IoError::Limit(format!(
+                "распакованный xlsx больше {} МБ",
+                limits.max_unpacked_bytes / (1024 * 1024)
+            )));
+        }
     }
     Ok(())
 }
