@@ -477,7 +477,13 @@ fn panic_in_command_becomes_error_and_engine_keeps_working() {
     let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
     config.create_tables(&mut db).unwrap();
     if let Some(receipt) = config.documents.get_mut("receipt") {
-        receipt.rule = |_| panic!("ошибка в правиле проведения");
+        struct Broken;
+        impl crate::PostingRule for Broken {
+            fn movements(&self, _: &crate::Document) -> Result<crate::Moves, crate::CoreError> {
+                panic!("ошибка в правиле проведения")
+            }
+        }
+        receipt.rule = Box::new(Broken);
     }
     let engine = super::LocalEngine::new(Box::new(db), config);
 
@@ -1471,5 +1477,234 @@ fn rights_are_checked_in_core() {
     assert_eq!(
         engine.login("keeper", KEEPER_PASSWORD).unwrap_err().code,
         ErrorCode::Forbidden
+    );
+}
+
+/// Склад плюс регистр продаж: расход списывает со склада и пишет продажу.
+fn sales_model() -> ostov_model::Config {
+    use crate::{FieldDef, FieldKind};
+    let mut model = super::warehouse_model();
+    model.registers.push(ostov_model::RegisterDef {
+        name: "sales".into(),
+        title: "Продажи".into(),
+        kind: ostov_model::RegisterKind::Accumulation,
+        dimensions: vec![FieldDef::reference("goods", "goods")],
+        resources: vec![FieldDef::new("qty", FieldKind::Decimal { scale: 3 })],
+    });
+    let issue = model
+        .documents
+        .iter_mut()
+        .find(|d| d.name == "issue")
+        .unwrap();
+    issue.registers.push("sales".into());
+    model
+}
+
+/// Правила так, как их подключит Python: свои для расхода, встроенные для остального.
+struct SalesRules;
+
+struct IssueWithSales;
+
+impl crate::PostingRule for IssueWithSales {
+    fn movements(&self, doc: &crate::Document) -> Result<crate::Moves, crate::CoreError> {
+        let mut stock = Vec::new();
+        let mut sales = Vec::new();
+        for line in &doc.parts["lines"] {
+            let crate::FieldValue::Decimal(qty) = line["qty"] else {
+                continue;
+            };
+            let goods = line["goods"].clone();
+            stock.push(crate::Movement {
+                kind: crate::MovementKind::Issue,
+                dims: [
+                    ("warehouse".to_owned(), doc.header["warehouse"].clone()),
+                    ("goods".to_owned(), goods.clone()),
+                ]
+                .into(),
+                resources: [("qty".to_owned(), qty)].into(),
+            });
+            sales.push(crate::Movement {
+                kind: crate::MovementKind::Receipt,
+                dims: [("goods".to_owned(), goods)].into(),
+                resources: [("qty".to_owned(), qty)].into(),
+            });
+        }
+        Ok([("stock".to_owned(), stock), ("sales".to_owned(), sales)].into())
+    }
+}
+
+impl super::Rules for SalesRules {
+    fn rule(&self, document: &ostov_model::DocumentDef) -> Option<Box<dyn crate::PostingRule>> {
+        match document.name.as_str() {
+            "issue" => Some(Box::new(IssueWithSales)),
+            _ => super::BuiltinRules.rule(document),
+        }
+    }
+}
+
+fn sales_engine(base: &Base, model: &ostov_model::Config) -> super::LocalEngine {
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let config = super::Config::from_model_with(model, &SalesRules).unwrap();
+    super::LocalEngine::install(Box::new(db), config).unwrap()
+}
+
+#[test]
+fn rules_are_pluggable_and_move_several_registers() {
+    let base = Base::new("sales");
+    let engine = sales_engine(&base, &sales_model());
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 10_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    let sold = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 3_000), "2026-02-10"),
+            PostAction::Post,
+        )
+        .unwrap();
+
+    assert_eq!(
+        report(&engine, "stock_balance", &[])[0]["qty"],
+        dec(7_000, 3)
+    );
+    let sales = report(&engine, "sales_balance", &[]);
+    assert_eq!(sales.len(), 1);
+    assert_eq!(
+        sales[0]["goods"],
+        Value::Ref {
+            id: flour,
+            title: Some("Мука".into())
+        }
+    );
+    assert_eq!(sales[0]["qty"], dec(3_000, 3));
+    let feb = report(
+        &engine,
+        "sales_turnover",
+        &[("from", date("2026-02-01")), ("to", date("2026-02-28"))],
+    );
+    assert_eq!(feb[0]["qty_receipt"], dec(3_000, 3));
+
+    // Нехватка на складе отменяет и продажу: всё в одной транзакции.
+    let err = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 50_000), "2026-02-11"),
+            PostAction::Post,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert_eq!(
+        report(&engine, "sales_balance", &[])[0]["qty"],
+        dec(3_000, 3)
+    );
+
+    // Отмена проведения убирает движения из обоих регистров.
+    engine.unpost("issue", sold.id).unwrap();
+    assert!(report(&engine, "sales_balance", &[]).is_empty());
+    assert_eq!(
+        report(&engine, "stock_balance", &[])[0]["qty"],
+        dec(10_000, 3)
+    );
+    assert_eq!(
+        engine
+            .run_report(&ostov_api::ReportQuery {
+                report: "orders_balance".into(),
+                params: Fields::new(),
+                after_key: None,
+                size: 10,
+            })
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[test]
+fn rule_cannot_move_foreign_register() {
+    let base = Base::new("foreign-register");
+    // У расхода в модели только stock, а правило пишет ещё и в sales.
+    let mut model = sales_model();
+    model
+        .documents
+        .iter_mut()
+        .find(|d| d.name == "issue")
+        .unwrap()
+        .registers
+        .retain(|r| r == "stock");
+    let engine = sales_engine(&base, &model);
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 10_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    let err = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-02-10"),
+            PostAction::Post,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("sales"), "{}", err.message);
+    assert_eq!(
+        report(&engine, "stock_balance", &[])[0]["qty"],
+        dec(10_000, 3)
+    );
+}
+
+#[test]
+fn config_errors_about_registers_and_rules() {
+    let config = |change: fn(&mut ostov_model::Config)| {
+        let mut model = sales_model();
+        change(&mut model);
+        super::Config::from_model_with(&model, &SalesRules)
+            .err()
+            .map(|e| e.to_string())
+    };
+    assert_eq!(config(|_| ()), None);
+    let unknown = config(|m| m.documents[0].registers.push("orders".into())).unwrap();
+    assert!(unknown.contains("orders"), "{unknown}");
+    // Документ с регистрами без правила — ошибка; без регистров — можно.
+    let no_rule = config(|m| m.documents[1].name = "transfer".into()).unwrap();
+    assert!(no_rule.contains("transfer"), "{no_rule}");
+    assert_eq!(
+        config(|m| {
+            m.documents[1].name = "order".into();
+            m.documents[1].registers.clear();
+        }),
+        None
+    );
+}
+
+#[test]
+fn new_register_appears_in_existing_base() {
+    let base = Base::new("sales-later");
+    let (engine, flour, main, _) = stocked(&base);
+    drop(engine);
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let config = super::Config::from_model_with(&sales_model(), &SalesRules).unwrap();
+    let engine = super::LocalEngine::open(Box::new(db), config).unwrap();
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 2_000), "2026-02-10"),
+            PostAction::Post,
+        )
+        .unwrap();
+    assert_eq!(
+        report(&engine, "sales_balance", &[])[0]["qty"],
+        dec(2_000, 3)
     );
 }

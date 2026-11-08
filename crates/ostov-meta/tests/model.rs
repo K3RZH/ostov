@@ -60,9 +60,10 @@ fn yaml_model_matches_config_rs() {
     let [stock] = model.registers.as_slice() else {
         panic!("ожидался один регистр: {:?}", model.registers);
     };
-    assert_eq!(stock.name, code.stock.name());
+    let code_stock = &code.registers["stock"];
+    assert_eq!(stock.name, code_stock.name());
     assert_eq!(stock.kind, RegisterKind::Accumulation);
-    assert_eq!(shape(&stock.dimensions), shape(code.stock.dims()));
+    assert_eq!(shape(&stock.dimensions), shape(code_stock.dims()));
     // Ресурсы ядро наружу не отдаёт; в config.rs это qty с 3 знаками.
     assert_eq!(
         shape(&stock.resources),

@@ -1,56 +1,70 @@
-//! Проведение документов: движения в регистр пишутся одной транзакцией с отметкой «проведён».
+//! Проведение документов: движения в регистры пишутся одной транзакцией с отметкой «проведён».
+//! Движения строит правило документа (`PostingRule`): сейчас на Rust, потом `on_post` на Python.
+
+use std::collections::BTreeMap;
 
 use ostov_store::Driver;
 
 use crate::closing::check_open;
 use crate::object::document::{Document, DocumentKind};
 use crate::register::{AccumulationRegister, Movement};
-use crate::{CoreError, in_transaction};
+use crate::{CoreError, Fields, in_transaction};
 
-/// Проводит документ. Движения строит `rule` — потом это будет `on_post` из Python-конфигурации.
-/// Повторное проведение заменяет прежние движения; любая ошибка откатывает всё.
-pub fn post(
+/// Движения документа: имя регистра → движения в нём.
+pub type Moves = BTreeMap<String, Vec<Movement>>;
+
+/// Табличные части: имя → строки.
+pub type Parts = BTreeMap<String, Vec<Fields>>;
+
+/// Логика документа. Реализацию даёт конфигурация: встроенная на Rust или Python (`ostov-py`).
+pub trait PostingRule: Send + Sync {
+    /// Движения по регистрам документа. Регистр, которого нет у документа, — ошибка.
+    fn movements(&self, doc: &Document) -> Result<Moves, CoreError>;
+
+    /// Пересчёт перед записью (суммы и т. п.): считает ядро, а не интерфейс.
+    fn prepare(&self, _header: &mut Fields, _parts: &mut Parts) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+/// Проводит документ по его регистрам. Повторное проведение заменяет прежние движения;
+/// любая ошибка откатывает всё.
+pub fn post_to(
     db: &mut dyn Driver,
     kind: &DocumentKind,
-    register: &AccumulationRegister,
+    registers: &[&AccumulationRegister],
     id: i64,
-    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
 ) -> Result<(), CoreError> {
     in_transaction(db, |db| {
         let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
         check_open(db, &doc.header)?;
         check_not_deleted(&doc)?;
-        let movements = rule(&doc)?;
-        register.replace_dated(db, kind.table(), id, period(&doc).as_deref(), &movements)?;
+        write_moves(db, kind, registers, &doc, rule(&doc)?)?;
         kind.set_posted(db, id, true)
     })
 }
 
 /// Записывает изменения документа и сразу проводит его или снимает с проведения — одной
 /// транзакцией, чтобы записанный документ не остался со старыми движениями.
-pub fn save(
+pub fn save_to(
     db: &mut dyn Driver,
     kind: &DocumentKind,
-    register: &AccumulationRegister,
+    registers: &[&AccumulationRegister],
     doc: &Document,
     post: bool,
-    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
 ) -> Result<Document, CoreError> {
     in_transaction(db, |db| {
         let saved = kind.write(db, doc)?;
         if post {
             check_not_deleted(&saved)?;
-            let movements = rule(&saved)?;
-            register.replace_dated(
-                db,
-                kind.table(),
-                saved.id,
-                period(&saved).as_deref(),
-                &movements,
-            )?;
+            write_moves(db, kind, registers, &saved, rule(&saved)?)?;
             kind.set_posted(db, saved.id, true)?;
         } else if saved.posted {
-            register.replace(db, kind.table(), saved.id, &[])?;
+            for register in registers {
+                register.replace(db, kind.table(), saved.id, &[])?;
+            }
             kind.set_posted(db, saved.id, false)?;
         }
         kind.get(db, saved.id)?
@@ -59,27 +73,108 @@ pub fn save(
 }
 
 /// Записывает новый документ и сразу проводит его — одной транзакцией.
+pub fn insert_and_post_to(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    registers: &[&AccumulationRegister],
+    header: &Fields,
+    parts: &Parts,
+    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
+) -> Result<Document, CoreError> {
+    in_transaction(db, |db| {
+        let doc = kind.insert_in(db, header, parts)?;
+        write_moves(db, kind, registers, &doc, rule(&doc)?)?;
+        kind.set_posted(db, doc.id, true)?;
+        kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
+    })
+}
+
+/// Отменяет проведение: движения удаляются из всех регистров документа, итоги пересчитываются.
+pub fn unpost_from(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    registers: &[&AccumulationRegister],
+    id: i64,
+) -> Result<(), CoreError> {
+    in_transaction(db, |db| {
+        let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
+        check_open(db, &doc.header)?;
+        for register in registers {
+            register.replace(db, kind.table(), id, &[])?;
+        }
+        kind.set_posted(db, id, false)
+    })
+}
+
+/// Проведение по одному регистру — то же, что `post_to`.
+pub fn post(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    id: i64,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<(), CoreError> {
+    post_to(db, kind, &[register], id, only(register, rule))
+}
+
+pub fn save(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    doc: &Document,
+    post: bool,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
+) -> Result<Document, CoreError> {
+    save_to(db, kind, &[register], doc, post, only(register, rule))
+}
+
 pub fn insert_and_post(
     db: &mut dyn Driver,
     kind: &DocumentKind,
     register: &AccumulationRegister,
-    header: &crate::Fields,
-    parts: &std::collections::BTreeMap<String, Vec<crate::Fields>>,
+    header: &Fields,
+    parts: &Parts,
     rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError>,
 ) -> Result<Document, CoreError> {
-    in_transaction(db, |db| {
-        let doc = kind.insert_in(db, header, parts)?;
-        let movements = rule(&doc)?;
-        register.replace_dated(
-            db,
-            kind.table(),
-            doc.id,
-            period(&doc).as_deref(),
-            &movements,
-        )?;
-        kind.set_posted(db, doc.id, true)?;
-        kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
-    })
+    insert_and_post_to(db, kind, &[register], header, parts, only(register, rule))
+}
+
+pub fn unpost(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    register: &AccumulationRegister,
+    id: i64,
+) -> Result<(), CoreError> {
+    unpost_from(db, kind, &[register], id)
+}
+
+fn only<'a>(
+    register: &'a AccumulationRegister,
+    rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError> + 'a,
+) -> impl FnOnce(&Document) -> Result<Moves, CoreError> + 'a {
+    move |doc| Ok(Moves::from([(register.name().to_owned(), rule(doc)?)]))
+}
+
+/// Каждому регистру документа — его движения; регистру без движений — пусто (старые уходят).
+fn write_moves(
+    db: &mut dyn Driver,
+    kind: &DocumentKind,
+    registers: &[&AccumulationRegister],
+    doc: &Document,
+    mut moves: Moves,
+) -> Result<(), CoreError> {
+    let period = period(doc);
+    for register in registers {
+        let movements = moves.remove(register.name()).unwrap_or_default();
+        register.replace_dated(db, kind.table(), doc.id, period.as_deref(), &movements)?;
+    }
+    if let Some(name) = moves.keys().next() {
+        return Err(CoreError::Invalid(format!(
+            "правило документа {} делает движения по регистру {name}, а у документа его нет",
+            kind.table()
+        )));
+    }
+    Ok(())
 }
 
 /// Дата документа для движений — поле `date`, если оно есть.
@@ -98,21 +193,6 @@ fn check_not_deleted(doc: &Document) -> Result<(), CoreError> {
         )));
     }
     Ok(())
-}
-
-/// Отменяет проведение: движения удаляются, итоги пересчитываются.
-pub fn unpost(
-    db: &mut dyn Driver,
-    kind: &DocumentKind,
-    register: &AccumulationRegister,
-    id: i64,
-) -> Result<(), CoreError> {
-    in_transaction(db, |db| {
-        let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
-        check_open(db, &doc.header)?;
-        register.replace(db, kind.table(), id, &[])?;
-        kind.set_posted(db, id, false)
-    })
 }
 
 #[cfg(test)]

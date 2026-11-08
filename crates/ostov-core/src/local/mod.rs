@@ -24,15 +24,14 @@ use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
 use access::Need;
-pub use config::{Config, DocumentConfig, warehouse, warehouse_model};
+pub use config::{BuiltinRules, Config, DocumentConfig, Rules, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid};
 
 use crate::closing::ClosedPeriodPass;
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
-    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction,
-    insert_and_post, posting,
+    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction, posting,
 };
 
 pub struct LocalEngine {
@@ -436,12 +435,13 @@ impl LocalEngine {
                         Ok((name.clone(), lines))
                     })
                     .collect::<EngineResult<BTreeMap<_, _>>>()?;
-                (cfg.prepare)(&mut fields, &mut parts).map_err(error)?;
-                let stock = &self.config.stock;
+                cfg.rule.prepare(&mut fields, &mut parts).map_err(error)?;
+                let registers = self.config.registers_of(cfg);
+                let rule = |doc: &Document| cfg.rule.movements(doc);
                 let doc = match data.id {
-                    None if post == PostAction::Post => {
-                        insert_and_post(db, &cfg.kind, stock, &fields, &parts, cfg.rule)
-                    }
+                    None if post == PostAction::Post => posting::insert_and_post_to(
+                        db, &cfg.kind, &registers, &fields, &parts, rule,
+                    ),
                     None => cfg.kind.insert(db, &fields, &parts),
                     Some(id) => {
                         let doc = Document {
@@ -456,10 +456,10 @@ impl LocalEngine {
                         match post {
                             PostAction::Write => cfg.kind.update(db, &doc),
                             PostAction::Post => {
-                                posting::save(db, &cfg.kind, stock, &doc, true, cfg.rule)
+                                posting::save_to(db, &cfg.kind, &registers, &doc, true, rule)
                             }
                             PostAction::Unpost => {
-                                posting::save(db, &cfg.kind, stock, &doc, false, cfg.rule)
+                                posting::save_to(db, &cfg.kind, &registers, &doc, false, rule)
                             }
                         }
                     }
@@ -497,8 +497,11 @@ impl LocalEngine {
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule)
-            .map_err(|e| self.explain(&mut **db, e))?;
+        let registers = self.config.registers_of(cfg);
+        posting::post_to(&mut **db, &cfg.kind, &registers, id, |doc| {
+            cfg.rule.movements(doc)
+        })
+        .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -511,7 +514,8 @@ impl LocalEngine {
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id)
+        let registers = self.config.registers_of(cfg);
+        posting::unpost_from(&mut **db, &cfg.kind, &registers, id)
             .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
@@ -671,14 +675,20 @@ impl Engine for LocalEngine {
     }
 }
 
-/// Отчёты по остаткам:
-/// - `stock_balance` — остатки на конец дня `date` (без даты — текущие);
-/// - `stock_turnover` — обороты с `from` по `to`: `<ресурс>_opening`, `_receipt`, `_issue`, `_closing`.
+/// Отчёты по любому регистру накопления `<регистр>`:
+/// - `<регистр>_balance` — остатки на конец дня `date` (без даты — текущие);
+/// - `<регистр>_turnover` — обороты с `from` по `to`: `<ресурс>_opening`, `_receipt`, `_issue`, `_closing`.
 ///
 /// Отбор — параметры с именами измерений (`warehouse`, `goods`). Строки окнами по `size`.
 impl LocalEngine {
     fn run_run_report(&self, q: &ReportQuery) -> EngineResult<ListPage> {
-        let stock = &self.config.stock;
+        let no_report =
+            || EngineError::new(ErrorCode::NotFound, format!("нет отчёта {}", q.report));
+        let (register, kind) = q
+            .report
+            .rsplit_once('_')
+            .and_then(|(name, kind)| Some((self.config.registers.get(name)?, kind)))
+            .ok_or_else(no_report)?;
         let date = |name: &str| -> EngineResult<Option<String>> {
             match q.params.get(name) {
                 None | Some(ostov_api::Value::Null) => Ok(None),
@@ -689,7 +699,7 @@ impl LocalEngine {
         let allowed = ["date", "from", "to"];
         let mut filter = crate::Fields::new();
         for (name, value) in &q.params {
-            if stock.dims().iter().any(|d| &d.name == name) {
+            if register.dims().iter().any(|d| &d.name == name) {
                 if *value != ostov_api::Value::Null {
                     filter.insert(name.clone(), convert::value_from_api(value)?);
                 }
@@ -702,8 +712,8 @@ impl LocalEngine {
         }
 
         let mut db = self.db();
-        let mut rows: Vec<ostov_api::Fields> = match q.report.as_str() {
-            "stock_balance" => stock
+        let mut rows: Vec<ostov_api::Fields> = match kind {
+            "balance" => register
                 .balances(&mut **db, date("date")?.as_deref(), &filter)
                 .map_err(error)?
                 .into_iter()
@@ -715,7 +725,7 @@ impl LocalEngine {
                     row
                 })
                 .collect(),
-            "stock_turnover" => stock
+            "turnover" => register
                 .turnovers(
                     &mut **db,
                     date("from")?.as_deref(),
@@ -739,12 +749,7 @@ impl LocalEngine {
                     row
                 })
                 .collect(),
-            other => {
-                return Err(EngineError::new(
-                    ErrorCode::NotFound,
-                    format!("нет отчёта {other}"),
-                ));
-            }
+            _ => return Err(no_report()),
         };
 
         let total = rows.len();
@@ -764,7 +769,7 @@ impl LocalEngine {
         let end = start.saturating_add(size).min(total);
         let mut page: Vec<ostov_api::Fields> = rows.drain(start.min(total)..end).collect();
         let mut refs: Vec<&mut ostov_api::Fields> = page.iter_mut().collect();
-        self.fill_titles(&mut **db, stock.dims(), &mut refs)?;
+        self.fill_titles(&mut **db, register.dims(), &mut refs)?;
 
         Ok(ListPage {
             rows: page
@@ -798,7 +803,9 @@ impl LocalEngine {
             blockers,
             ..
         } = &**shortage;
-        let stock = &self.config.stock;
+        let Some(stock) = self.config.registers.get(&shortage.register) else {
+            return error(e);
+        };
         let title = |defs: &[FieldDef], name: &str| {
             defs.iter()
                 .find(|f| f.name == name)
@@ -980,10 +987,13 @@ fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
         schema::record(db, &warehouse()?)?;
     }
     schema::restructure(db, config)?;
-    if config.stock.upgrade(db)? {
-        for (table, doc) in &config.documents {
-            if doc.kind.header().iter().any(|f| f.name == "date") {
-                config.stock.fill_periods(db, table, "date")?;
+    for register in config.registers.values() {
+        if register.upgrade(db)? {
+            for (table, doc) in &config.documents {
+                let moves = doc.registers.iter().any(|r| r == register.name());
+                if moves && doc.kind.header().iter().any(|f| f.name == "date") {
+                    register.fill_periods(db, table, "date")?;
+                }
             }
         }
     }

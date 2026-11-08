@@ -1,5 +1,5 @@
 //! Конфигурация для `LocalEngine`: объекты ядра, построенные из модели `ostov-model`,
-//! и правила проведения, которые пока написаны в коде.
+//! и правила проведения документов (`PostingRule`), которые даёт `Rules`.
 
 use std::collections::BTreeMap;
 
@@ -8,18 +8,17 @@ use ostov_model::{
 };
 use ostov_store::{Decimal, Driver};
 
+pub use crate::posting::Parts;
 use crate::{
     AccumulationRegister, Catalog, CoreError, Document, DocumentKind, FieldDef, FieldKind,
-    FieldValue, Fields, Movement, MovementKind, TablePart,
+    FieldValue, Fields, Movement, MovementKind, Moves, PostingRule, TablePart,
 };
-
-pub type Parts = BTreeMap<String, Vec<Fields>>;
 
 pub struct DocumentConfig {
     pub kind: DocumentKind,
-    pub rule: Rule,
-    /// Пересчёт перед записью: суммы считает ядро, а не интерфейс.
-    pub prepare: Prepare,
+    /// Регистры, по которым документ делает движения.
+    pub registers: Vec<String>,
+    pub rule: Box<dyn PostingRule>,
 }
 
 pub struct Config {
@@ -32,7 +31,13 @@ pub struct Config {
     pub version: String,
     pub catalogs: BTreeMap<String, Catalog>,
     pub documents: BTreeMap<String, DocumentConfig>,
-    pub stock: AccumulationRegister,
+    pub registers: BTreeMap<String, AccumulationRegister>,
+}
+
+/// Откуда брать правила документов. Встроенные — `BuiltinRules`, потом Python (`ostov-py`).
+pub trait Rules {
+    /// Правило документа или `None`, если для него ничего нет.
+    fn rule(&self, document: &DocumentDef) -> Option<Box<dyn PostingRule>>;
 }
 
 impl Config {
@@ -43,37 +48,57 @@ impl Config {
         for doc in self.documents.values() {
             doc.kind.create_tables(db)?;
         }
-        self.stock.create_tables(db)
+        for register in self.registers.values() {
+            register.create_tables(db)?;
+        }
+        Ok(())
     }
-}
 
-impl Config {
-    /// Объекты ядра из модели конфигурации (её читает `ostov-meta`).
-    /// Логика проведения пока в коде: правило ищется по имени документа.
-    /// Регистр пока один — `stock`: под него написаны правила и отчёты.
+    /// Регистры, которые двигает документ.
+    pub fn registers_of(&self, document: &DocumentConfig) -> Vec<&AccumulationRegister> {
+        document
+            .registers
+            .iter()
+            .filter_map(|name| self.registers.get(name))
+            .collect()
+    }
+
+    /// Объекты ядра из модели со встроенными правилами «Склада».
     pub fn from_model(model: &ostov_model::Config) -> Result<Self, CoreError> {
+        Self::from_model_with(model, &BuiltinRules)
+    }
+
+    /// Объекты ядра из модели конфигурации (её читает `ostov-meta`) с правилами из `rules`.
+    /// Документу с регистрами правило обязательно; без регистров — по желанию (пересчёт сумм).
+    pub fn from_model_with(
+        model: &ostov_model::Config,
+        rules: &dyn Rules,
+    ) -> Result<Self, CoreError> {
         let catalogs = model
             .catalogs
             .iter()
             .map(|c| Ok((c.name.clone(), Catalog::new(&c.name, c.fields.clone())?)))
             .collect::<Result<BTreeMap<_, _>, CoreError>>()?;
 
-        let stock = match model.registers.as_slice() {
-            [r] if r.name == STOCK && r.kind == RegisterKind::Accumulation => {
-                AccumulationRegister::new(&r.name, r.dimensions.clone(), r.resources.clone())?
+        let mut registers = BTreeMap::new();
+        for r in &model.registers {
+            match r.kind {
+                RegisterKind::Accumulation => {
+                    let register = AccumulationRegister::new(
+                        &r.name,
+                        r.dimensions.clone(),
+                        r.resources.clone(),
+                    )?;
+                    registers.insert(r.name.clone(), register);
+                }
             }
-            _ => {
-                return Err(CoreError::Invalid(format!(
-                    "пока поддерживается ровно один регистр накопления {STOCK}"
-                )));
-            }
-        };
+        }
 
         let mut documents = BTreeMap::new();
         for d in &model.documents {
-            if let Some(other) = d.registers.iter().find(|r| *r != STOCK) {
+            if let Some(missing) = d.registers.iter().find(|r| !registers.contains_key(*r)) {
                 return Err(CoreError::Invalid(format!(
-                    "документ {} двигает регистр {other}, а пока есть только {STOCK}",
+                    "документ {} двигает регистр {missing}, а его нет в конфигурации",
                     d.name
                 )));
             }
@@ -83,19 +108,22 @@ impl Config {
                 .map(|p| TablePart::new(&p.name, p.fields.clone()))
                 .collect::<Result<_, _>>()?;
             let kind = DocumentKind::new(&d.name, d.fields.clone(), parts)?;
-            let (rule, prepare) = if d.registers.is_empty() {
-                (no_movements as Rule, no_prepare as Prepare)
-            } else {
-                handlers(&d.name).ok_or_else(|| {
-                    CoreError::Invalid(format!("для документа {} нет правила проведения", d.name))
-                })?
+            let rule = match rules.rule(d) {
+                Some(rule) => rule,
+                None if d.registers.is_empty() => Box::new(NoMovements),
+                None => {
+                    return Err(CoreError::Invalid(format!(
+                        "для документа {} нет правила проведения",
+                        d.name
+                    )));
+                }
             };
             documents.insert(
                 d.name.clone(),
                 DocumentConfig {
                     kind,
+                    registers: d.registers.clone(),
                     rule,
-                    prepare,
                 },
             );
         }
@@ -107,31 +135,64 @@ impl Config {
             version: model.version.clone(),
             catalogs,
             documents,
-            stock,
+            registers,
         })
     }
 }
 
 const STOCK: &str = "stock";
 
-type Rule = fn(&Document) -> Result<Vec<Movement>, CoreError>;
-type Prepare = fn(&mut Fields, &mut Parts) -> Result<(), CoreError>;
+struct NoMovements;
 
-/// Правила проведения, пока их не пишут на Python (`on_post`).
-fn handlers(document: &str) -> Option<(Rule, Prepare)> {
-    match document {
-        "receipt" => Some((|doc| movements(doc, MovementKind::Receipt), receipt_totals)),
-        "issue" => Some((|doc| movements(doc, MovementKind::Issue), no_prepare)),
-        _ => None,
+impl PostingRule for NoMovements {
+    fn movements(&self, _: &Document) -> Result<Moves, CoreError> {
+        Ok(Moves::new())
     }
 }
 
-fn no_movements(_: &Document) -> Result<Vec<Movement>, CoreError> {
-    Ok(Vec::new())
+/// Правила «Склада» на Rust, пока их не пишут на Python (`on_post`): поступление и расход
+/// по регистру `stock`.
+pub struct BuiltinRules;
+
+impl Rules for BuiltinRules {
+    fn rule(&self, document: &DocumentDef) -> Option<Box<dyn PostingRule>> {
+        if document.registers != [STOCK] {
+            return None;
+        }
+        match document.name.as_str() {
+            "receipt" => Some(Box::new(StockRule {
+                kind: MovementKind::Receipt,
+                totals: true,
+            })),
+            "issue" => Some(Box::new(StockRule {
+                kind: MovementKind::Issue,
+                totals: false,
+            })),
+            _ => None,
+        }
+    }
 }
 
-fn no_prepare(_: &mut Fields, _: &mut Parts) -> Result<(), CoreError> {
-    Ok(())
+struct StockRule {
+    kind: MovementKind,
+    /// Считать суммы строк и документа.
+    totals: bool,
+}
+
+impl PostingRule for StockRule {
+    fn movements(&self, doc: &Document) -> Result<Moves, CoreError> {
+        Ok(Moves::from([(
+            STOCK.to_owned(),
+            movements(doc, self.kind)?,
+        )]))
+    }
+
+    fn prepare(&self, header: &mut Fields, parts: &mut Parts) -> Result<(), CoreError> {
+        if self.totals {
+            receipt_totals(header, parts)?;
+        }
+        Ok(())
+    }
 }
 
 /// Конфигурация «Склад» по умолчанию — та же, что в `config/` (тест в `ostov-meta` сверяет).
