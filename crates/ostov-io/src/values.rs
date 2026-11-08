@@ -73,8 +73,24 @@ pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// Номер дня Excel → `ГГГГ-ММ-ДД` (время отбрасывается).
+/// Последний день Excel: 31.12.9999.
+const LAST_EXCEL_DAY: i64 = 2_958_465;
+/// Значащих цифр в числе Excel: дальше — шум двоичной дроби (`0.30000000000000004`).
+const EXCEL_DIGITS: usize = 15;
+
+/// Число Excel текстом с точностью Excel: результат формулы `12.499999999999998` — `12.5`.
+/// `Display` у `f64` в Rust не пишет экспоненту.
+pub(crate) fn number_text(value: f64) -> String {
+    format!("{value:.prec$e}", prec = EXCEL_DIGITS - 1)
+        .parse::<f64>()
+        .map_or_else(|_| value.to_string(), |rounded| rounded.to_string())
+}
+
+/// Номер дня Excel → `ГГГГ-ММ-ДД` (время отбрасывается). Вне 1..=31.12.9999 — `None`.
 pub(crate) fn excel_day_to_iso(day: i64) -> Option<String> {
+    if !(1..=LAST_EXCEL_DAY).contains(&day) {
+        return None;
+    }
     let epoch = days_from_civil(EXCEL_EPOCH.0, EXCEL_EPOCH.1, EXCEL_EPOCH.2);
     let (year, month, day) = civil_from_days(epoch.checked_add(day)?);
     valid_date(year, month, day).then(|| format!("{year:04}-{month:02}-{day:02}"))
@@ -118,19 +134,25 @@ pub(crate) fn parse_date(text: &str) -> Option<String> {
 /// Знаков после запятой больше `scale` можно, только если лишние — нули.
 pub(crate) fn parse_decimal(text: &str, scale: u8) -> Result<i64, String> {
     let shown = text.trim();
-    let cleaned: String = shown
+    let not_number = || format!("«{shown}» — не число");
+    let unified: String = shown
         .chars()
-        .filter(|c| !c.is_whitespace())
         .map(|c| if c == ',' { '.' } else { c })
         .collect();
-    let (negative, body) = match cleaned.strip_prefix('-') {
+    let (negative, body) = match unified.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, cleaned.as_str()),
+        None => (false, unified.strip_prefix('+').unwrap_or(&unified)),
     };
     let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+    let int = thousands(int).ok_or_else(not_number)?;
+    let int = if int.is_empty() && !frac.is_empty() {
+        "0".to_owned()
+    } else {
+        int
+    };
     let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
-    if int.is_empty() || !digits(int) || !digits(frac) {
-        return Err(format!("«{shown}» — не число"));
+    if int.is_empty() || !digits(&int) || !digits(frac) {
+        return Err(not_number());
     }
     let scale = usize::from(scale);
     let (kept, extra) = frac.split_at(frac.len().min(scale));
@@ -141,6 +163,18 @@ pub(crate) fn parse_decimal(text: &str, scale: u8) -> Result<i64, String> {
         .parse()
         .map_err(|_| format!("«{shown}» — слишком большое число"))?;
     Ok(if negative { -units } else { units })
+}
+
+/// Целая часть без разделителей тысяч: пробел (и неразрывный) — только между группами по 3
+/// цифры, `1 250` → `1250`, а `1 2` — не число.
+fn thousands(int: &str) -> Option<String> {
+    let groups: Vec<&str> = int.split(|c: char| c.is_whitespace()).collect();
+    if groups.len() == 1 {
+        return Some(int.to_owned());
+    }
+    let first_ok = (1..=3).contains(&groups.first()?.len());
+    let rest_ok = groups.iter().skip(1).all(|g| g.len() == 3);
+    (first_ok && rest_ok).then(|| groups.concat())
 }
 
 #[cfg(test)]
@@ -182,6 +216,37 @@ mod tests {
         );
         assert!(parse_decimal("2,5кг", 3).is_err());
         assert!(parse_decimal("", 2).is_err());
+        assert_eq!(parse_decimal("+5", 0), Ok(5));
+        assert_eq!(parse_decimal(".5", 1), Ok(5));
+        assert_eq!(parse_decimal("12\u{a0}345,6", 1), Ok(123_456));
+        assert!(parse_decimal("1 2", 0).is_err(), "пробел не между тысячами");
+        assert!(
+            parse_decimal("99999999999999999999", 0).is_err(),
+            "переполнение — ошибка"
+        );
+    }
+
+    #[test]
+    fn excel_noise_is_rounded_like_excel() {
+        assert_eq!(number_text(12.499_999_999_999_998), "12.5");
+        assert_eq!(number_text(0.1 + 0.2), "0.3");
+        assert_eq!(number_text(2.5), "2.5");
+        assert_eq!(number_text(46032.0), "46032");
+        assert_eq!(number_text(1e20), "100000000000000000000");
+    }
+
+    #[test]
+    fn huge_excel_day_is_not_a_date_and_not_a_panic() {
+        for day in [
+            0,
+            -1,
+            2_958_466,
+            i64::MAX,
+            i64::MIN,
+            9_223_372_036_854_774_784,
+        ] {
+            assert_eq!(excel_day_to_iso(day), None, "{day}");
+        }
     }
 
     #[test]

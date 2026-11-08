@@ -276,16 +276,22 @@ fn resolve<'a>(
 }
 
 /// Строки по объектам: у документа — по значению колонки группировки, иначе по одной.
+/// Совсем пустые строки (их часто оставляют для красоты) пропускаются.
 fn groups(table: &Table, mapping: &Mapping, object: &ObjectMeta) -> Vec<Vec<usize>> {
+    let filled = table
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, cells)| cells.iter().any(|c| !c.is_empty()));
     let group = mapping
         .group_by
         .filter(|_| object.kind == ObjectKind::Document);
     let Some(group) = group else {
-        return (0..table.rows.len()).map(|row| vec![row]).collect();
+        return filled.map(|(row, _)| vec![row]).collect();
     };
     let mut order: Vec<Vec<usize>> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for (row, cells) in table.rows.iter().enumerate() {
+    for (row, cells) in filled {
         let key = cells
             .get(group)
             .map(|c| c.to_string().trim().to_owned())
@@ -485,7 +491,12 @@ fn date(cell: &Cell, text: &str) -> Result<String, String> {
     let parsed = match cell {
         Cell::Date(date) => parse_date(date),
         // Дата Excel без формата даты — номер дня.
-        Cell::Number(number) => number.parse::<i64>().ok().and_then(excel_day_to_iso),
+        // Время после точки отбрасываем: 46032.5 — это 11.01.2026, полдень.
+        Cell::Number(number) => number
+            .split('.')
+            .next()
+            .and_then(|day| day.parse::<i64>().ok())
+            .and_then(excel_day_to_iso),
         _ => parse_date(text),
     };
     parsed.ok_or_else(|| format!("«{text}» — не дата: нужно ДД.ММ.ГГГГ или ГГГГ-ММ-ДД"))
@@ -505,59 +516,84 @@ impl Lookup {
     }
 }
 
-/// Поиск элементов по названию с кешем: (объект, название в нижнем регистре) → id.
+/// Найденное по названию: id, «нет» или «неоднозначно». Ошибка поиска не кешируется.
+#[derive(Clone)]
+enum Found {
+    One(i64),
+    Missing(String),
+    Ambiguous(String),
+}
+
+/// Поиск элементов по названию с кешем: (объект, название в нижнем регистре) → результат.
+/// На 10 000 строк запросов столько, сколько разных названий.
 struct Refs<'a> {
     engine: &'a dyn Engine,
     meta: &'a Meta,
-    found: HashMap<(String, String), Result<i64, String>>,
+    found: HashMap<(String, String), Found>,
 }
 
 impl Refs<'_> {
     fn find(&mut self, target: &str, title: &str) -> Result<i64, Lookup> {
         let title = title.trim();
         let key = (target.to_owned(), title.to_lowercase());
-        if let Some(found) = self.found.get(&key) {
-            return found.clone().map_err(Lookup::Missing);
+        let found = match self.found.get(&key) {
+            Some(found) => found.clone(),
+            None => {
+                let found = self.search(target, title, &key.1)?;
+                self.found.insert(key, found.clone());
+                found
+            }
+        };
+        match found {
+            Found::One(id) => Ok(id),
+            Found::Missing(reason) => Err(Lookup::Missing(reason)),
+            Found::Ambiguous(reason) => Err(Lookup::Ambiguous(reason)),
         }
+    }
+
+    /// Все страницы поиска по подстроке, затем точное совпадение без учёта регистра.
+    fn search(&self, target: &str, title: &str, lower: &str) -> Result<Found, Lookup> {
         let target_title = self
             .meta
             .objects
             .iter()
             .find(|o| o.name == target)
             .map_or_else(|| target.to_owned(), |o| o.title.clone());
-        let query = ListQuery {
+        let mut query = ListQuery {
             object: target.to_owned(),
             search: Some(title.to_owned()),
             size: SEARCH_SIZE,
             ..ListQuery::default()
         };
-        let page = self.engine.list(&query).map_err(|e| {
-            Lookup::Failed(format!(
-                "не удалось искать в «{target_title}»: {}",
-                e.message
-            ))
-        })?;
-        let matches: Vec<i64> = page
-            .rows
-            .iter()
-            .filter(|row| match row.values.get(NAME_FIELD) {
-                Some(Value::Text(name)) => name.trim().to_lowercase() == key.1,
-                _ => false,
-            })
-            .map(|row| row.id)
-            .collect();
-        let result = match matches.as_slice() {
-            [id] => Ok(*id),
-            [] => Err(format!("нет «{title}» в «{target_title}»")),
-            many => {
-                let reason = format!(
-                    "«{title}» в «{target_title}» неоднозначно: найдено {}",
-                    many.len()
-                );
-                return Err(Lookup::Ambiguous(reason));
+        let mut matches = Vec::new();
+        loop {
+            let page = self.engine.list(&query).map_err(|e| {
+                Lookup::Failed(format!(
+                    "не удалось искать в «{target_title}»: {}",
+                    e.message
+                ))
+            })?;
+            matches.extend(
+                page.rows
+                    .iter()
+                    .filter(|row| match row.values.get(NAME_FIELD) {
+                        Some(Value::Text(name)) => name.trim().to_lowercase() == lower,
+                        _ => false,
+                    })
+                    .map(|row| row.id),
+            );
+            match page.next_key {
+                Some(key) => query.after_key = Some(key),
+                None => break,
             }
-        };
-        self.found.insert(key, result.clone());
-        result.map_err(Lookup::Missing)
+        }
+        Ok(match matches.as_slice() {
+            [id] => Found::One(*id),
+            [] => Found::Missing(format!("нет «{title}» в «{target_title}»")),
+            many => Found::Ambiguous(format!(
+                "«{title}» в «{target_title}» неоднозначно: найдено {}",
+                many.len()
+            )),
+        })
     }
 }

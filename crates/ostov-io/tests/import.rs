@@ -438,3 +438,65 @@ fn sheets_are_listed_and_one_is_read() {
     let error = read_xlsx_sheet(&path, Some("Нет"), &Limits::default()).unwrap_err();
     assert_eq!(error.to_string(), "в книге нет листа «Нет»");
 }
+
+#[test]
+fn formula_noise_huge_numbers_and_blank_rows() {
+    let base = Base::new("import-numbers");
+    let engine = base.engine();
+    stock_directory(&*engine);
+    let path = base.file("numbers.xlsx");
+    let rows: &[&[In]] = &[
+        // Результат формулы с двоичным шумом: 12,5 с точностью Excel.
+        &[
+            In::T("1"),
+            In::T("2026-01-10"),
+            In::T("Мельница"),
+            In::T("Основной"),
+            In::T("Мука"),
+            In::N(1.0),
+            In::N(12.499_999_999_999_998),
+        ],
+        &[In::E, In::E, In::E, In::E, In::E, In::E, In::E],
+        // Огромное «число дня» — ошибка, а не падение.
+        &[
+            In::T("2"),
+            In::N(9.2e18),
+            In::T("Мельница"),
+            In::T("Основной"),
+            In::T("Мука"),
+            In::N(1.0),
+            In::N(1.0),
+        ],
+        // Дата со временем без формата даты.
+        &[
+            In::T("3"),
+            In::N(46032.5),
+            In::T("Мельница"),
+            In::T("Основной"),
+            In::T("Мука"),
+            In::N(1.0),
+            In::N(1.0),
+        ],
+    ];
+    write_xlsx(&path, &[("Лист1", &RECEIPT_HEADERS, rows)]);
+    let table = read_xlsx(&path, &Limits::default()).unwrap();
+    let checked = plan(&*engine, &table, &receipts_mapping(&*engine, &table)).unwrap();
+    let errors: Vec<String> = checked.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors.len(), 1, "пустая строка 3 пропущена: {errors:?}");
+    assert!(
+        errors[0].starts_with("строка 4, колонка «Дата»: «9200000000000000000» — не дата"),
+        "{errors:?}"
+    );
+    assert_eq!(checked.items.len(), 2);
+    assert_eq!(
+        checked.items[0].data.tables["lines"][0]["price"],
+        Value::Decimal {
+            units: 1250,
+            scale: 2
+        }
+    );
+    assert_eq!(
+        checked.items[1].data.fields["date"],
+        Value::Date("2026-01-10".into())
+    );
+}

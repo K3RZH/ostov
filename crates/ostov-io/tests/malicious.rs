@@ -111,7 +111,7 @@ fn too_many_rows_are_refused() {
     xlsx_with_rows(&path, 11, "Мука");
     assert_eq!(
         limit_error(read_xlsx(&path, &limits)),
-        "строк больше 10: в листе «Sheet1» их 11"
+        "строк больше 10: в листе «Sheet1» есть строка 12"
     );
     xlsx_with_rows(&path, 10, "Мука");
     assert_eq!(
@@ -270,5 +270,116 @@ fn honest_repetitive_sheet_is_not_a_bomb() {
     assert_eq!(
         table.map(|t| t.rows.len()).map_err(|e| e.to_string()),
         Ok(50_000)
+    );
+}
+
+#[test]
+fn sparse_sheet_does_not_eat_memory() {
+    let base = Base::new("sparse");
+    let path = base.file("sparse.xlsx");
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet();
+    sheet.write_string(0, 0, "Наименование").unwrap();
+    sheet.write_string(1_048_575, 16_383, "далеко").unwrap();
+    book.save(&path).unwrap();
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < 16 * 1024,
+        "файл крошечный"
+    );
+    let reason = limit_error(read_xlsx(&path, &Limits::default()));
+    assert!(reason.starts_with("строк больше 100000"), "{reason}");
+
+    // Ячейки правее заголовков не хранятся и не мешают.
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet();
+    sheet.write_string(0, 0, "Наименование").unwrap();
+    sheet.write_string(1, 0, "Мука").unwrap();
+    sheet.write_string(1, 16_383, "мусор").unwrap();
+    book.save(&path).unwrap();
+    assert_eq!(
+        read_xlsx(&path, &Limits::default()).unwrap().rows,
+        vec![vec![ostov_io::Cell::Text("Мука".into())]]
+    );
+}
+
+/// Подменяет в zip заявленный распакованный размер первого файла (локальный и общий заголовки).
+fn forge_declared_size(bytes: &mut [u8], size: u32) {
+    let patch = |bytes: &mut [u8], signature: [u8; 4], offset: usize| {
+        let at = bytes.windows(4).position(|w| w == signature).unwrap();
+        bytes[at + offset..at + offset + 4].copy_from_slice(&size.to_le_bytes());
+    };
+    patch(bytes, [0x50, 0x4b, 0x03, 0x04], 22);
+    patch(bytes, [0x50, 0x4b, 0x01, 0x02], 24);
+}
+
+#[test]
+fn forged_table_of_contents_does_not_unpack_more() {
+    let base = Base::new("forged");
+    let path = base.file("forged.xlsx");
+    write_zip(&path, &[("xl/worksheets/sheet1.xml", vec![b'a'; 64 * MB])]);
+    let mut bytes = std::fs::read(&path).unwrap();
+    forge_declared_size(&mut bytes, 1000);
+    std::fs::write(&path, &bytes).unwrap();
+
+    // Оглавление врёт «1000 байт» — наша проверка его пропускает, но zip не распакует больше.
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let mut entry = archive.by_index(0).unwrap();
+    let mut out = Vec::new();
+    let read = std::io::Read::read_to_end(&mut entry, &mut out);
+    assert!(
+        read.is_err(),
+        "распаковка за заявленный размер должна оборваться"
+    );
+    assert!(out.len() <= 64 * 1024, "распаковано {} байт", out.len());
+    drop(entry);
+    assert!(read_xlsx(&path, &Limits::default()).is_err());
+}
+
+#[test]
+fn many_entities_in_one_field_are_cheap_and_limited() {
+    let base = Base::new("entities");
+    let path = base.file("amp.xml");
+    std::fs::write(
+        &path,
+        format!(
+            "<goods><item><name>{}</name></item></goods>",
+            "&amp;".repeat(10_000)
+        ),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let table = read_xml(&path, &Limits::default()).unwrap();
+    assert_eq!(table.rows[0][0], ostov_io::Cell::Text("&".repeat(10_000)));
+    std::fs::write(
+        &path,
+        format!(
+            "<goods><item><name>{}</name></item></goods>",
+            "&amp;".repeat(200_000)
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        limit_error(read_xml(&path, &Limits::default())),
+        "запись 1: значение длиннее 10000 символов"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "без квадратичного счёта"
+    );
+}
+
+#[test]
+fn second_root_element_is_rejected() {
+    let base = Base::new("two-roots");
+    let path = base.file("two.xml");
+    std::fs::write(&path, "<goods><item><name>a</name></item></goods><goods/>").unwrap();
+    let error = read_xml(&path, &Limits::default()).unwrap_err().to_string();
+    assert_eq!(error, "в XML больше одного корневого элемента");
+    std::fs::write(&path, [0xFF_u8, 0xFE, b'<', 0, b'a', 0]).unwrap();
+    assert!(
+        read_xml(&path, &Limits::default())
+            .unwrap_err()
+            .to_string()
+            .ends_with("XML не в кодировке UTF-8")
     );
 }

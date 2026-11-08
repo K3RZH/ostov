@@ -24,8 +24,14 @@ const FIELD_DEPTH: usize = 3;
 /// Битый XML, DTD или сущность не из пяти стандартных, вложенность или лимиты превышены.
 pub fn read_xml(path: &Path, limits: &Limits) -> Result<Table, IoError> {
     check_file_size(path, limits)?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| IoError::File(format!("{}: {e}", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        let reason = if e.kind() == std::io::ErrorKind::InvalidData {
+            "XML не в кодировке UTF-8".to_owned()
+        } else {
+            e.to_string()
+        };
+        IoError::File(format!("{}: {reason}", path.display()))
+    })?;
     parse(&text, limits)
 }
 
@@ -41,6 +47,7 @@ fn parse(text: &str, limits: &Limits) -> Result<Table, IoError> {
         depth: 0,
         field: None,
         value: String::new(),
+        value_chars: 0,
     };
     loop {
         let event = reader
@@ -84,6 +91,8 @@ struct Parser<'a> {
     /// Колонка текущего поля.
     field: Option<usize>,
     value: String,
+    /// Символов в `value`: длина копится по кускам, без пересчёта всей строки.
+    value_chars: usize,
 }
 
 impl Parser<'_> {
@@ -96,6 +105,11 @@ impl Parser<'_> {
             )));
         }
         match self.depth {
+            1 if self.root.is_some() => {
+                return Err(IoError::Invalid(
+                    "в XML больше одного корневого элемента".into(),
+                ));
+            }
             1 => self.root = Some(name.to_owned()),
             2 => {
                 if self.rows.len() >= self.limits.max_rows {
@@ -116,6 +130,7 @@ impl Parser<'_> {
                 };
                 self.field = Some(column);
                 self.value.clear();
+                self.value_chars = 0;
             }
             _ => {
                 return Err(IoError::Invalid(format!(
@@ -131,14 +146,16 @@ impl Parser<'_> {
         if self.field.is_none() {
             return Ok(());
         }
-        self.value.push_str(text);
-        if self.value.chars().count() > self.limits.max_cell_chars {
+        // Кусок проверяется до того, как попасть в строку: память не растёт сверх лимита.
+        self.value_chars = self.value_chars.saturating_add(text.chars().count());
+        if self.value_chars > self.limits.max_cell_chars {
             return Err(IoError::Limit(format!(
                 "запись {}: значение длиннее {} символов",
                 self.rows.len(),
                 self.limits.max_cell_chars
             )));
         }
+        self.value.push_str(text);
         Ok(())
     }
 

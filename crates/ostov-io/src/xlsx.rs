@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use calamine::{Data, Reader, Xlsx, open_workbook};
+use calamine::{DataRef, Reader, Xlsx, open_workbook};
 
-use crate::values::excel_day_to_iso;
+use crate::values::{excel_day_to_iso, number_text};
 use crate::{Cell, IoError, Limits, Table};
 
 /// Степень сжатия проверяется у файлов больше этого: маленький файл бомбой не бывает,
@@ -12,6 +12,10 @@ use crate::{Cell, IoError, Limits, Table};
 const RATIO_CHECK_FROM: u64 = 1024 * 1024;
 /// В настоящем xlsx десятки файлов; тысячи — уже атака на оглавление.
 const MAX_ENTRIES: usize = 10_000;
+/// Колонок в строке заголовков: таблица для импорта шире не бывает.
+const MAX_COLUMNS: usize = 1024;
+/// Хранимых ячеек в листе (100 000 строк × 100 колонок); защита памяти от разреженных листов.
+const MAX_CELLS: usize = 10_000_000;
 
 /// Читает первый лист: заголовки и строки. Список всех листов — в `Table::sheets`.
 ///
@@ -42,49 +46,93 @@ pub fn read_xlsx_sheet(
             .cloned()
             .ok_or_else(|| IoError::Invalid("в книге нет листов".into()))?,
     };
-    let range = book.worksheet_range(&name).map_err(|e| broken(path, &e))?;
-    let height = range.height();
-    if height.saturating_sub(1) > limits.max_rows {
-        return Err(IoError::Limit(format!(
-            "строк больше {}: в листе «{name}» их {}",
-            limits.max_rows,
-            height - 1
-        )));
-    }
-    let header_row = range.start().map_or(0, |(row, _)| row);
-    let mut rows = range.rows();
-    let headers = rows
-        .next()
-        .map(|cells| {
-            cells
-                .iter()
-                .map(|c| cell(c).to_string().trim().to_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let (headers, rows, header_row) =
+        read_cells(&mut book, &name, limits).map_err(|e| match e {
+            Read::Calamine(e) => broken(path, &e),
+            Read::Limit(reason) => IoError::Limit(reason),
+        })?;
     let first_row = usize::try_from(header_row)
         .unwrap_or(usize::MAX)
         .saturating_add(2);
-    let mut data = Vec::with_capacity(height.saturating_sub(1));
-    for (index, cells) in rows.enumerate() {
-        let row: Vec<Cell> = cells.iter().map(cell).collect();
-        if let Some(column) = row.iter().position(|c| too_long(c, limits)) {
-            return Err(IoError::Limit(format!(
-                "строка {}, колонка {}: ячейка длиннее {} символов",
-                first_row + index,
-                column + 1,
-                limits.max_cell_chars
-            )));
-        }
-        data.push(row);
-    }
     Ok(Table {
         sheets,
         sheet: name,
         headers,
-        rows: data,
+        rows,
         first_row,
     })
+}
+
+/// Заголовки, строки данных и номер строки заголовков (с нуля).
+type Cells = (Vec<String>, Vec<Vec<Cell>>, u32);
+
+enum Read {
+    Calamine(calamine::XlsxError),
+    Limit(String),
+}
+
+/// Ячейки потоком, без плотного листа: `calamine::worksheet_range` строит прямоугольник
+/// ширина × высота, и файл в 1 КБ с ячейкой в XFD1048576 запросил бы миллиарды ячеек.
+/// Отказ — как только номер строки или число хранимых ячеек выходит за лимит.
+fn read_cells<R: std::io::Read + std::io::Seek>(
+    book: &mut Xlsx<R>,
+    name: &str,
+    limits: &Limits,
+) -> Result<Cells, Read> {
+    let mut reader = book.worksheet_cells_reader(name).map_err(Read::Calamine)?;
+    let mut header_row: Option<u32> = None;
+    let mut headers: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut stored: usize = 0;
+    while let Some(found) = reader.next_cell().map_err(Read::Calamine)? {
+        let (row, column) = found.get_position();
+        let value = cell(found.get_value());
+        let header = *header_row.get_or_insert(row);
+        let column = usize::try_from(column).unwrap_or(usize::MAX);
+        if row == header {
+            if column >= MAX_COLUMNS {
+                return Err(Read::Limit(format!("колонок больше {MAX_COLUMNS}")));
+            }
+            if headers.len() <= column {
+                headers.resize(column + 1, String::new());
+            }
+            headers[column] = value.to_string().trim().to_owned();
+            continue;
+        }
+        let index = usize::try_from(row - header - 1).unwrap_or(usize::MAX);
+        if index >= limits.max_rows {
+            return Err(Read::Limit(format!(
+                "строк больше {}: в листе «{name}» есть строка {}",
+                limits.max_rows,
+                u64::from(row) + 1
+            )));
+        }
+        // Ячейки правее заголовков импорту не нужны — и память на них не тратим.
+        if column >= headers.len() || value == Cell::Empty {
+            continue;
+        }
+        if too_long(&value, limits) {
+            return Err(Read::Limit(format!(
+                "строка {}, колонка {}: ячейка длиннее {} символов",
+                u64::from(row) + 1,
+                column + 1,
+                limits.max_cell_chars
+            )));
+        }
+        if rows.len() <= index {
+            rows.resize(index + 1, Vec::new());
+        }
+        let line = &mut rows[index];
+        if line.len() <= column {
+            stored = stored.saturating_add(column + 1 - line.len());
+            if stored > MAX_CELLS {
+                return Err(Read::Limit(format!("в листе больше {MAX_CELLS} ячеек")));
+            }
+            line.resize(column + 1, Cell::Empty);
+        }
+        line[column] = value;
+    }
+    Ok((headers, rows, header_row.unwrap_or_default()))
 }
 
 pub(crate) fn check_file_size(path: &Path, limits: &Limits) -> Result<(), IoError> {
@@ -143,26 +191,26 @@ fn too_long(cell: &Cell, limits: &Limits) -> bool {
     }
 }
 
-fn cell(data: &Data) -> Cell {
+fn cell(data: &DataRef<'_>) -> Cell {
     match data {
-        Data::Empty => Cell::Empty,
-        Data::String(text) => Cell::Text(text.clone()),
-        Data::Int(v) => Cell::Number(v.to_string()),
-        // Display у f64 даёт кратчайшую запись, которая читается обратно тем же числом: 2.5, 0.1.
-        Data::Float(v) => Cell::Number(v.to_string()),
-        Data::Bool(flag) => Cell::Bool(*flag),
-        Data::DateTime(date) if !date.is_duration() => excel_date(date.as_f64())
-            .map_or_else(|| Cell::Number(date.as_f64().to_string()), Cell::Date),
-        Data::DateTime(date) => Cell::Number(date.as_f64().to_string()),
-        Data::DateTimeIso(text) => Cell::Date(text.chars().take(10).collect()),
-        Data::DurationIso(text) => Cell::Text(text.clone()),
-        Data::Error(error) => Cell::Error(error.to_string()),
+        DataRef::Empty => Cell::Empty,
+        DataRef::String(text) => Cell::Text(text.clone()),
+        DataRef::SharedString(text) => Cell::Text((*text).to_owned()),
+        DataRef::Int(v) => Cell::Number(v.to_string()),
+        DataRef::Float(v) => Cell::Number(number_text(*v)),
+        DataRef::Bool(flag) => Cell::Bool(*flag),
+        DataRef::DateTime(date) if !date.is_duration() => excel_date(date.as_f64())
+            .map_or_else(|| Cell::Number(number_text(date.as_f64())), Cell::Date),
+        DataRef::DateTime(date) => Cell::Number(number_text(date.as_f64())),
+        DataRef::DateTimeIso(text) => Cell::Date(text.chars().take(10).collect()),
+        DataRef::DurationIso(text) => Cell::Text(text.clone()),
+        DataRef::Error(error) => Cell::Error(error.to_string()),
     }
 }
 
 /// День Excel из числа с дробной частью-временем.
 fn excel_date(serial: f64) -> Option<String> {
-    let day: i64 = serial.to_string().split('.').next()?.parse().ok()?;
+    let day: i64 = number_text(serial).split('.').next()?.parse().ok()?;
     excel_day_to_iso(day)
 }
 

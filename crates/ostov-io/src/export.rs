@@ -233,7 +233,8 @@ impl Sheet {
                 let format = decimals
                     .entry(*scale)
                     .or_insert_with(|| Format::new().set_num_format(decimal_format(*scale)));
-                match decimal_number(*units, *scale) {
+                // Больше 2^53 единиц Excel не хранит точно — тогда текстом, как у целых.
+                match decimal_number(*units, *scale).filter(|_| units.unsigned_abs() < (1 << 53)) {
                     Some(number) => sheet.write_number_with_format(row, col, number, format)?,
                     None => {
                         sheet.write_string(row, col, crate::values::decimal_text(*units, *scale))?
