@@ -9,6 +9,7 @@ mod limits;
 mod table;
 mod values;
 mod xlsx;
+mod xml;
 
 pub use error::IoError;
 pub use export::{export_list, export_report};
@@ -18,3 +19,4 @@ pub use import::{
 pub use limits::Limits;
 pub use table::{Cell, Table};
 pub use xlsx::{read_xlsx, read_xlsx_sheet};
+pub use xml::{export_list_xml, read_xml};

@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 calamine = "=0.38.0"
 ostov-api = { path = "../ostov-api" }
+quick-xml = "=0.42.0"
 rust_xlsxwriter = "=0.102.0"
 
 [dev-dependencies]
