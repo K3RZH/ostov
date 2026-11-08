@@ -187,12 +187,11 @@ pub fn verify(db: &mut dyn Driver, login: &str, password: &Password) -> Result<U
         return Err(SecError::WrongCredentials { delay_secs: 0 });
     };
     if !password::verify_password(password, &phc) {
-        set_failed(db, user.id, failed.saturating_add(1))?;
-        let delay_secs = delay_secs(failed.saturating_add(1));
+        let delay_secs = delay_secs(count_failure(db, user.id)?);
         return Err(SecError::WrongCredentials { delay_secs });
     }
     if failed != 0 {
-        set_failed(db, user.id, 0)?;
+        reset_failed(db, user.id)?;
     }
     if !user.active {
         return Err(SecError::Disabled);
@@ -285,16 +284,29 @@ fn update(db: &mut dyn Driver, user: &User, columns: &[(&str, Value)]) -> Result
     get(db, &user.login, false)
 }
 
-/// Счётчик ошибок входа — не правка администратора, версию не меняет.
-fn set_failed(db: &mut dyn Driver, id: i64, failed: i64) -> Result<(), SecError> {
+/// +1 к ошибкам входа и их число после этого. Прибавляет сам SQL: одновременные попытки
+/// не теряются. Счётчик — не правка администратора, версию не меняет.
+fn count_failure(db: &mut dyn Driver, id: i64) -> Result<i64, SecError> {
+    let d = db.dialect();
+    let table = table(d);
+    let increment = format!(
+        "UPDATE {table} SET failed = failed + 1 WHERE id = {}",
+        d.placeholder(1)
+    );
+    let read = format!("SELECT failed FROM {table} WHERE id = {}", d.placeholder(1));
+    db.execute(&increment, &[Value::Int(id)])?;
+    let row = db.query(&read, &[Value::Int(id)])?.into_iter().next();
+    int(row.and_then(|row| row.into_iter().next()), "failed")
+}
+
+fn reset_failed(db: &mut dyn Driver, id: i64) -> Result<(), SecError> {
     let d = db.dialect();
     let sql = format!(
-        "UPDATE {} SET failed = {} WHERE id = {}",
+        "UPDATE {} SET failed = 0 WHERE id = {}",
         table(d),
-        d.placeholder(1),
-        d.placeholder(2)
+        d.placeholder(1)
     );
-    db.execute(&sql, &[Value::Int(failed), Value::Int(id)])?;
+    db.execute(&sql, &[Value::Int(id)])?;
     Ok(())
 }
 
