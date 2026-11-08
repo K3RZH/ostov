@@ -3722,6 +3722,11 @@ dependencies = [
 name = "ostov-py"
 version = "0.1.0"
 dependencies = [
+ "ostov-api",
+ "ostov-core",
+ "ostov-meta",
+ "ostov-model",
+ "ostov-store",
  "pyo3",
 ]
 
