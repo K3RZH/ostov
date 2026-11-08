@@ -263,7 +263,7 @@ impl AccumulationRegister {
                 d.quote_ident(&self.name)
             )
         };
-        if db.query(&probe, &[]).is_ok() {
+        if crate::tx::probe(db, &probe)? {
             return Ok(false);
         }
         let statements = {

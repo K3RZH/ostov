@@ -154,7 +154,11 @@ fn from_row(row: &postgres::Row) -> Result<Row, StoreError> {
 
 impl From<postgres::Error> for StoreError {
     fn from(e: postgres::Error) -> Self {
-        Self::Database(e.to_string())
+        // Сам `postgres::Error` пишет только «db error»; причина — в ответе сервера.
+        match e.as_db_error() {
+            Some(db) => Self::Database(format!("{} ({})", db.message(), db.code().code())),
+            None => Self::Database(e.to_string()),
+        }
     }
 }
 

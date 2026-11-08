@@ -66,6 +66,18 @@ impl LocalEngine {
         }
     }
 
+    /// Новая база Ostov в пустой базе данных любого драйвера (так её будет создавать и сервер).
+    pub fn install(mut db: Box<dyn Driver + Send>, config: Config) -> EngineResult<Self> {
+        in_transaction(&mut *db, |db| install(db, &config)).map_err(error)?;
+        Ok(Self::new(db, config))
+    }
+
+    /// Существующая база: доводится до конфигурации (реструктуризация) и открывается.
+    pub fn open(mut db: Box<dyn Driver + Send>, config: Config) -> EngineResult<Self> {
+        in_transaction(&mut *db, |db| upgrade(db, &config)).map_err(error)?;
+        Ok(Self::new(db, config))
+    }
+
     fn locked(mut self, lock: File) -> Self {
         self._lock = Some(lock);
         self
@@ -851,21 +863,24 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
     }
     let lock = lock_base(path)?;
     let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
-    in_transaction(&mut db, |db| {
-        db.execute(
-            &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
-            &[],
-        )?;
-        db.execute(
-            &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
-            &[Value::Text(config.name.clone())],
-        )?;
-        config.create_tables(db)?;
-        settings::create_table(db)?;
-        schema::record(db, &config)
-    })
-    .map_err(error)?;
+    in_transaction(&mut db, |db| install(db, &config)).map_err(error)?;
     Ok((db, config, lock))
+}
+
+/// Служебные таблицы и таблицы конфигурации в пустой базе.
+fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    let insert = format!(
+        "INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', {})",
+        db.dialect().placeholder(1)
+    );
+    db.execute(
+        &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
+        &[],
+    )?;
+    db.execute(&insert, &[Value::Text(config.name.clone())])?;
+    config.create_tables(db)?;
+    settings::create_table(db)?;
+    schema::record(db, config)
 }
 
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
