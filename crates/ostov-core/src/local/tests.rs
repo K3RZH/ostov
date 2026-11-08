@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ostov_api::{Connector, Engine, ErrorCode, Fields, ListQuery, ObjectData, PostAction, Value};
+use ostov_api::{
+    Connector, Engine, ErrorCode, Fields, ListQuery, ObjectData, PostAction, Row, Value,
+};
 
 use super::LocalConnector;
 
@@ -1130,4 +1132,129 @@ fn required_fields_must_be_filled() {
     engine
         .save("receipt", &dated(no_date, "2026-02-01"), PostAction::Post)
         .unwrap();
+}
+
+#[test]
+fn list_rows_carry_version_and_filter_by_status() {
+    let base = Base::new("status");
+    let engine = LocalConnector::default()
+        .create_demo(&base.path, 60)
+        .unwrap();
+    let all = |q: ListQuery| -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut q = ListQuery { size: 1000, ..q };
+        loop {
+            let page = engine.list(&q).unwrap();
+            rows.extend(page.rows);
+            match page.next_key {
+                Some(key) => q.after_key = Some(key),
+                None => return rows,
+            }
+        }
+    };
+    let flag = |r: &Row, name: &str| r.values[name] == Value::Int(1);
+
+    // Пометка на удаление по версии прямо из строки списка, без лишнего get.
+    let first = all(ListQuery {
+        posted: Some(false),
+        deleted: Some(false),
+        ..query("receipt", 1)
+    })
+    .remove(0);
+    let Value::Int(version) = first.values["version"] else {
+        panic!("{:?}", first.values);
+    };
+    engine
+        .mark_deleted("receipt", first.id, version, true)
+        .unwrap();
+
+    let receipts = all(query("receipt", 1));
+    let posted = all(ListQuery {
+        posted: Some(true),
+        ..query("receipt", 1)
+    });
+    let drafts = all(ListQuery {
+        posted: Some(false),
+        ..query("receipt", 1)
+    });
+    let deleted = all(ListQuery {
+        deleted: Some(true),
+        ..query("receipt", 1)
+    });
+    assert!(!posted.is_empty() && !drafts.is_empty() && !deleted.is_empty());
+    assert!(posted.iter().all(|r| flag(r, "posted")));
+    assert!(drafts.iter().all(|r| !flag(r, "posted")));
+    assert!(deleted.iter().all(|r| flag(r, "deleted")));
+    assert!(deleted.iter().any(|r| r.id == first.id));
+    assert_eq!(posted.len() + drafts.len(), receipts.len());
+
+    // Отбор вместе с поиском и через вехи.
+    let page = engine
+        .list(&ListQuery {
+            posted: Some(false),
+            ..query("receipt", 5)
+        })
+        .unwrap();
+    assert_eq!(page.total, Some(drafts.len() as u64));
+    let seek = engine.seek(&page.token, 0, 5).unwrap();
+    assert!(seek.rows.iter().all(|r| !flag(r, "posted")));
+
+    // У справочника нет проведения; число в поиске не ловит служебные флаги.
+    let err = engine
+        .list(&ListQuery {
+            posted: Some(true),
+            ..query("goods", 10)
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    let found = engine
+        .list(&ListQuery {
+            search: Some("1".into()),
+            ..query("goods", 100)
+        })
+        .unwrap();
+    assert!(found.rows.len() < all(query("goods", 1)).len());
+}
+
+#[test]
+fn settings_are_kept_in_base() {
+    let base = Base::new("settings");
+    let engine = base.create();
+    assert_eq!(engine.get_settings("receipt.list").unwrap(), None);
+
+    let settings = fields(&[
+        ("widths", text("120,80,200")),
+        ("dense", Value::Bool(true)),
+        ("rows", Value::Int(50)),
+        ("zoom", dec(125, 2)),
+        ("from", Value::Date("2026-01-01".into())),
+        (
+            "warehouse",
+            Value::Ref {
+                id: 3,
+                title: Some("Основной".into()),
+            },
+        ),
+        ("note", text("a:b:c")),
+        ("empty", Value::Null),
+    ]);
+    engine.save_settings("receipt.list", &settings).unwrap();
+    drop(engine);
+
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    let mut expected = settings.clone();
+    expected.insert("warehouse".into(), Value::Ref { id: 3, title: None });
+    assert_eq!(engine.get_settings("receipt.list").unwrap(), Some(expected));
+
+    // Сохранение заменяет набор целиком.
+    engine
+        .save_settings("receipt.list", &fields(&[("rows", Value::Int(20))]))
+        .unwrap();
+    assert_eq!(
+        engine.get_settings("receipt.list").unwrap(),
+        Some(fields(&[("rows", Value::Int(20))]))
+    );
+    assert_eq!(engine.get_settings("goods.list").unwrap(), None);
 }

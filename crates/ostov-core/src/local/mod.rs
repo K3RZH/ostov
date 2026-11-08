@@ -5,6 +5,7 @@ mod config;
 mod convert;
 mod demo;
 mod schema;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -214,16 +215,18 @@ const SEP: char = '\u{1f}';
 
 fn token(object: &str, q: &ListQuery) -> String {
     format!(
-        "{object}{SEP}{}{SEP}{}{SEP}{}",
+        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
         q.order.as_deref().unwrap_or(""),
         u8::from(q.descending),
+        flag(q.posted),
+        flag(q.deleted),
         q.search.as_deref().unwrap_or("")
     )
 }
 
 fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
-    let parts: Vec<&str> = token.splitn(4, SEP).collect();
-    let [object, order, descending, search] = parts.as_slice() else {
+    let parts: Vec<&str> = token.splitn(6, SEP).collect();
+    let [object, order, descending, posted, deleted, search] = parts.as_slice() else {
         return Err(invalid("испорченный токен списка".into()));
     };
     let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
@@ -233,8 +236,26 @@ fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
             order: some(order),
             descending: *descending == "1",
             search: some(search),
+            posted: unflag(posted),
+            deleted: unflag(deleted),
         },
     ))
+}
+
+fn flag(value: Option<bool>) -> &'static str {
+    match value {
+        None => "",
+        Some(true) => "1",
+        Some(false) => "0",
+    }
+}
+
+fn unflag(s: &str) -> Option<bool> {
+    match s {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn saved_doc(d: &Document) -> Saved {
@@ -271,6 +292,8 @@ impl LocalEngine {
             order: q.order.clone(),
             descending: q.descending,
             search: q.search.clone(),
+            posted: q.posted,
+            deleted: q.deleted,
         };
         let mut db = self.db();
         let page = list_titled(
@@ -522,6 +545,18 @@ impl Engine for LocalEngine {
 
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
         self.guarded("RunReport", || self.run_run_report(query))
+    }
+
+    fn get_settings(&self, key: &str) -> EngineResult<Option<ostov_api::Fields>> {
+        self.guarded("GetSettings", || {
+            settings::get(&mut **self.db(), key).map_err(error)
+        })
+    }
+
+    fn save_settings(&self, key: &str, values: &ostov_api::Fields) -> EngineResult<()> {
+        self.guarded("SaveSettings", || {
+            settings::save(&mut **self.db(), key, values).map_err(error)
+        })
     }
 
     fn get_meta(&self) -> EngineResult<ostov_api::Meta> {
@@ -826,6 +861,7 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
             &[Value::Text(config.name.clone())],
         )?;
         config.create_tables(db)?;
+        settings::create_table(db)?;
         schema::record(db, &config)
     })
     .map_err(error)?;
@@ -836,6 +872,7 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
     crate::closing::create_table(db)?;
+    settings::create_table(db)?;
     if !schema::recorded(db)? {
         // Базы до реструктуризации создавались только под встроенный «Склад».
         schema::record(db, &warehouse()?)?;

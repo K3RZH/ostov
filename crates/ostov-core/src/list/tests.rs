@@ -60,7 +60,7 @@ fn by(field: &str, descending: bool) -> ListQuery {
     ListQuery {
         order: Some(field.into()),
         descending,
-        search: None,
+        ..ListQuery::default()
     }
 }
 

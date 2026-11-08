@@ -13,6 +13,9 @@ use crate::{Catalog, CoreError, DocumentKind};
 use cursor::Cursor;
 pub use milestones::{MILESTONE_STEP, Milestones};
 
+/// Служебные флаги и версия: по ним не ищут, для этого есть отбор.
+const SERVICE: [&str; 3] = ["posted", "deleted", "version"];
+
 /// Больше строк за раз не отдаём (СТ-51).
 pub const MAX_WINDOW: usize = 1000;
 
@@ -29,7 +32,9 @@ impl ListSource for Catalog {
 
     fn list_fields(&self) -> Vec<FieldDef> {
         let mut fields = self.fields().to_vec();
-        fields.push(FieldDef::new("deleted", FieldKind::Int));
+        for flag in ["deleted", "version"] {
+            fields.push(FieldDef::new(flag, FieldKind::Int));
+        }
         fields
     }
 }
@@ -42,7 +47,7 @@ impl ListSource for DocumentKind {
     fn list_fields(&self) -> Vec<FieldDef> {
         let mut fields = vec![FieldDef::new("number", FieldKind::Int)];
         fields.extend(self.header().iter().cloned());
-        for flag in ["posted", "deleted"] {
+        for flag in ["posted", "deleted", "version"] {
             fields.push(FieldDef::new(flag, FieldKind::Int));
         }
         fields
@@ -56,6 +61,10 @@ pub struct ListQuery {
     pub descending: bool,
     /// Поиск подстроки по текстовым полям.
     pub search: Option<String>,
+    /// Только проведённые (`Some(true)`) или только черновики (`Some(false)`).
+    pub posted: Option<bool>,
+    /// Только помеченные на удаление или только непомеченные.
+    pub deleted: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +130,8 @@ struct Plan {
     search: Option<String>,
     /// Если строка поиска — число, ищем ещё и по целым полям (номер документа).
     search_number: Option<i64>,
+    posted: Option<bool>,
+    deleted: Option<bool>,
     titles: TitleColumns,
 }
 
@@ -140,6 +151,12 @@ impl Plan {
                 ))
             })?),
         };
+        if query.posted.is_some() && !fields.iter().any(|f| f.name == "posted") {
+            return Err(CoreError::Invalid(format!(
+                "{} не проводится: отбора по проведению нет",
+                source.table()
+            )));
+        }
         let raw = query
             .search
             .as_deref()
@@ -152,6 +169,8 @@ impl Plan {
             descending: query.descending,
             search: raw.map(|s| like_pattern(&s.to_lowercase())),
             search_number: raw.and_then(|s| s.parse().ok()),
+            posted: query.posted,
+            deleted: query.deleted,
             titles: titles.clone(),
         })
     }
@@ -160,7 +179,7 @@ impl Plan {
         let mut params = Vec::new();
         let sql = {
             let d = db.dialect();
-            let filter = self.search_sql(d, &mut params);
+            let filter = self.filter_sql(d, &mut params);
             let mut sql = format!("SELECT COUNT(*) FROM {}", d.quote_ident(&self.table));
             if let Some(filter) = filter {
                 sql.push_str(&format!(" WHERE {filter}"));
@@ -198,7 +217,7 @@ impl Plan {
                 cols.push(self.sort_expr(d, i));
             }
 
-            let mut filters: Vec<String> = self.search_sql(d, &mut params).into_iter().collect();
+            let mut filters: Vec<String> = self.filter_sql(d, &mut params).into_iter().collect();
             if let Some(after) = after {
                 filters.push(self.after_sql(d, after, &mut params)?);
             }
@@ -323,6 +342,27 @@ impl Plan {
         }
     }
 
+    /// Поиск и отбор по статусу вместе.
+    pub(crate) fn filter_sql(
+        &self,
+        d: &dyn ostov_store::Dialect,
+        params: &mut Vec<Value>,
+    ) -> Option<String> {
+        let mut parts: Vec<String> = self.search_sql(d, params).into_iter().collect();
+        for (flag, wanted) in [("posted", self.posted), ("deleted", self.deleted)] {
+            if let Some(wanted) = wanted {
+                params.push(Value::Int(wanted.into()));
+                parts.push(format!(
+                    "{}.{} = {}",
+                    d.quote_ident(&self.table),
+                    d.quote_ident(flag),
+                    d.placeholder(params.len())
+                ));
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join(" AND "))
+    }
+
     /// Поиск: подстрока в тексте, дате и названиях ссылок; число — ещё и по целым полям
     /// (номер документа). Если искать негде, ничего не находится.
     fn search_sql(&self, d: &dyn ostov_store::Dialect, params: &mut Vec<Value>) -> Option<String> {
@@ -351,6 +391,7 @@ impl Plan {
                         ));
                     }
                 }
+                FieldKind::Int if SERVICE.contains(&f.name.as_str()) => {}
                 FieldKind::Int => {
                     if let Some(n) = self.search_number {
                         params.push(Value::Int(n));

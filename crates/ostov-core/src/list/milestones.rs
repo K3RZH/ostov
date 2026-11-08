@@ -54,7 +54,7 @@ impl Milestones {
                 cols.join(", "),
                 d.quote_ident(&plan.table)
             );
-            if let Some(filter) = plan.search_sql(d, &mut params) {
+            if let Some(filter) = plan.filter_sql(d, &mut params) {
                 sql.push_str(&format!(" WHERE {filter}"));
             }
             sql.push_str(&format!(" ORDER BY {}", plan.order_sql(d)));
