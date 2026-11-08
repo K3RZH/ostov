@@ -1,0 +1,19 @@
+[package]
+name = "ostov-io"
+description = "Импорт и экспорт Ostov: Excel (xlsx) и XML через Engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ostov-api = { path = "../ostov-api" }
+rust_xlsxwriter = "=0.102.0"
+
+[dev-dependencies]
+# Тесты: локальная база как &dyn Engine и чтение выгруженного xlsx.
+calamine = "=0.38.0"
+ostov-core = { path = "../ostov-core" }
