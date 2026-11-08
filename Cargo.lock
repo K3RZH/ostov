@@ -3679,6 +3679,8 @@ name = "ostov-cli"
 version = "0.1.0"
 dependencies = [
  "ostov-meta",
+ "ostov-model",
+ "ostov-py",
 ]
 
 [[package]]

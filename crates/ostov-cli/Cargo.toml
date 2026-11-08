@@ -13,5 +13,11 @@ workspace = true
 name = "ostov"
 path = "src/main.rs"
 
+[features]
+# Проверка .py документов в ostov check; без неё — предупреждение о пропуске.
+python = ["ostov-py/python"]
+
 [dependencies]
 ostov-meta = { path = "../ostov-meta" }
+ostov-model = { path = "../ostov-model" }
+ostov-py = { path = "../ostov-py" }
