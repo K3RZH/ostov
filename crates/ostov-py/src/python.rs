@@ -83,7 +83,7 @@ impl Rules for PyRules {
 
 /// Где Python ищет стандартную библиотеку: `PYTHONHOME` или папка программы.
 fn python_home() -> Result<PathBuf, PyLoadError> {
-    if let Some(home) = std::env::var_os("PYTHONHOME") {
+    if let Some(home) = std::env::var_os("PYTHONHOME").filter(|home| !home.is_empty()) {
         return Ok(PathBuf::from(home));
     }
     let exe = std::env::current_exe()
@@ -229,6 +229,12 @@ fn compile<'py>(
         Ok(module)
     };
     run().map_err(|error| {
+        // Неудачный модуль не оставляем в sys.modules.
+        let name = format!("{MODULE_PREFIX}{document}");
+        let _ = py
+            .import("sys")
+            .and_then(|sys| sys.getattr("modules"))
+            .and_then(|modules| modules.del_item(name));
         let described = runtime(py).and_then(|rt| {
             rt.getattr("_load_error")?
                 .call1((error.value(py), file_name.as_str()))?
@@ -281,6 +287,10 @@ impl PostingRule for PyRule {
                 else {
                     continue;
                 };
+                if rows.len() != new_rows.len() {
+                    let reason = format!("число строк {part} изменилось: строки менять нельзя");
+                    return Err(script.value_error(part, &reason));
+                }
                 for (row, new_row) in rows.iter_mut().zip(new_rows) {
                     script.write_back(row, kinds, new_row)?;
                 }

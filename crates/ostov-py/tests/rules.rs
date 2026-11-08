@@ -390,3 +390,62 @@ fn parallel_loads_of_one_document_do_not_mix_functions() {
         assert_eq!(text, format!("версия {n}"));
     }
 }
+
+/// `prepare` поступления с телом `before_write`; возвращает шапку после вызова.
+fn before_write(
+    test: &str,
+    body: &str,
+    header: ostov_core::Fields,
+) -> Result<ostov_core::Fields, CoreError> {
+    let model = model();
+    let scripts = Scripts::new(test);
+    scripts
+        .write(
+            "receipt",
+            &format!("import ostov\n\ndef before_write(doc, ctx):\n{body}\n\ndef on_post(doc, ctx):\n    pass\n"),
+        )
+        .write("issue", QUIET_ISSUE);
+    let rules = scripts.load(&model).unwrap();
+    let mut header = header;
+    rule(&rules, &model, "receipt").prepare(&mut header, &mut Parts::new())?;
+    Ok(header)
+}
+
+#[test]
+fn only_assigned_fields_are_written_back() {
+    // Ввод клиента ядро проверит само: Python не должен его «чинить» или ломаться на нём.
+    for raw in ["20260105", "2026-02-30", "вчера"] {
+        let header = fields(&[
+            ("date", FieldValue::Date(raw.into())),
+            ("warehouse", FieldValue::Ref(2)),
+        ]);
+        let header = before_write("untouched", "    doc.amount = 0", header).unwrap();
+        assert_eq!(header["date"], FieldValue::Date(raw.into()), "{raw}");
+        assert_eq!(header["amount"], dec("0"), "int в поле Decimal");
+    }
+}
+
+#[test]
+fn user_error_from_before_write() {
+    match before_write(
+        "user-error-bw",
+        "    raise ostov.UserError('Нет склада')",
+        ostov_core::Fields::new(),
+    ) {
+        Err(CoreError::Invalid(text)) => assert_eq!(text, "Нет склада"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn unreadable_date_reaches_script_as_text() {
+    let header = fields(&[("date", FieldValue::Date("2026-02-30".into()))]);
+    match before_write(
+        "date-text",
+        "    raise ostov.UserError(repr(doc.date))",
+        header,
+    ) {
+        Err(CoreError::Invalid(text)) => assert_eq!(text, "'2026-02-30'"),
+        other => panic!("{other:?}"),
+    }
+}

@@ -53,7 +53,11 @@ def _from_core(kind, value):
     if kind == "decimal":
         return Decimal(value)
     if kind == "date":
-        return datetime.date.fromisoformat(value)
+        # Неверную дату отклонит ядро; скрипт видит её как есть, строкой.
+        try:
+            return datetime.date.fromisoformat(value) if len(value) == 10 else value
+        except ValueError:
+            return value
     return value
 
 
@@ -73,13 +77,14 @@ def _to_core(kind, value):
 class _Record:
     """Поля атрибутами. В on_post запись недоступна, новых полей не бывает."""
 
-    __slots__ = ("_owner", "_kinds", "_values", "_writable")
+    __slots__ = ("_owner", "_kinds", "_values", "_writable", "_changed")
 
     def __init__(self, owner, kinds, values, writable):
         object.__setattr__(self, "_owner", owner)
         object.__setattr__(self, "_kinds", kinds)
         object.__setattr__(self, "_values", values)
         object.__setattr__(self, "_writable", writable)
+        object.__setattr__(self, "_changed", set())
 
     def __getattr__(self, name):
         try:
@@ -93,6 +98,7 @@ class _Record:
         if name not in self._kinds:
             raise AttributeError(f"{self._owner}: нет поля {name}, которое можно менять")
         self._values[name] = _check(self._owner, name, self._kinds[name], value)
+        self._changed.add(name)
 
     def __repr__(self):
         return f"<{self._owner} {self._values!r}>"
@@ -117,7 +123,12 @@ def _document(name, schema, header, parts, service, writable):
 
 
 def _dump(record, kinds):
-    return {field: _to_core(kind, record._values.get(field)) for field, kind in kinds.items()}
+    """Только поля, которым скрипт присвоил значение: остальное ядро проверит само как ввод."""
+    return {
+        field: _to_core(kind, record._values.get(field))
+        for field, kind in kinds.items()
+        if field in record._changed
+    }
 
 
 class _Ctx:
@@ -129,11 +140,11 @@ class _Ctx:
         self._allowed = allowed
         self._moves = []
 
-    def receipt(self, register, **values):
+    def receipt(self, register, /, **values):
         """Приход по регистру; ключи — его измерения и ресурсы."""
         self._move("receipt", register, values)
 
-    def issue(self, register, **values):
+    def issue(self, register, /, **values):
         """Расход по регистру; ключи — его измерения и ресурсы."""
         self._move("issue", register, values)
 
