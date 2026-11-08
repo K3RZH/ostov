@@ -65,3 +65,33 @@ fn wrong_arguments_print_usage() {
             .contains("использование")
     );
 }
+
+#[test]
+fn stubs_are_written_into_config() {
+    let dir = std::env::temp_dir().join(format!("ostov-cli-stubs-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    for folder in ["catalogs", "documents", "registers", "subsystems", "roles"] {
+        fs::create_dir_all(dir.join(folder)).unwrap();
+        for entry in fs::read_dir(config.join(folder)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "yaml") {
+                fs::copy(&path, dir.join(folder).join(path.file_name().unwrap())).unwrap();
+            }
+        }
+    }
+    fs::copy(config.join("ostov.yaml"), dir.join("ostov.yaml")).unwrap();
+
+    let output = ostov(&["stubs", dir.to_str().unwrap()]);
+    let stubs = dir.join("_stubs");
+    let receipt = fs::read_to_string(stubs.join("receipt.pyi")).unwrap_or_default();
+    let has_init = stubs.join("__init__.pyi").is_file();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(has_init);
+    assert!(receipt.contains("class Receipt:"), "{receipt}");
+}
