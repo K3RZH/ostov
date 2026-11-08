@@ -308,3 +308,37 @@ fn restructure_on_postgres() {
     let feb = report(&engine, "stock_balance", &[("date", date("2026-02-28"))]);
     assert_eq!(feb[0]["qty"], dec(1_000, 3));
 }
+
+#[test]
+fn users_on_postgres() {
+    let schema = "ostov_t_users";
+    let Some(engine) = install(schema) else {
+        return;
+    };
+    engine
+        .create_first_admin("boss", "admin-password-1")
+        .unwrap();
+    add(&engine, "goods", "Мука");
+    drop(engine);
+
+    let config = Config::from_model(&warehouse_model()).unwrap();
+    let engine = LocalEngine::open(Box::new(connect(schema, false).unwrap()), config).unwrap();
+    assert!(engine.hello().unwrap().login_required);
+    assert_eq!(
+        engine.list(&query("goods")).unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        engine.login("boss", "wrong-password-1").unwrap_err().code,
+        ErrorCode::BadCredentials
+    );
+    engine.login("boss", "admin-password-1").unwrap();
+    assert_eq!(engine.list(&query("goods")).unwrap().rows.len(), 1);
+    assert_eq!(
+        engine
+            .admin_set_user_active("boss", false)
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+}

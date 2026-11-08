@@ -23,6 +23,8 @@ pub struct DocumentConfig {
 }
 
 pub struct Config {
+    /// Роли для прав (ostov-sec); встроенная `admin` сюда не входит.
+    pub roles: Vec<ostov_model::RoleDef>,
     /// Что интерфейс получает по `GetMeta`: объекты с заголовками, меню, права.
     pub meta: Meta,
     /// Название для людей (`title` манифеста): его показывает `hello()`.
@@ -99,6 +101,7 @@ impl Config {
         }
 
         Ok(Self {
+            roles: model.roles.clone(),
             meta: Meta::new(model),
             name: model.title.clone(),
             version: model.version.clone(),

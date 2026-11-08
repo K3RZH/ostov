@@ -1,6 +1,7 @@
 //! `LocalEngine` — реализация `ostov_api::Engine` поверх ядра в том же процессе (режим 1).
 //! В режиме 2 его же будет вызывать сервер на каждую команду по gRPC.
 
+mod access;
 mod config;
 mod convert;
 mod demo;
@@ -22,8 +23,11 @@ use ostov_api::{
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
+use access::Need;
 pub use config::{Config, DocumentConfig, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid};
+
+use crate::closing::ClosedPeriodPass;
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
@@ -38,6 +42,8 @@ pub struct LocalEngine {
     milestones: Mutex<HashMap<String, Milestones>>,
     /// Справочник → его поле-название: по нему ссылки сортируются и ищутся.
     titles: TitleColumns,
+    /// Кто вошёл и есть ли в базе пользователи.
+    access: Mutex<access::Access>,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
 }
@@ -48,7 +54,8 @@ enum Object<'a> {
 }
 
 impl LocalEngine {
-    pub fn new(db: Box<dyn Driver + Send>, config: Config) -> Self {
+    pub fn new(mut db: Box<dyn Driver + Send>, config: Config) -> Self {
+        let users = ostov_sec::has_users(&mut *db).unwrap_or(false);
         let titles = config
             .catalogs
             .iter()
@@ -62,6 +69,7 @@ impl LocalEngine {
             titles,
             config,
             milestones: Mutex::new(HashMap::new()),
+            access: Mutex::new(access::Access { users, user: None }),
             _lock: None,
         }
     }
@@ -293,7 +301,7 @@ impl LocalEngine {
             config_name: self.config.name.clone(),
             config_version: self.config.version.clone(),
             config_format: 0,
-            login_required: false,
+            login_required: self.login_required(),
             first_run: false,
         })
     }
@@ -322,6 +330,7 @@ impl LocalEngine {
 
     fn run_seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
         let (object, query) = parse_token(token)?;
+        self.need(&object, Need::Read)?;
         let source = self.source(&object)?;
         let mut db = self.db();
         let mut cache = self.milestones();
@@ -519,8 +528,45 @@ impl Engine for LocalEngine {
         self.guarded("Hello", || self.run_hello())
     }
 
+    fn login(&self, login: &str, password: &str) -> EngineResult<ostov_api::SessionInfo> {
+        self.guarded("Login", || self.run_login(login, password))
+    }
+
+    fn logout(&self) -> EngineResult<()> {
+        self.access().user = None;
+        self.forget_lists();
+        Ok(())
+    }
+
+    fn create_first_admin(
+        &self,
+        login: &str,
+        password: &str,
+    ) -> EngineResult<ostov_api::SessionInfo> {
+        self.guarded("CreateFirstAdmin", || {
+            self.run_create_first_admin(login, password)
+        })
+    }
+
+    fn admin_users(&self) -> EngineResult<Vec<ostov_api::UserInfo>> {
+        self.guarded("AdminUsers", || self.run_admin_users())
+    }
+
+    fn admin_add_user(&self, user: &ostov_api::NewUser) -> EngineResult<()> {
+        self.guarded("AdminAddUser", || self.run_admin_add_user(user))
+    }
+
+    fn admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
+        self.guarded("AdminSetUserActive", || {
+            self.run_admin_set_user_active(login, active)
+        })
+    }
+
     fn list(&self, q: &ostov_api::ListQuery) -> EngineResult<ListPage> {
-        self.guarded("List", || self.run_list(q))
+        self.guarded("List", || {
+            self.need(&q.object, Need::Read)?;
+            self.run_list(q)
+        })
     }
 
     fn seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
@@ -528,11 +574,30 @@ impl Engine for LocalEngine {
     }
 
     fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
-        self.guarded("Get", || self.run_get(object, id))
+        self.guarded("Get", || {
+            self.need(object, Need::Read)?;
+            self.run_get(object, id)
+        })
     }
 
     fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
-        self.guarded("Save", || self.run_save(object, data, post))
+        self.guarded("Save", || {
+            self.need(
+                object,
+                if data.id.is_some() {
+                    Need::Update
+                } else {
+                    Need::Create
+                },
+            )?;
+            match post {
+                PostAction::Write => {}
+                PostAction::Post => self.need(object, Need::Post)?,
+                PostAction::Unpost => self.need(object, Need::Unpost)?,
+            }
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_save(object, data, post)
+        })
     }
 
     fn mark_deleted(
@@ -543,46 +608,64 @@ impl Engine for LocalEngine {
         deleted: bool,
     ) -> EngineResult<Saved> {
         self.guarded("MarkDeleted", || {
+            self.need(object, Need::Delete)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             self.run_mark_deleted(object, id, version, deleted)
         })
     }
 
     fn post(&self, document: &str, id: i64) -> EngineResult<Saved> {
-        self.guarded("Post", || self.run_post(document, id))
+        self.guarded("Post", || {
+            self.need(document, Need::Post)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_post(document, id)
+        })
     }
 
     fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
-        self.guarded("Unpost", || self.run_unpost(document, id))
+        self.guarded("Unpost", || {
+            self.need(document, Need::Unpost)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_unpost(document, id)
+        })
     }
 
+    // Отчёты, настройки и дата закрытия — всем, кто вошёл: проверка входа в `need_system`.
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
-        self.guarded("RunReport", || self.run_run_report(query))
+        self.guarded("RunReport", || {
+            self.need_system(|_| true, "отчёты")?;
+            self.run_run_report(query)
+        })
     }
 
     fn get_settings(&self, key: &str) -> EngineResult<Option<ostov_api::Fields>> {
         self.guarded("GetSettings", || {
+            self.need_system(|_| true, "настройки")?;
             settings::get(&mut **self.db(), key).map_err(error)
         })
     }
 
     fn save_settings(&self, key: &str, values: &ostov_api::Fields) -> EngineResult<()> {
         self.guarded("SaveSettings", || {
+            self.need_system(|_| true, "настройки")?;
             settings::save(&mut **self.db(), key, values).map_err(error)
         })
     }
 
     fn get_meta(&self) -> EngineResult<ostov_api::Meta> {
-        Ok(self.config.meta.clone())
+        self.guarded("GetMeta", || self.run_get_meta())
     }
 
     fn closing_date(&self) -> EngineResult<Option<String>> {
         self.guarded("GetClosingDate", || {
+            self.need_system(|_| true, "дата закрытия")?;
             crate::closing::closing_date(&mut **self.db()).map_err(error)
         })
     }
 
     fn set_closing_date(&self, date: Option<&str>) -> EngineResult<()> {
         self.guarded("SetClosingDate", || {
+            self.need_system(|s| s.set_closing_date, "установка даты закрытия")?;
             crate::closing::set_closing_date(&mut **self.db(), date).map_err(error)
         })
     }
@@ -844,13 +927,15 @@ impl Connector for LocalConnector {
         &self,
         path: &str,
         file_password: Option<&str>,
-        _admin: Option<&NewAdmin>,
+        admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
-        Ok(Arc::new(
-            LocalEngine::new(Box::new(db), config).locked(lock),
-        ))
+        let engine = LocalEngine::new(Box::new(db), config).locked(lock);
+        if let Some(admin) = admin {
+            engine.create_first_admin(&admin.login, &admin.password)?;
+        }
+        Ok(Arc::new(engine))
     }
 }
 
@@ -880,6 +965,7 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
     db.execute(&insert, &[Value::Text(config.name.clone())])?;
     config.create_tables(db)?;
     settings::create_table(db)?;
+    ostov_sec::create_tables(db)?;
     schema::record(db, config)
 }
 
@@ -888,6 +974,7 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
     crate::closing::create_table(db)?;
     settings::create_table(db)?;
+    ostov_sec::create_tables(db)?;
     if !schema::recorded(db)? {
         // Базы до реструктуризации создавались только под встроенный «Склад».
         schema::record(db, &warehouse()?)?;

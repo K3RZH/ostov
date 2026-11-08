@@ -321,7 +321,7 @@ fn wrong_requests() {
     );
     assert_eq!(
         engine.login("a", "b").unwrap_err().code,
-        ErrorCode::NotImplemented
+        ErrorCode::BadCredentials
     );
 }
 
@@ -1257,4 +1257,219 @@ fn settings_are_kept_in_base() {
         Some(fields(&[("rows", Value::Int(20))]))
     );
     assert_eq!(engine.get_settings("goods.list").unwrap(), None);
+}
+
+fn roles_model() -> ostov_model::Config {
+    let mut model = super::warehouse_model();
+    let read = ostov_model::Rights {
+        read: true,
+        ..ostov_model::Rights::default()
+    };
+    let work = ostov_model::Rights {
+        read: true,
+        create: true,
+        update: true,
+        post: true,
+        unpost: true,
+        delete: false,
+    };
+    model.roles.push(ostov_model::RoleDef {
+        name: "storekeeper".into(),
+        title: "Кладовщик".into(),
+        objects: vec![
+            ("goods".into(), read),
+            ("warehouses".into(), read),
+            ("issue".into(), work),
+        ],
+        system: ostov_model::SystemRights::default(),
+    });
+    model
+}
+
+const ADMIN_PASSWORD: &str = "admin-password-1";
+const KEEPER_PASSWORD: &str = "keeper-password-1";
+
+#[test]
+fn base_without_users_needs_no_login() {
+    let base = Base::new("no-users");
+    let engine = base.create();
+    assert!(!engine.hello().unwrap().login_required);
+    add(&*engine, "goods", "Мука");
+    assert!(
+        engine
+            .get_meta()
+            .unwrap()
+            .objects
+            .iter()
+            .all(|o| o.rights.delete)
+    );
+}
+
+#[test]
+fn first_admin_turns_login_on() {
+    let base = Base::new("first-admin");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let session = engine.create_first_admin("Boss", ADMIN_PASSWORD).unwrap();
+    assert_eq!(session.login, "boss");
+    assert_eq!(session.roles, vec!["admin".to_owned()]);
+    assert_eq!(
+        engine
+            .create_first_admin("boss2", ADMIN_PASSWORD)
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden
+    );
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик Иван".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let users = engine.admin_users().unwrap();
+    assert_eq!(users.len(), 2);
+    drop(engine);
+
+    // Переоткрыли: без входа ничего нельзя.
+    let engine = LocalConnector::new(roles_model())
+        .open_local(&base.path, None)
+        .unwrap();
+    assert!(engine.hello().unwrap().login_required);
+    assert_eq!(
+        engine.list(&query("goods", 10)).unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        engine.login("boss", "wrong-password-1").unwrap_err().code,
+        ErrorCode::BadCredentials
+    );
+    engine.login("BOSS", ADMIN_PASSWORD).unwrap();
+    assert!(!engine.hello().unwrap().login_required);
+    engine.list(&query("goods", 10)).unwrap();
+    engine.logout().unwrap();
+    assert!(engine.hello().unwrap().login_required);
+}
+
+#[test]
+fn rights_are_checked_in_core() {
+    let base = Base::new("rights");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(
+            &base.path,
+            None,
+            Some(&ostov_api::NewAdmin {
+                login: "boss".into(),
+                password: ADMIN_PASSWORD.into(),
+            }),
+        )
+        .unwrap();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 10_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.set_closing_date(Some("2026-02-28")).unwrap();
+    engine.logout().unwrap();
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let forbidden = |r: ostov_api::EngineResult<ostov_api::Saved>| {
+        let err = r.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden, "{}", err.message);
+        err.message
+    };
+    // Читать товары можно, менять — нет; поступления не видно вовсе.
+    engine.get("goods", flour).unwrap();
+    let msg = forbidden(engine.save(
+        "goods",
+        &engine.get("goods", flour).unwrap(),
+        PostAction::Write,
+    ));
+    assert_eq!(msg, "Нет права на изменение «Товары».");
+    assert_eq!(
+        engine.list(&query("receipt", 10)).unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    // Расход проводить можно, помечать на удаление — нет.
+    let issue_id = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap()
+        .id;
+    let version = engine.get("issue", issue_id).unwrap().version;
+    forbidden(engine.mark_deleted("issue", issue_id, version, true));
+    // Закрытый период кладовщику закрыт, а дату закрытия он менять не может.
+    assert_eq!(
+        engine
+            .save(
+                "issue",
+                &dated(issue(main, flour, 1_000), "2026-02-15"),
+                PostAction::Post,
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::PeriodClosed
+    );
+    assert_eq!(
+        engine.set_closing_date(None).unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(engine.admin_users().unwrap_err().code, ErrorCode::Forbidden);
+
+    // Метаданные — только то, что можно смотреть, и меню тоже.
+    let meta = engine.get_meta().unwrap();
+    let names: Vec<&str> = meta.objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, ["goods", "warehouses", "issue"]);
+    let goods = &meta.objects[0];
+    assert!(goods.rights.read && !goods.rights.update);
+    let menu: Vec<_> = meta.menu[0]
+        .children
+        .iter()
+        .filter_map(|i| i.object.clone())
+        .collect();
+    assert_eq!(menu, ["goods", "warehouses", "issue"]);
+
+    // Администратор правит закрытый период: у него право closed_period.
+    engine.logout().unwrap();
+    engine.login("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-02-15"),
+            PostAction::Post,
+        )
+        .unwrap();
+
+    // Последнего администратора не отключить; кладовщика — можно, и он больше не войдёт.
+    assert_eq!(
+        engine
+            .admin_set_user_active("boss", false)
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+    engine.admin_set_user_active("keeper", false).unwrap();
+    engine.logout().unwrap();
+    assert_eq!(
+        engine.login("keeper", KEEPER_PASSWORD).unwrap_err().code,
+        ErrorCode::Forbidden
+    );
 }

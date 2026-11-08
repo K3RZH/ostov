@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 ostov-api = { path = "../ostov-api" }
 ostov-model = { path = "../ostov-model" }
+ostov-sec = { path = "../ostov-sec" }
 ostov-store = { path = "../ostov-store" }
 
 [dev-dependencies]

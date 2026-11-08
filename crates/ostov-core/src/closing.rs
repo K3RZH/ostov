@@ -8,6 +8,25 @@ use crate::{CoreError, FieldValue, Fields, in_transaction};
 
 const TABLE: &str = "ostov_closing";
 
+thread_local! {
+    static EDIT_CLOSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Пока жив, команда в этом потоке может менять закрытый период (право `closed_period`).
+pub struct ClosedPeriodPass(bool);
+
+impl ClosedPeriodPass {
+    pub fn new(allowed: bool) -> Self {
+        Self(EDIT_CLOSED.with(|c| c.replace(allowed)))
+    }
+}
+
+impl Drop for ClosedPeriodPass {
+    fn drop(&mut self) {
+        EDIT_CLOSED.with(|c| c.set(self.0));
+    }
+}
+
 /// Таблица с датой закрытия; создаётся, если её нет (и в старых базах тоже).
 pub fn create_table(db: &mut dyn Driver) -> Result<(), CoreError> {
     let sql = {
@@ -71,6 +90,9 @@ pub(crate) fn check_open(db: &mut dyn Driver, header: &Fields) -> Result<(), Cor
     let Some(FieldValue::Date(date)) = header.get("date") else {
         return Ok(());
     };
+    if EDIT_CLOSED.with(std::cell::Cell::get) {
+        return Ok(());
+    }
     match closing_date(db)? {
         Some(closed) if *date <= closed => Err(CoreError::PeriodClosed {
             date: date.clone(),

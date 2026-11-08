@@ -21,6 +21,8 @@ pub enum CoreError {
         date: String,
         closed_through: String,
     },
+    /// Пользователи и вход (`ostov-sec`).
+    Security(ostov_sec::SecError),
     /// Конфигурация не ложится на базу без потери данных (реструктуризация).
     Incompatible(String),
     Invalid(String),
@@ -54,6 +56,7 @@ impl fmt::Display for CoreError {
                 f,
                 "период по {closed_through} закрыт: документ от {date} менять нельзя"
             ),
+            Self::Security(e) => write!(f, "{e}"),
             Self::Incompatible(msg) | Self::Invalid(msg) => write!(f, "{msg}"),
         }
     }
@@ -78,6 +81,12 @@ pub struct Shortage {
 impl From<StoreError> for CoreError {
     fn from(e: StoreError) -> Self {
         Self::Store(e)
+    }
+}
+
+impl From<ostov_sec::SecError> for CoreError {
+    fn from(e: ostov_sec::SecError) -> Self {
+        Self::Security(e)
     }
 }
 
