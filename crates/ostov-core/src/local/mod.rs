@@ -18,8 +18,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
-    Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage, NewAdmin,
-    ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
+    BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage,
+    NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
@@ -403,7 +403,13 @@ impl LocalEngine {
         }
     }
 
-    fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+    /// Перевод и пересчёт до записи: без базы, ошибки — по данным.
+    fn prepare_save(
+        &self,
+        object: &str,
+        data: &ObjectData,
+        post: PostAction,
+    ) -> EngineResult<(Object<'_>, crate::Fields, Parts)> {
         let mut fields = fields_from_api(&data.fields)?;
         let target = self.object(object)?;
         let mut parts = Parts::new();
@@ -423,16 +429,73 @@ impl LocalEngine {
                 cfg.rule.prepare(&mut fields, &mut parts).map_err(error)?;
             }
         }
+        Ok((target, fields, parts))
+    }
+
+    fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+        let (target, fields, parts) = self.prepare_save(object, data, post)?;
         let mut guard = self.db();
         let db = &mut **guard;
-        let saved = in_transaction(db, |db| match target {
+        let saved = in_transaction(db, |db| {
+            self.save_in(db, object, data, post, target, &fields, &parts)
+        })
+        .map_err(|e| self.explain(db, e))?;
+        self.forget_lists();
+        Ok(saved)
+    }
+
+    /// Пачка в одной транзакции: упала одна запись — не записалось ничего (импорт, Дизайн §12).
+    fn run_save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        let mut prepared = Vec::with_capacity(items.len());
+        for (n, item) in items.iter().enumerate() {
+            let ready = self
+                .prepare_save(&item.object, &item.data, item.post)
+                .map_err(|e| numbered(n, e))?;
+            prepared.push(ready);
+        }
+        let mut guard = self.db();
+        let db = &mut **guard;
+        let mut failed = 0;
+        let saved = in_transaction(db, |db| {
+            let mut saved = Vec::with_capacity(items.len());
+            for (n, (item, (target, fields, parts))) in items.iter().zip(prepared).enumerate() {
+                failed = n;
+                saved.push(self.save_in(
+                    db,
+                    &item.object,
+                    &item.data,
+                    item.post,
+                    target,
+                    &fields,
+                    &parts,
+                )?);
+            }
+            Ok(saved)
+        })
+        .map_err(|e| numbered(failed, self.explain(db, e)))?;
+        self.forget_lists();
+        Ok(saved)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_in(
+        &self,
+        db: &mut dyn Driver,
+        object: &str,
+        data: &ObjectData,
+        post: PostAction,
+        target: Object<'_>,
+        fields: &crate::Fields,
+        parts: &Parts,
+    ) -> Result<Saved, crate::CoreError> {
+        match target {
             Object::Catalog(c) => {
                 let old = match data.id {
                     Some(id) => c.get(db, id)?.map(|e| e.fields),
                     None => None,
                 };
                 let element = match data.id {
-                    None => c.insert(db, &fields)?,
+                    None => c.insert(db, fields)?,
                     Some(id) => c.update(
                         db,
                         &Element {
@@ -462,10 +525,10 @@ impl LocalEngine {
                 let registers = self.config.registers_of(cfg);
                 let rule = |doc: &Document| cfg.rule.movements(doc);
                 let doc = match data.id {
-                    None if post == PostAction::Post => posting::insert_and_post_to(
-                        db, &cfg.kind, &registers, &fields, &parts, rule,
-                    )?,
-                    None => cfg.kind.insert(db, &fields, &parts)?,
+                    None if post == PostAction::Post => {
+                        posting::insert_and_post_to(db, &cfg.kind, &registers, fields, parts, rule)?
+                    }
+                    None => cfg.kind.insert(db, fields, parts)?,
                     Some(id) => {
                         let doc = Document {
                             id,
@@ -529,10 +592,21 @@ impl LocalEngine {
                 }
                 Ok(saved_doc(&doc))
             }
-        })
-        .map_err(|e| self.explain(db, e))?;
-        self.forget_lists();
-        Ok(saved)
+        }
+    }
+
+    fn need_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<()> {
+        let need = if data.id.is_some() {
+            Need::Update
+        } else {
+            Need::Create
+        };
+        self.need(object, need)?;
+        match post {
+            PostAction::Write => Ok(()),
+            PostAction::Post => self.need(object, Need::Post),
+            PostAction::Unpost => self.need(object, Need::Unpost),
+        }
     }
 
     fn part_title(&self, object: &str, part: &str) -> String {
@@ -676,21 +750,20 @@ impl Engine for LocalEngine {
 
     fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
         self.guarded("Save", || {
-            self.need(
-                object,
-                if data.id.is_some() {
-                    Need::Update
-                } else {
-                    Need::Create
-                },
-            )?;
-            match post {
-                PostAction::Write => {}
-                PostAction::Post => self.need(object, Need::Post)?,
-                PostAction::Unpost => self.need(object, Need::Unpost)?,
-            }
+            self.need_save(object, data, post)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             self.run_save(object, data, post)
+        })
+    }
+
+    fn save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        self.guarded("SaveBatch", || {
+            for (n, item) in items.iter().enumerate() {
+                self.need_save(&item.object, &item.data, item.post)
+                    .map_err(|e| numbered(n, e))?;
+            }
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_save_batch(items)
         })
     }
 
@@ -968,6 +1041,14 @@ fn ru_date(iso: &str) -> String {
     match (parts.next(), parts.next(), parts.next()) {
         (Some(d), Some(m), Some(y)) => format!("{d}.{m}.{y}"),
         _ => iso.to_owned(),
+    }
+}
+
+/// Ошибка записи из пачки: человеку сразу видно, какая это запись по счёту.
+fn numbered(n: usize, e: EngineError) -> EngineError {
+    EngineError {
+        message: format!("Запись {}: {}", n + 1, e.message),
+        ..e
     }
 }
 

@@ -1926,3 +1926,94 @@ fn script_error_keeps_trace_in_details() {
     assert!(err.details.starts_with("Traceback"));
     assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(0));
 }
+
+#[test]
+fn batch_is_all_or_nothing() {
+    let base = Base::new("batch");
+    let engine = with_admin(&base);
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let flour = add(&*engine, "goods", "Мука");
+    let item = |object: &str, data: ObjectData, post| ostov_api::BatchItem {
+        object: object.into(),
+        data,
+        post,
+    };
+    let goods = |name: &str| ObjectData {
+        fields: fields(&[("name", text(name))]),
+        ..ObjectData::default()
+    };
+    let journal_before = journal(&*engine).len();
+
+    // Третья запись не проходит (нехватка) — нет ни товара, ни поступления.
+    let err = engine
+        .save_batch(&[
+            item("goods", goods("Сахар"), PostAction::Write),
+            item(
+                "receipt",
+                dated(receipt(main, mill, &[(flour, 1_000, 100)]), "2026-02-01"),
+                PostAction::Post,
+            ),
+            item(
+                "issue",
+                dated(issue(main, flour, 5_000), "2026-02-02"),
+                PostAction::Post,
+            ),
+        ])
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(
+        err.message.starts_with("Запись 3: Не хватает остатка"),
+        "{}",
+        err.message
+    );
+    assert_eq!(engine.list(&query("goods", 10)).unwrap().total, Some(1));
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, Some(0));
+    assert_eq!(journal(&*engine).len(), journal_before);
+
+    // Ошибка в данных ловится до записи — тоже с номером.
+    let mut bad = goods("Соль");
+    bad.fields.insert("price".into(), dec(1, 2));
+    let err = engine
+        .save_batch(&[
+            item("goods", goods("Соль"), PostAction::Write),
+            item("goods", bad, PostAction::Write),
+        ])
+        .unwrap_err();
+    assert!(err.message.starts_with("Запись 2:"), "{}", err.message);
+
+    let saved = engine
+        .save_batch(&[
+            item("goods", goods("Сахар"), PostAction::Write),
+            item(
+                "receipt",
+                dated(receipt(main, mill, &[(flour, 1_000, 100)]), "2026-02-01"),
+                PostAction::Post,
+            ),
+        ])
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(
+        engine.get("goods", saved[0].id).unwrap().fields["name"],
+        text("Сахар")
+    );
+    assert!(engine.get("receipt", saved[1].id).unwrap().posted);
+    assert_eq!(engine.list(&query("goods", 10)).unwrap().total, Some(2));
+
+    // Права проверяются у каждой записи.
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.logout().unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let err = engine
+        .save_batch(&[item("goods", goods("Перец"), PostAction::Write)])
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert_eq!(err.message, "Запись 1: Нет права на создание «Товары».");
+}

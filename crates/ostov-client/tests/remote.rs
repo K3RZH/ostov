@@ -215,6 +215,50 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
     let err = engine.post("receipt", 999).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotFound);
 
+    // Пачка одной транзакцией и по сети: третья запись не проходит — нет ничего.
+    let goods = |name: &str| ObjectData {
+        fields: fields(&[("name", Value::Text(name.into()))]),
+        ..ObjectData::default()
+    };
+    let item = |object: &str, data, post| ostov_api::BatchItem {
+        object: object.into(),
+        data,
+        post,
+    };
+    let too_much = ObjectData {
+        fields: fields(&[
+            ("date", Value::Date("2026-02-05".into())),
+            ("warehouse", refer(main)),
+        ]),
+        tables: [(
+            "lines".to_owned(),
+            vec![fields(&[("goods", refer(flour)), ("qty", dec(9_000, 3))])],
+        )]
+        .into(),
+        ..ObjectData::default()
+    };
+    let err = engine
+        .save_batch(&[
+            item("goods", goods("Сахар"), PostAction::Write),
+            item("goods", goods("Соль"), PostAction::Write),
+            item("issue", too_much, PostAction::Post),
+        ])
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("Запись 3: Не хватает"),
+        "{}",
+        err.message
+    );
+    assert_eq!(engine.list(&query("goods")).unwrap().rows.len(), 1);
+    let saved = engine
+        .save_batch(&[
+            item("goods", goods("Сахар"), PostAction::Write),
+            item("goods", goods("Соль"), PostAction::Write),
+        ])
+        .unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_eq!(engine.list(&query("goods")).unwrap().rows.len(), 3);
+
     // Выход и вход заново.
     engine.logout().unwrap();
     assert_eq!(
@@ -227,7 +271,7 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
     );
     let session = engine.login("boss", "admin-password-1").unwrap();
     assert_eq!(session.roles, ["admin"]);
-    assert_eq!(engine.list(&query("goods")).unwrap().rows.len(), 1);
+    assert_eq!(engine.list(&query("goods")).unwrap().rows.len(), 3);
 }
 
 #[test]

@@ -116,6 +116,14 @@ pub enum PostAction {
     Unpost,
 }
 
+/// Одна запись из `Engine::save_batch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchItem {
+    pub object: String,
+    pub data: ObjectData,
+    pub post: PostAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Saved {
     pub id: i64,

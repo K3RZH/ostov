@@ -15,6 +15,7 @@ service Engine {
   rpc Seek(SeekRequest) returns (ListPage);
   rpc Get(ObjectRef) returns (ObjectData);
   rpc Save(SaveRequest) returns (Saved);
+  rpc SaveBatch(SaveBatchRequest) returns (SavedList);
   rpc MarkDeleted(MarkDeletedRequest) returns (Saved);
   rpc Post(ObjectRef) returns (Saved);
   rpc Unpost(ObjectRef) returns (Saved);
@@ -238,6 +239,15 @@ message SaveRequest {
   string object = 1;
   ObjectData data = 2;
   PostAction post = 3;
+}
+
+// Несколько записей одной транзакцией (импорт).
+message SaveBatchRequest {
+  repeated SaveRequest items = 1;
+}
+
+message SavedList {
+  repeated Saved saved = 1;
 }
 
 message MarkDeletedRequest {

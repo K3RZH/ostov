@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use ostov_proto::pb;
@@ -55,8 +55,8 @@ async fn server_program_runs_with_yaml_config() {
             "OSTOV_DB_URL",
             format!("sqlite:{}", dir.join("base.db").display()),
         )
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(std::fs::File::create(dir.join("out.txt")).unwrap())
+        .stderr(std::fs::File::create(dir.join("err.txt")).unwrap())
         .spawn()
         .unwrap();
     let _server = Process(child, dir.clone());
@@ -76,6 +76,19 @@ async fn server_program_runs_with_yaml_config() {
         .connect()
         .await
         .unwrap();
+    let out = std::fs::read_to_string(dir.join("out.txt")).unwrap();
+    let err = std::fs::read_to_string(dir.join("err.txt")).unwrap();
+    // В config/ есть receipt.py и issue.py: с Python сервер берёт их, без — предупреждает.
+    if cfg!(feature = "python") {
+        assert!(
+            out.contains("логика документов: Python"),
+            "{out}
+{err}"
+        );
+    } else {
+        assert!(out.contains("логика документов: встроенная"), "{out}");
+        assert!(err.contains("собран без Python"), "{err}");
+    }
     let mut client = EngineClient::new(channel);
     let hello = client.hello(pb::Empty {}).await.unwrap().into_inner();
     assert_eq!(hello.config_name, "Склад");
