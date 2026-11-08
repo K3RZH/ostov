@@ -122,6 +122,41 @@ pub struct Config {
     pub registers: Vec<RegisterDef>,
     /// Разделы меню в порядке `menu:` манифеста.
     pub menu: Vec<MenuItem>,
+    /// Роли из `roles/`; встроенной `admin` здесь нет, она есть всегда.
+    pub roles: Vec<RoleDef>,
+}
+
+/// Имя встроенной роли со всеми правами. В YAML её не описывают.
+pub const ADMIN_ROLE: &str = "admin";
+
+/// Роль пользователя: права на справочники и документы и системные права.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleDef {
+    pub name: String,
+    pub title: String,
+    /// Объекты, которых нет в списке, роли недоступны.
+    pub objects: Vec<(String, Rights)>,
+    pub system: SystemRights,
+}
+
+/// Права не на объект, а на всю базу.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemRights {
+    /// Менять документы закрытого периода.
+    pub closed_period: bool,
+    pub set_closing_date: bool,
+    /// Пользователи и роли.
+    pub admin: bool,
+    pub update_config: bool,
+}
+
+impl SystemRights {
+    pub const ALL: Self = Self {
+        closed_period: true,
+        set_closing_date: true,
+        admin: true,
+        update_config: true,
+    };
 }
 
 // ---------------------------------------------------------------- ответ GetMeta
@@ -144,7 +179,7 @@ pub struct MenuItem {
 pub struct Meta {
     pub menu: Vec<MenuItem>,
     pub objects: Vec<ObjectMeta>,
-    /// Роли для экрана «Пользователи и роли»; заполнит ostov-sec, пока пусто.
+    /// Роли для экрана «Пользователи и роли»: из конфигурации и встроенная `admin`.
     pub roles: Vec<String>,
 }
 
@@ -193,8 +228,8 @@ impl Rights {
 }
 
 impl Meta {
-    /// Метаданные для интерфейса из конфигурации. Права — `Rights::ALL`, роли пусты:
-    /// их будет выдавать ostov-sec по пользователю.
+    /// Метаданные для интерфейса из конфигурации. Права — `Rights::ALL` (их по пользователю
+    /// заполнит ядро), роли — из конфигурации и встроенная `admin`.
     pub fn new(config: &Config) -> Self {
         let catalogs = config.catalogs.iter().map(|c| ObjectMeta {
             name: c.name.clone(),
@@ -217,7 +252,12 @@ impl Meta {
         Self {
             menu: config.menu.clone(),
             objects: catalogs.chain(documents).collect(),
-            roles: Vec::new(),
+            roles: config
+                .roles
+                .iter()
+                .map(|role| role.name.clone())
+                .chain([ADMIN_ROLE.to_owned()])
+                .collect(),
         }
     }
 }

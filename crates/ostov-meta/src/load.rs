@@ -23,6 +23,7 @@ pub(crate) const CATALOGS_DIR: &str = "catalogs";
 pub(crate) const DOCUMENTS_DIR: &str = "documents";
 pub(crate) const REGISTERS_DIR: &str = "registers";
 pub(crate) const SUBSYSTEMS_DIR: &str = "subsystems";
+pub(crate) const ROLES_DIR: &str = "roles";
 const EXTENSION: &str = "yaml";
 
 /// Файл описывает один объект: даже большой справочник занимает килобайты, 1 МБ — с огромным запасом.
@@ -52,6 +53,7 @@ pub fn parse(dir: &Path) -> Result<ConfigFiles, Vec<Error>> {
         documents: folder_sources(&dir.join(DOCUMENTS_DIR), &mut errors),
         registers: folder_sources(&dir.join(REGISTERS_DIR), &mut errors),
         subsystems: folder_sources(&dir.join(SUBSYSTEMS_DIR), &mut errors),
+        roles: folder_sources(&dir.join(ROLES_DIR), &mut errors),
     };
     parse_sources(&sources, errors)
 }
@@ -84,6 +86,7 @@ pub(crate) struct Sources {
     pub(crate) documents: Vec<Source>,
     pub(crate) registers: Vec<Source>,
     pub(crate) subsystems: Vec<Source>,
+    pub(crate) roles: Vec<Source>,
 }
 
 /// Разбирает манифест, затем все файлы объектов; `errors` — уже найденные ошибки чтения папок.
@@ -96,6 +99,7 @@ pub(crate) fn parse_sources(
     let documents = parse_all(&sources.documents, &mut errors);
     let registers = parse_all(&sources.registers, &mut errors);
     let subsystems = parse_all(&sources.subsystems, &mut errors);
+    let roles = parse_all(&sources.roles, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -105,6 +109,7 @@ pub(crate) fn parse_sources(
         documents,
         registers,
         subsystems,
+        roles,
     })
 }
 

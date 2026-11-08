@@ -2,7 +2,7 @@
 
 use ostov_model::{
     CatalogDef, Config, DocumentDef, FieldDef, FieldKind, MenuItem, RegisterDef, RegisterKind,
-    TablePartDef,
+    Rights, RoleDef, SystemRights, TablePartDef,
 };
 use serde_saphyr::Spanned;
 
@@ -69,6 +69,42 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
         documents,
         registers,
         menu,
+        roles: files
+            .roles
+            .into_iter()
+            .map(|role| role_def(role.value))
+            .collect(),
+    }
+}
+
+/// Строки прав → флаги. Неизвестных прав здесь нет: их отсеял `check`.
+fn role_def(role: crate::Role) -> RoleDef {
+    let has = |list: &[Spanned<String>], right: &str| list.iter().any(|r| r.value == right);
+    RoleDef {
+        name: role.name.value,
+        title: role.title,
+        objects: role
+            .objects
+            .0
+            .into_iter()
+            .map(|(object, list)| {
+                let rights = Rights {
+                    read: has(&list, "read"),
+                    create: has(&list, "create"),
+                    update: has(&list, "update"),
+                    post: has(&list, "post"),
+                    unpost: has(&list, "unpost"),
+                    delete: has(&list, "delete"),
+                };
+                (object.value, rights)
+            })
+            .collect(),
+        system: SystemRights {
+            closed_period: has(&role.system, "closed_period"),
+            set_closing_date: has(&role.system, "set_closing_date"),
+            admin: has(&role.system, "admin"),
+            update_config: has(&role.system, "update_config"),
+        },
     }
 }
 

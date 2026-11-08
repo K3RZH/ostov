@@ -1,8 +1,9 @@
-//! Проверка конфигурации без базы (`ostov check`, СТ-02): ссылки, имена, типы, регистры.
+//! Проверка конфигурации без базы (`ostov check`, СТ-02): ссылки, имена, типы, регистры, меню, роли.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use ostov_model::ADMIN_ROLE;
 use serde_saphyr::Spanned;
 
 use crate::{ConfigFiles, Document, Error, Field, FieldType, MenuEntry, Register, Subsystem};
@@ -25,6 +26,19 @@ pub const RESERVED_NAMES: [&str; 11] = [
     "kind",
     "period",
 ];
+/// Права роли на справочник или документ.
+pub const OBJECT_RIGHTS: [&str; 6] = ["read", "create", "update", "post", "unpost", "delete"];
+/// Проводить можно только документы.
+const DOCUMENT_ONLY_RIGHTS: [&str; 2] = ["post", "unpost"];
+/// Права роли на всю базу.
+pub const SYSTEM_RIGHTS: [&str; 4] = [
+    "closed_period",
+    "set_closing_date",
+    "admin",
+    "update_config",
+];
+/// Так начинаются служебные таблицы платформы (`ostov_users`): объекту и роли такое имя нельзя.
+pub const SERVICE_PREFIX: &str = "ostov_";
 /// Значки интерфейса: файлы `ostov-ui/assets/icons/*.svg` без расширения; тест сверяет с папкой.
 pub const ICONS: [&str; 34] = [
     "bar-chart",
@@ -72,6 +86,7 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
     let registers = config.registers.iter().map(|r| (&r.file, &r.value.name));
     for (file, name) in catalogs.chain(documents).chain(registers) {
         objects.add(file, name, &mut errors);
+        check_service_prefix(file, name, &mut errors);
     }
 
     let scope = Scope {
@@ -83,6 +98,7 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
                 .map(|c| &c.value.name)
                 .chain(config.documents.iter().map(|d| &d.value.name)),
         ),
+        documents: name_set(config.documents.iter().map(|d| &d.value.name)),
         registers: name_set(config.registers.iter().map(|r| &r.value.name)),
     };
 
@@ -98,6 +114,7 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
         scope.check_register(&register.file, &register.value, &mut errors);
     }
     check_menu(config, &scope, &mut errors);
+    check_roles(config, &scope, &mut errors);
 
     errors.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     errors
@@ -135,6 +152,62 @@ fn check_menu(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) 
     }
 }
 
+/// Роли: имя как у объектов, права на справочники и документы, системные права.
+fn check_roles(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) {
+    let mut roles = Names::new("роль");
+    for role in &config.roles {
+        let (file, role) = (&role.file, &role.value);
+        roles.add(file, &role.name, errors);
+        check_service_prefix(file, &role.name, errors);
+        if role.name.value == ADMIN_ROLE {
+            let reason = "роль admin встроенная, со всеми правами: в YAML её не описывают".into();
+            errors.push(at(file, &role.name, reason));
+        }
+        for (object, rights) in &role.objects.0 {
+            scope.check_role_object(file, object, rights, errors);
+        }
+        check_rights_list(
+            file,
+            &role.system,
+            &SYSTEM_RIGHTS,
+            "системное право",
+            errors,
+        );
+    }
+}
+
+/// Каждое право из списка `allowed` и не больше одного раза.
+fn check_rights_list(
+    file: &Path,
+    rights: &[Spanned<String>],
+    allowed: &[&str],
+    what: &'static str,
+    errors: &mut Vec<Error>,
+) {
+    let mut seen = Names::new(what);
+    for right in rights {
+        seen.add_repeat_only(file, right, errors);
+        if !allowed.contains(&right.value.as_str()) {
+            let reason = format!(
+                "неизвестное {what} «{}»: допустимы {}",
+                right.value,
+                allowed.join(", ")
+            );
+            errors.push(at(file, right, reason));
+        }
+    }
+}
+
+fn check_service_prefix(file: &Path, name: &Spanned<String>, errors: &mut Vec<Error>) {
+    if name.value.starts_with(SERVICE_PREFIX) {
+        let reason = format!(
+            "имя «{}» начинается с {SERVICE_PREFIX}: так называются служебные таблицы",
+            name.value
+        );
+        errors.push(at(file, name, reason));
+    }
+}
+
 fn check_icon(file: &Path, icon: Option<&Spanned<String>>, errors: &mut Vec<Error>) {
     if let Some(icon) = icon
         && !ICONS.contains(&icon.value.as_str())
@@ -150,10 +223,45 @@ fn check_icon(file: &Path, icon: Option<&Spanned<String>>, errors: &mut Vec<Erro
 /// Имена объектов, на которые можно сослаться.
 struct Scope<'a> {
     ref_targets: BTreeSet<&'a str>,
+    documents: BTreeSet<&'a str>,
     registers: BTreeSet<&'a str>,
 }
 
 impl Scope<'_> {
+    /// В роли права задаются на справочники и документы; `post`/`unpost` — только документам.
+    fn check_role_object(
+        &self,
+        file: &Path,
+        object: &Spanned<String>,
+        rights: &[Spanned<String>],
+        errors: &mut Vec<Error>,
+    ) {
+        let name = object.value.as_str();
+        if self.registers.contains(name) {
+            let reason =
+                format!("права на регистр «{name}» не задаются: в роли справочники и документы");
+            errors.push(at(file, object, reason));
+        } else if !self.ref_targets.contains(name) {
+            errors.push(at(
+                file,
+                object,
+                format!("нет справочника или документа «{name}»"),
+            ));
+        }
+        check_rights_list(file, rights, &OBJECT_RIGHTS, "право", errors);
+        if self.ref_targets.contains(name) && !self.documents.contains(name) {
+            for right in rights {
+                if DOCUMENT_ONLY_RIGHTS.contains(&right.value.as_str()) {
+                    let reason = format!(
+                        "право {} только у документов, а «{name}» — справочник",
+                        right.value
+                    );
+                    errors.push(at(file, right, reason));
+                }
+            }
+        }
+    }
+
     fn check_document(&self, file: &Path, document: &Document, errors: &mut Vec<Error>) {
         self.check_fields(file, &document.fields, errors);
         let mut parts = Names::new("табличная часть");

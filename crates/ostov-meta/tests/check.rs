@@ -610,3 +610,175 @@ fn required_and_read_only_default_to_false() {
         .collect();
     assert_eq!(flags, vec![(true, false), (false, true), (false, false)]);
 }
+
+/// Справочник `goods`, документ `receipt` и регистр `stock`: на них ссылаются роли в тестах.
+fn objects_for_roles(config: &TempConfig) {
+    config
+        .write("catalogs/goods.yaml", &catalog("goods", "name", "text"))
+        .write(
+            "documents/receipt.yaml",
+            "document: receipt\ntitle: П\nfields:\n  - name: date\n    title: Д\n    type: date\n",
+        )
+        .write(
+            "registers/stock.yaml",
+            &register(&[("goods", "ref(goods)")], &[("qty", "decimal(3)")]),
+        );
+}
+
+fn assert_has(errors: &[ostov_meta::Error], file: &str, line: u64, reason_part: &str) {
+    assert!(
+        errors.iter().any(|e| e.file.ends_with(file)
+            && e.line == Some(line)
+            && e.reason.contains(reason_part)),
+        "нет ошибки {file}:{line} — …{reason_part}…: {errors:#?}"
+    );
+}
+
+#[test]
+fn role_rights_are_checked() {
+    let config = TempConfig::new("check-role-rights");
+    objects_for_roles(&config);
+    config.write(
+        "roles/seller.yaml",
+        "role: seller
+title: Продавец
+objects:
+  goods: [read, post, read]
+  receipt: [read, approve]
+  stock: [read]
+  orders: [read]
+system: [admin, root, admin]
+",
+    );
+    let errors = config.check_errors();
+    assert_eq!(errors.len(), 7, "{errors:#?}");
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        4,
+        "право post только у документов, а «goods» — справочник",
+    );
+    assert_has(&errors, "roles/seller.yaml", 4, "право «read» повторяется");
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        5,
+        "неизвестное право «approve»: допустимы read, create, update, post, unpost, delete",
+    );
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        6,
+        "права на регистр «stock» не задаются",
+    );
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        7,
+        "нет справочника или документа «orders»",
+    );
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        8,
+        "неизвестное системное право «root»",
+    );
+    assert_has(
+        &errors,
+        "roles/seller.yaml",
+        8,
+        "системное право «admin» повторяется",
+    );
+}
+
+#[test]
+fn role_names_follow_object_rules() {
+    let config = TempConfig::new("check-role-names");
+    objects_for_roles(&config);
+    config
+        .write("roles/a.yaml", "role: admin\ntitle: Админ\n")
+        .write("roles/b.yaml", "role: Seller\ntitle: П\n")
+        .write("roles/c.yaml", "role: ostov_root\ntitle: П\n")
+        .write("roles/d.yaml", "role: seller\ntitle: П\n")
+        .write("roles/e.yaml", "role: seller\ntitle: Ещё\n");
+    let errors = config.check_errors();
+    assert_eq!(errors.len(), 4, "{errors:#?}");
+    assert_error(&errors[0], "roles/a.yaml", Some(1), "роль admin встроенная");
+    assert_error(&errors[1], "roles/b.yaml", Some(1), "строчные латинские");
+    assert_error(&errors[2], "roles/c.yaml", Some(1), "начинается с ostov_");
+    assert_error(
+        &errors[3],
+        "roles/e.yaml",
+        Some(1),
+        "роль «seller» повторяется",
+    );
+}
+
+#[test]
+fn service_prefix_is_reserved_for_objects() {
+    let config = TempConfig::new("check-service-prefix");
+    config.write(
+        "catalogs/users.yaml",
+        &catalog("ostov_users", "name", "text"),
+    );
+    assert_error(
+        &single(config.check_errors()),
+        "catalogs/users.yaml",
+        Some(1),
+        "имя «ostov_users» начинается с ostov_: так называются служебные таблицы",
+    );
+}
+
+#[test]
+fn object_listed_twice_in_role_is_a_parse_error() {
+    let config = TempConfig::new("check-role-dup-object");
+    objects_for_roles(&config);
+    config.write(
+        "roles/seller.yaml",
+        "role: seller\ntitle: П\nobjects:\n  goods: [read]\n  goods: [update]\n",
+    );
+    assert_error(
+        &single(config.check_errors()),
+        "roles/seller.yaml",
+        Some(5),
+        "ключ «goods» повторяется",
+    );
+}
+
+#[test]
+fn role_converts_to_rights() {
+    let config = TempConfig::new("check-role-model");
+    objects_for_roles(&config);
+    config.write(
+        "roles/seller.yaml",
+        "role: seller\ntitle: Продавец\nobjects:\n  receipt: [read, post]\n  goods: [read]\nsystem: [set_closing_date]\n",
+    );
+    let model = load(&config.dir).unwrap();
+    let [role] = model.roles.as_slice() else {
+        panic!("{:?}", model.roles);
+    };
+    assert_eq!(
+        (role.name.as_str(), role.title.as_str()),
+        ("seller", "Продавец")
+    );
+    let receipt = ostov_model::Rights {
+        read: true,
+        post: true,
+        ..Default::default()
+    };
+    let goods = ostov_model::Rights {
+        read: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        role.objects,
+        vec![("receipt".to_owned(), receipt), ("goods".to_owned(), goods)]
+    );
+    assert_eq!(
+        role.system,
+        ostov_model::SystemRights {
+            set_closing_date: true,
+            ..Default::default()
+        }
+    );
+}

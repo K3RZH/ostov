@@ -92,7 +92,10 @@ fn demo_matches_config_folder() {
 #[test]
 fn get_meta_for_warehouse() {
     let meta = Meta::new(&load(&repo_config()).unwrap());
-    assert!(meta.roles.is_empty(), "роли заполнит ostov-sec");
+    assert_eq!(
+        meta.roles,
+        vec!["storekeeper".to_owned(), "admin".to_owned()]
+    );
 
     let [section] = meta.menu.as_slice() else {
         panic!("ожидался один раздел меню: {:?}", meta.menu);

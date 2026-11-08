@@ -232,6 +232,7 @@ pub fn warehouse_model() -> ostov_model::Config {
                 .map(item)
                 .into(),
         }],
+        roles: Vec::new(),
     }
 }
 
