@@ -1708,3 +1708,33 @@ fn new_register_appears_in_existing_base() {
         dec(2_000, 3)
     );
 }
+
+#[test]
+fn connector_opens_file_with_own_rules() {
+    let base = Base::new("connector-rules");
+    let connector = LocalConnector::new(sales_model()).with_rules(std::sync::Arc::new(SalesRules));
+    let engine = connector.create_local(&base.path, None, None).unwrap();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 5_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 1_000), "2026-02-02"),
+            PostAction::Post,
+        )
+        .unwrap();
+    drop(engine);
+    let engine = connector.open_local(&base.path, None).unwrap();
+    assert_eq!(
+        report(&*engine, "sales_balance", &[])[0]["qty"],
+        dec(1_000, 3)
+    );
+}

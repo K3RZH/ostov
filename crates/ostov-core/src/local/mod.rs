@@ -882,21 +882,42 @@ fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
 /// Открывает и создаёт локальные базы (режим 1).
 ///
 /// Конфигурацию передаёт приложение: `LocalConnector::new(ostov_meta::load("config")?)`.
-/// `LocalConnector::default()` — встроенный «Склад» из кода.
-#[derive(Debug, Default, Clone)]
+/// `LocalConnector::default()` — встроенный «Склад» из кода. Правила документов — встроенные,
+/// другие (Python) — через `with_rules`.
+#[derive(Default, Clone)]
 pub struct LocalConnector {
     model: Option<ostov_model::Config>,
+    rules: Option<Arc<dyn Rules + Send + Sync>>,
+}
+
+impl std::fmt::Debug for LocalConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalConnector")
+            .field("model", &self.model.as_ref().map(|m| &m.name))
+            .field("rules", &self.rules.is_some())
+            .finish()
+    }
 }
 
 impl LocalConnector {
     pub fn new(model: ostov_model::Config) -> Self {
-        Self { model: Some(model) }
+        Self {
+            model: Some(model),
+            rules: None,
+        }
+    }
+
+    /// Свои правила документов вместо встроенных, например из Python (`ostov-py`).
+    pub fn with_rules(mut self, rules: Arc<dyn Rules + Send + Sync>) -> Self {
+        self.rules = Some(rules);
+        self
     }
 
     fn config(&self) -> EngineResult<Config> {
-        match &self.model {
-            Some(model) => Config::from_model(model),
-            None => warehouse(),
+        let model = self.model.clone().unwrap_or_else(warehouse_model);
+        match &self.rules {
+            Some(rules) => Config::from_model_with(&model, rules.as_ref()),
+            None => Config::from_model(&model),
         }
         .map_err(error)
     }
