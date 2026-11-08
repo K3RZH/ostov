@@ -3795,6 +3795,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ostov-client"
+version = "0.1.0"
+dependencies = [
+ "ostov-api",
+ "ostov-core",
+ "ostov-model",
+ "ostov-proto",
+ "ostov-server",
+ "ostov-store",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "ostov-core"
 version = "0.1.0"
 dependencies = [
