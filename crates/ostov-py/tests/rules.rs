@@ -366,3 +366,27 @@ fn reload_forgets_functions_of_previous_version() {
     let [error] = scripts.load(&model).unwrap_err().try_into().unwrap();
     assert_eq!(error.reason, "в receipt.py нет on_post");
 }
+
+#[test]
+fn parallel_loads_of_one_document_do_not_mix_functions() {
+    let model = model();
+    let handles: Vec<_> = (0..8)
+        .map(|n| {
+            let model = model.clone();
+            std::thread::spawn(move || {
+                let scripts = Scripts::new(&format!("parallel-{n}"));
+                let body = format!("import ostov\n\ndef on_post(doc, ctx):\n    raise ostov.UserError('версия {n}')\n");
+                scripts.write("receipt", &body).write("issue", QUIET_ISSUE);
+                let rules = scripts.load(&model).unwrap();
+                match rule(&rules, &model, "receipt").movements(&document(vec![])) {
+                    Err(CoreError::Invalid(text)) => (n, text),
+                    other => panic!("{other:?}"),
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        let (n, text) = handle.join().unwrap();
+        assert_eq!(text, format!("версия {n}"));
+    }
+}

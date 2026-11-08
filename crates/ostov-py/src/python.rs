@@ -204,22 +204,31 @@ fn load_script(
     }))
 }
 
+/// Каждая загрузка — свой объект модуля, код выполняется в его словарь. `PyModule::from_code`
+/// так не умеет: он пишет в модуль из `sys.modules` по имени, и две загрузки одного документа
+/// (повторная или из другого потока) подменили бы друг другу функции.
 fn compile<'py>(
     py: Python<'py>,
     path: &Path,
     text: &str,
     document: &str,
 ) -> Result<Bound<'py, PyModule>, PyLoadError> {
-    let bad = |what: &str| PyLoadError::new(path, None, format!("нулевой байт в {what}"));
-    let code = CString::new(text).map_err(|_| bad("файле"))?;
     let file_name = path.to_string_lossy().into_owned();
-    let file = CString::new(file_name.as_str()).map_err(|_| bad("пути"))?;
-    let name = format!("{MODULE_PREFIX}{document}");
-    let module = CString::new(name.as_str()).map_err(|_| bad("имени"))?;
-    // from_code выполняет код в уже загруженный модуль с тем же именем: без этого функции
-    // из прежней версии файла остались бы жить.
-    forget_module(py, &name).map_err(|e| PyLoadError::new(path, None, e.to_string()))?;
-    PyModule::from_code(py, &code, &file, &module).map_err(|error| {
+    let run = || -> PyResult<Bound<'py, PyModule>> {
+        let module = PyModule::new(py, &format!("{MODULE_PREFIX}{document}"))?;
+        module.setattr("__file__", file_name.as_str())?;
+        // В sys.modules — для библиотек, которые ищут там свой модуль (например, dataclasses).
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(module.name()?, &module)?;
+        let builtins = py.import("builtins")?;
+        let code = builtins
+            .getattr("compile")?
+            .call1((text, file_name.as_str(), "exec"))?;
+        builtins.getattr("exec")?.call1((code, module.dict()))?;
+        Ok(module)
+    };
+    run().map_err(|error| {
         let described = runtime(py).and_then(|rt| {
             rt.getattr("_load_error")?
                 .call1((error.value(py), file_name.as_str()))?
@@ -230,14 +239,6 @@ fn compile<'py>(
             Err(_) => PyLoadError::new(path, None, error.to_string()),
         }
     })
-}
-
-fn forget_module(py: Python<'_>, name: &str) -> PyResult<()> {
-    let modules = py.import("sys")?.getattr("modules")?;
-    if modules.contains(name)? {
-        modules.del_item(name)?;
-    }
-    Ok(())
 }
 
 struct PyRule(Arc<Script>);
