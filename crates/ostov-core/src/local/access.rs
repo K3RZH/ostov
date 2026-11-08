@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ostov_api::{EngineError, EngineResult, ErrorCode, SessionInfo, UserInfo};
 use ostov_model::{ADMIN_ROLE, MenuItem, Meta, Rights, SystemRights};
-use ostov_sec::{Password, SecError, User};
+use ostov_sec::{Action, Password, SecError, User};
 
 use super::LocalEngine;
 use super::convert::error;
@@ -127,18 +127,32 @@ impl LocalEngine {
 
     pub(super) fn run_login(&self, login: &str, password: &str) -> EngineResult<SessionInfo> {
         let password = Password::new(password);
+        // Транзакция фиксируется и при неудаче: счётчик ошибок и запись журнала должны остаться.
         let verified = {
             let mut db = self.db();
-            in_transaction(&mut **db, |db| Ok(ostov_sec::verify(db, login, &password)?))
+            in_transaction(&mut **db, |db| {
+                let result = ostov_sec::verify(db, login, &password);
+                let (action, note) = match &result {
+                    Ok(_) => (Action::Login, ""),
+                    Err(SecError::WrongCredentials { .. }) => {
+                        (Action::LoginFailed, "неверный логин или пароль")
+                    }
+                    Err(SecError::Disabled) => (Action::LoginFailed, "учётная запись отключена"),
+                    Err(_) => return Ok(result),
+                };
+                let who = login.trim().to_lowercase();
+                super::journal::record(db, &who, action, "", None, &[], note)?;
+                Ok(result)
+            })
+            .map_err(error)?
         };
         match verified {
             Ok(user) => Ok(self.enter(user)),
-            Err(crate::CoreError::Security(e)) => {
+            Err(e) => {
                 // Ждём уже без замка базы: остальные команды не стоят.
                 std::thread::sleep(Duration::from_secs(e.delay_secs()));
                 Err(sec_error(e))
             }
-            Err(e) => Err(error(e)),
         }
     }
 
@@ -192,12 +206,15 @@ impl LocalEngine {
         let user = {
             let mut db = self.db();
             in_transaction(&mut **db, |db| {
-                Ok(ostov_sec::set_active(
-                    db,
-                    login,
-                    active,
-                    &self.config.roles,
-                )?)
+                let user = ostov_sec::set_active(db, login, active, &self.config.roles)?;
+                let action = if active {
+                    Action::UserEnabled
+                } else {
+                    Action::UserDisabled
+                };
+                let note = format!("пользователь {}", user.login);
+                self.journal(db, action, "", Some(user.id), &[], &note)?;
+                Ok(user)
             })
             .map_err(error)?
         };
@@ -227,7 +244,15 @@ impl LocalEngine {
         let added = {
             let mut db = self.db();
             in_transaction(&mut **db, |db| {
-                Ok(ostov_sec::add_user(db, user, &self.config.roles)?)
+                let added = ostov_sec::add_user(db, user, &self.config.roles)?;
+                let note = format!("пользователь {}, роль {}", added.login, added.role);
+                // Первого администратора записываем от его же имени: до него входить было некому.
+                let by = match &self.access().user {
+                    Some(u) => u.login.clone(),
+                    None => added.login.clone(),
+                };
+                super::journal::record(db, &by, Action::UserAdded, "", Some(added.id), &[], &note)?;
+                Ok(added)
             })
             .map_err(error)?
         };

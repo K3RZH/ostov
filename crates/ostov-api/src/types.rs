@@ -155,6 +155,8 @@ pub struct NewUser {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
+    /// Ключ страницы: следующую просить с `after_key = id` последней записи.
+    pub id: i64,
     pub when: String,
     pub user: String,
     pub object: String,

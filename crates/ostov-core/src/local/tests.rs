@@ -476,6 +476,7 @@ fn panic_in_command_becomes_error_and_engine_keeps_working() {
     let mut config = super::warehouse().unwrap();
     let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
     config.create_tables(&mut db).unwrap();
+    ostov_sec::create_tables(&mut db).unwrap();
     if let Some(receipt) = config.documents.get_mut("receipt") {
         struct Broken;
         impl crate::PostingRule for Broken {
@@ -1736,5 +1737,154 @@ fn connector_opens_file_with_own_rules() {
     assert_eq!(
         report(&*engine, "sales_balance", &[])[0]["qty"],
         dec(1_000, 3)
+    );
+}
+
+fn with_admin(base: &Base) -> Arc<dyn Engine> {
+    LocalConnector::new(roles_model())
+        .create_local(
+            &base.path,
+            None,
+            Some(&ostov_api::NewAdmin {
+                login: "boss".into(),
+                password: ADMIN_PASSWORD.into(),
+            }),
+        )
+        .unwrap()
+}
+
+fn journal(engine: &dyn Engine) -> Vec<ostov_api::JournalEntry> {
+    let mut all = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = engine.admin_journal(after.as_deref(), 3).unwrap();
+        let Some(last) = page.last() else {
+            return all;
+        };
+        after = Some(last.id.to_string());
+        all.extend(page);
+    }
+}
+
+#[test]
+fn failed_logins_are_counted_and_slowed_down() {
+    let base = Base::new("login-delay");
+    let engine = with_admin(&base);
+    engine.logout().unwrap();
+    for _ in 0..4 {
+        let started = std::time::Instant::now();
+        engine.login("boss", "wrong-password-1").unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_millis(900));
+    }
+    // Пятая ошибка подряд — ответ с задержкой: счётчик пережил откаты.
+    let started = std::time::Instant::now();
+    engine.login("boss", "wrong-password-1").unwrap_err();
+    assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+
+    engine.login("boss", ADMIN_PASSWORD).unwrap();
+    let failed = journal(&*engine)
+        .iter()
+        .filter(|e| e.action == "Неудачный вход")
+        .count();
+    assert_eq!(failed, 5);
+    let all = format!("{:?}", journal(&*engine));
+    assert!(!all.contains("wrong-password-1") && !all.contains(ADMIN_PASSWORD));
+}
+
+#[test]
+fn journal_keeps_who_did_what() {
+    let base = Base::new("journal");
+    let engine = with_admin(&base);
+    let flour = add(&*engine, "goods", "Мука");
+    let mut goods = engine.get("goods", flour).unwrap();
+    goods.fields.insert("name".into(), text("Мука в/с"));
+    goods.fields.insert("unit".into(), text("кг"));
+    engine.save("goods", &goods, PostAction::Write).unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let r = engine
+        .save(
+            "receipt",
+            &dated(receipt(main, mill, &[(flour, 2_000, 100)]), "2026-02-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+
+    // Нехватка откатывает и документ, и его запись в журнале.
+    let before = journal(&*engine).len();
+    engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 9_000), "2026-02-05"),
+            PostAction::Post,
+        )
+        .unwrap_err();
+    assert_eq!(journal(&*engine).len(), before);
+
+    engine.unpost("receipt", r.id).unwrap();
+    let version = engine.get("receipt", r.id).unwrap().version;
+    engine.mark_deleted("receipt", r.id, version, true).unwrap();
+    engine.set_closing_date(Some("2026-01-31")).unwrap();
+
+    let entries = journal(&*engine);
+    let actions: Vec<&str> = entries.iter().rev().map(|e| e.action.as_str()).collect();
+    assert_eq!(
+        actions,
+        [
+            "Добавление пользователя",
+            "Создание",
+            "Изменение",
+            "Создание",
+            "Создание",
+            "Создание",
+            "Проведение",
+            "Отмена проведения",
+            "Пометка на удаление",
+            "Установка даты закрытия",
+        ]
+    );
+    assert!(entries.iter().all(|e| e.user == "boss"));
+    let update = entries.iter().find(|e| e.action == "Изменение").unwrap();
+    assert_eq!(update.object, format!("Товары #{flour}"));
+    assert!(
+        update.details.contains("Наименование: Мука → Мука в/с")
+            && update.details.contains("Единица измерения: — → кг"),
+        "{}",
+        update.details
+    );
+    let created = entries
+        .iter()
+        .find(|e| e.action == "Создание" && e.object.starts_with("Поступление"))
+        .unwrap();
+    assert!(
+        created.details.contains("Поставщик: — → Мельница"),
+        "{}",
+        created.details
+    );
+    assert!(
+        entries[0].details.contains("31.01.2026"),
+        "{}",
+        entries[0].details
+    );
+    let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    sorted.dedup();
+    assert_eq!(ids, sorted);
+
+    // Журнал — только администратору.
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.logout().unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert_eq!(
+        engine.admin_journal(None, 10).unwrap_err().code,
+        ErrorCode::Forbidden
     );
 }
