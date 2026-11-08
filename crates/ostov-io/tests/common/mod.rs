@@ -23,7 +23,7 @@ impl Base {
     }
 
     pub fn engine(&self) -> Arc<dyn Engine> {
-        self.engine_with(&LocalConnector::default())
+        self.engine_with(&LocalConnector::new(model()))
     }
 
     pub fn engine_with(&self, connector: &LocalConnector) -> Arc<dyn Engine> {
@@ -40,6 +40,12 @@ impl Drop for Base {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// «Склад» из настоящего `config/`: с обязательными полями и ролями.
+pub fn model() -> ostov_model::Config {
+    ostov_meta::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config"))
+        .unwrap()
 }
 
 pub fn fields(pairs: &[(&str, Value)]) -> Fields {

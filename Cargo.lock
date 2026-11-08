@@ -3886,6 +3886,8 @@ dependencies = [
  "calamine",
  "ostov-api",
  "ostov-core",
+ "ostov-meta",
+ "ostov-model",
  "rust_xlsxwriter",
 ]
 

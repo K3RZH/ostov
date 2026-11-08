@@ -4,7 +4,17 @@
 
 mod error;
 mod export;
+mod import;
+mod limits;
+mod table;
 mod values;
+mod xlsx;
 
 pub use error::IoError;
 pub use export::{export_list, export_report};
+pub use import::{
+    Mapping, Plan, Planned, RowError, Target, WriteFailure, Written, plan, suggest, write,
+};
+pub use limits::Limits;
+pub use table::{Cell, Table};
+pub use xlsx::{read_xlsx, read_xlsx_sheet};

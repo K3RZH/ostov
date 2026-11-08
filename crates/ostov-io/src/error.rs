@@ -10,13 +10,17 @@ pub enum IoError {
     File(String),
     /// Данные или запрос не подходят: нет объекта, неверная колонка.
     Invalid(String),
+    /// Превышен лимит на входной файл (НТ-Б4).
+    Limit(String),
 }
 
 impl fmt::Display for IoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Engine(e) => write!(f, "{}", e.message),
-            Self::File(reason) | Self::Invalid(reason) => write!(f, "{reason}"),
+            Self::File(reason) | Self::Invalid(reason) | Self::Limit(reason) => {
+                write!(f, "{reason}")
+            }
         }
     }
 }

@@ -10,10 +10,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+calamine = "=0.38.0"
 ostov-api = { path = "../ostov-api" }
 rust_xlsxwriter = "=0.102.0"
 
 [dev-dependencies]
-# Тесты: локальная база как &dyn Engine и чтение выгруженного xlsx.
-calamine = "=0.38.0"
+# Тесты: локальная база «Склада» из config/ как &dyn Engine.
 ostov-core = { path = "../ostov-core" }
+ostov-meta = { path = "../ostov-meta" }
+ostov-model = { path = "../ostov-model" }

@@ -7,6 +7,7 @@ use ostov_api::{Engine, ListQuery, Meta, ObjectKind, ObjectMeta, ReportQuery, Va
 use rust_xlsxwriter::{Format, Workbook, Worksheet};
 
 use crate::IoError;
+use crate::import::find_object;
 use crate::values::{decimal_format, decimal_number, excel_day};
 
 /// Окно чтения списка и отчёта: больше ядро не отдаёт за раз (СТ-51).
@@ -91,13 +92,6 @@ pub fn export_report(
         sheet.add_row(&columns, row)?;
     }
     sheet.save(path)
-}
-
-fn find_object<'a>(meta: &'a Meta, name: &str) -> Result<&'a ObjectMeta, IoError> {
-    meta.objects
-        .iter()
-        .find(|object| object.name == name)
-        .ok_or_else(|| IoError::Invalid(format!("нет объекта «{name}»")))
 }
 
 /// «Номер», поля шапки по метаданным, «Проведён», «Помечен»; у справочника — поля и «Помечен».
