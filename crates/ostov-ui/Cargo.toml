@@ -13,11 +13,19 @@ workspace = true
 ostov-api = { path = "../ostov-api" }
 # Только чтобы взять LocalConnector (режим 1); дальше интерфейс работает через трейт Engine.
 ostov-core = { path = "../ostov-core" }
+# Подключение к серверу (режим 2): RemoteConnector даёт тот же трейт Engine.
+ostov-client = { path = "../ostov-client" }
 # Встроенная конфигурация «Склад» (ostov_meta::demo), пока нет выбора папки конфигурации.
 ostov-meta = { path = "../ostov-meta" }
 slint = "1.18.1"
 # Системное окно выбора папки (на Linux через xdg-portal, в GNOME родное окно).
 rfd = "0.17.2"
+
+[dev-dependencies]
+# Тест окна сервера: настоящий сервер на localhost по TLS, как в тестах ostov-client.
+ostov-server = { path = "../ostov-server" }
+ostov-store = { path = "../ostov-store" }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync"] }
 
 [build-dependencies]
 slint-build = "1.18.1"

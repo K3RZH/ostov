@@ -3974,11 +3974,15 @@ name = "ostov-ui"
 version = "0.6.0"
 dependencies = [
  "ostov-api",
+ "ostov-client",
  "ostov-core",
  "ostov-meta",
+ "ostov-server",
+ "ostov-store",
  "rfd",
  "slint",
  "slint-build",
+ "tokio",
 ]
 
 [[package]]

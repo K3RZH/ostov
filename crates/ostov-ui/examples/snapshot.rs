@@ -1,7 +1,7 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-error, start-empty, create-local, create-server, add-file, add-server,
-//! login-server, login-first-run, login-local, password, login-error.
+//! login-server, login-first-run, login-local, password, login-error, journal, period, period-error.
 
 use std::io::Write;
 
@@ -33,6 +33,7 @@ where
 /// Окно приложения на нужной странице: размер как в приложении (главная больше остальных).
 fn app_window(page: i32) -> Result<ostov_ui::AppWindow, Box<dyn std::error::Error>> {
     let window = ostov_ui::AppWindow::new()?;
+    window.set_app_version(env!("CARGO_PKG_VERSION").into());
     let (width, height) = if page == 2 {
         (1440.0, 900.0)
     } else {
@@ -63,11 +64,79 @@ fn sample_recent() -> Vec<ostov_ui::RecentDb> {
 
 /// Демо-база для снимков: свой файл во временной папке (не трогает базу приложения).
 fn snapshot_engine() -> Result<std::sync::Arc<dyn ostov_api::Engine>, Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join("ostov-snapshot-demo.sqlite");
+    // Имя с номером процесса: параллельные запуски стенда не стирают базу друг друга.
+    let path =
+        std::env::temp_dir().join(format!("ostov-snapshot-demo-{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
     let text = path.to_str().ok_or("путь не в UTF-8")?;
     Ok(ostov_core::LocalConnector::default().create_demo(text, 2000)?)
+}
+
+/// Экраны «Журнал действий» и «Закрытие периода» на настоящей демо-базе: сначала в базе
+/// делаются действия, потом `AdminUi` читает их у ядра, как в приложении.
+fn admin_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let engine = snapshot_engine()?;
+    // Ошибки не важны: часть поступлений проведена, часть нет, а журналу нужны любые действия.
+    for id in 1..=8 {
+        let _ = engine.post("receipt", id);
+    }
+    let _ = engine.unpost("receipt", 2);
+    engine.set_closing_date(Some("2026-08-31"))?;
+    engine.set_closing_date(Some("2026-09-30"))?;
+    println!(
+        "записей в журнале: {}",
+        engine.admin_journal(None, 1000)?.len()
+    );
+
+    let window = app_window(2)?;
+    let meta = ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+    let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::from_meta(
+        &meta,
+        ostov_api::SystemRights::ALL,
+    )));
+    let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+    let title = if screen == "journal" {
+        "Журнал действий"
+    } else {
+        "Закрытие периода"
+    };
+    let node = shell
+        .borrow()
+        .nav_rows()
+        .iter()
+        .find(|row| row.title == title)
+        .map(|row| row.id)
+        .ok_or("нет пункта меню")?;
+    shell.borrow_mut().click(node);
+    ostov_ui::app::refresh(&window, &shell.borrow());
+    window.set_base_name("Склад".into());
+    window.set_mode_text("Режим: локально".into());
+    window.set_user_text("Администратор".into());
+    window.set_user_initials("А".into());
+
+    let windows = ostov_ui::windows::Windows::new(&receipts);
+    let admin = ostov_ui::admin_ui::AdminUi::new(window.as_weak(), windows, {
+        let engine = engine.clone();
+        move || Some(engine.clone())
+    });
+    admin.attach_window(&window);
+    admin.start(ostov_api::SystemRights::ALL);
+    // Ответы ядра приходят в цикле событий: крутим его, пока они не лягут в окно.
+    window.show()?;
+    slint::Timer::single_shot(std::time::Duration::from_millis(800), || {
+        let _ = slint::quit_event_loop();
+    });
+    slint::run_event_loop()?;
+    if screen == "period-error" {
+        window
+            .global::<ostov_ui::AdminData>()
+            .set_closing_error("Нет права: установка даты закрытия.".into());
+    }
+    save(&window, dark, path)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -99,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ostov_ui::app::refresh(&window, &shell);
             ostov_ui::app::refresh_users(&window, &ostov_ui::users::Directory::demo());
             window.set_roles(ModelRc::new(VecModel::from(
-                ["admin", "storekeeper"]
+                ["Кладовщик", "Администратор"]
                     .map(slint::SharedString::from)
                     .to_vec(),
             )));
@@ -107,13 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
+        "journal" | "period" | "period-error" => admin_screen(&screen, dark, &path),
         "main-meta" => {
             // Меню из встроенной конфигурации «Склад», как его строит приложение.
             let window = app_window(2)?;
             let meta =
                 ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
             let shell = std::rc::Rc::new(std::cell::RefCell::new(
-                ostov_ui::shell::Shell::from_meta(&meta, true),
+                ostov_ui::shell::Shell::from_meta(&meta, ostov_api::SystemRights::ALL),
             ));
             let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
             receipts.attach_blocking(snapshot_engine()?);

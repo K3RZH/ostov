@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ostov_api::{Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
+use ostov_api::{BaseInfo, Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
 use ostov_core::{LocalConnector, PasswordPolicy};
 
 /// Название и версия встроенной конфигурации для стартовой страницы.
@@ -25,6 +25,38 @@ fn connector() -> EngineResult<LocalConnector> {
     })?;
     // Один компьютер: любой пароль, в том числе пустой (ADR-033).
     Ok(LocalConnector::new(config).with_password_policy(PasswordPolicy::LOCAL))
+}
+
+/// Что за база в этом файле, не открывая и не записывая в него (для «Добавить существующую»).
+/// База другой конфигурации не подходит: программа сейчас работает только со встроенной «Склад».
+///
+/// # Errors
+/// Ошибки ядра как есть: файла нет (`NotFound`), это не база Ostov (`Incompatible`), база другой
+/// конфигурации (`Incompatible` с её названием).
+pub fn check(path: &str) -> EngineResult<BaseInfo> {
+    let info = connector()?.check_local(&expand_home(path))?;
+    let (title, _) = config_title().unwrap_or_default();
+    ensure_embedded_config(&info, &config_name(), &title)?;
+    Ok(info)
+}
+
+fn config_name() -> String {
+    ostov_meta::demo()
+        .map(|config| config.name)
+        .unwrap_or_default()
+}
+
+fn ensure_embedded_config(info: &BaseInfo, name: &str, title: &str) -> EngineResult<()> {
+    if info.config_name == name {
+        return Ok(());
+    }
+    Err(EngineError::new(
+        ErrorCode::Incompatible,
+        format!(
+            "Это база конфигурации «{}», а программа работает с «{title}».",
+            info.config_title
+        ),
+    ))
 }
 
 /// Открывает файл базы.
@@ -91,6 +123,126 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    fn info(name: &str, title: &str) -> BaseInfo {
+        BaseInfo {
+            config_name: name.into(),
+            config_title: title.into(),
+            file_password: false,
+            login_required: false,
+        }
+    }
+
+    #[test]
+    fn other_configuration_is_refused_with_its_title() {
+        assert!(ensure_embedded_config(&info("warehouse", "Склад"), "warehouse", "Склад").is_ok());
+        let error = ensure_embedded_config(&info("cafe", "Кафе"), "warehouse", "Склад").err();
+        assert!(
+            matches!(error, Some(ref e) if e.code == ErrorCode::Incompatible
+            && e.message.contains("«Кафе»") && e.message.contains("«Склад»")),
+            "{error:?}"
+        );
+    }
+
+    // «Добавить существующую» не должна менять чужой файл (просьба Артёма, ядро: check_local).
+    #[test]
+    fn check_reads_base_without_changing_the_file() {
+        let (dir, path) = temp_base("check");
+        assert!(create(&path, None, None).is_ok());
+        let before = std::fs::read(&path).unwrap_or_default();
+        let checked = check(&path);
+        assert!(
+            matches!(checked, Ok(ref i) if !i.login_required),
+            "{checked:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn check_reports_missing_and_foreign_files() {
+        let (dir, path) = temp_base("check-bad");
+        let missing = check(&path);
+        assert!(
+            matches!(missing, Err(ref e) if e.code == ErrorCode::NotFound),
+            "{missing:?}"
+        );
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            &path,
+            "это не база данных, просто текст на много байт".repeat(50),
+        );
+        let foreign = check(&path);
+        assert!(
+            matches!(foreign, Err(ref e) if e.code == ErrorCode::Incompatible),
+            "{foreign:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ADR-033: на одном компьютере подходит любой пароль, в том числе пустой, и вход с ним работает.
+    #[test]
+    fn local_base_accepts_any_admin_password() {
+        for (name, password) in [("short-admin", "1234"), ("empty-admin", "")] {
+            let (dir, path) = temp_base(name);
+            let admin = NewAdmin {
+                login: "admin".into(),
+                password: password.into(),
+            };
+            let created = create(&path, None, Some(&admin));
+            assert!(created.is_ok(), "пароль «{password}»: {:?}", created.err());
+            drop(created);
+            let user = open(&path).and_then(|engine| engine.login("admin", password));
+            assert!(matches!(user, Ok(ref u) if u.login == "admin"), "{user:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    // Кнопка «Сменить пароль»: после смены администратором старый пароль не подходит, новый подходит.
+    #[test]
+    fn admin_changes_user_password() {
+        let (dir, path) = temp_base("set-password");
+        let admin = NewAdmin {
+            login: "admin".into(),
+            password: "1".into(),
+        };
+        let engine = create(&path, None, Some(&admin));
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(engine.login("admin", "1").is_ok());
+            let user = ostov_api::NewUser {
+                login: "keeper".into(),
+                display_name: "Кладовщик".into(),
+                role: "storekeeper".into(),
+                password: "старый".into(),
+            };
+            assert!(engine.admin_add_user(&user).is_ok());
+            assert!(engine.admin_set_user_password("keeper", "новый").is_ok());
+            assert!(engine.admin_set_user_password("нет-такого", "x").is_err());
+            assert!(engine.login("keeper", "старый").is_err());
+            assert!(engine.login("keeper", "новый").is_ok());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Просьба Артёма №5: первым пользователем не-администратор отклоняется, вход не включается.
+    #[test]
+    fn first_user_must_be_administrator() {
+        let (dir, path) = temp_base("first-keeper");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            let keeper = engine.admin_add_user(&ostov_api::NewUser {
+                login: "keeper".into(),
+                display_name: "Кладовщик".into(),
+                role: "storekeeper".into(),
+                password: "длинный-пароль-1".into(),
+            });
+            assert!(keeper.is_err(), "кладовщик первым не должен приниматься");
+            assert!(matches!(engine.hello(), Ok(info) if !info.login_required));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn existing_file_is_not_overwritten() {
         let (dir, path) = temp_base("twice");
@@ -136,6 +288,65 @@ mod tests {
             });
             assert!(added.is_ok(), "{added:?}");
             assert!(matches!(engine.hello(), Ok(info) if info.login_required));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Экран «Закрытие периода»: дата туда и обратно, формат ГГГГ-ММ-ДД, снятие закрытия.
+    #[test]
+    fn closing_date_round_trips() {
+        let (dir, path) = temp_base("closing");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(matches!(engine.closing_date(), Ok(None)));
+            assert!(engine.set_closing_date(Some("2026-01-31")).is_ok());
+            let closed = |engine: &Arc<dyn Engine>| engine.closing_date().ok().flatten();
+            assert_eq!(closed(&engine).as_deref(), Some("2026-01-31"));
+            // Дату в другом виде ядро отклоняет, прежнее закрытие остаётся.
+            assert!(engine.set_closing_date(Some("31.01.2026")).is_err());
+            assert!(engine.set_closing_date(Some("2026-02-31")).is_err());
+            assert_eq!(closed(&engine).as_deref(), Some("2026-01-31"));
+            assert!(engine.set_closing_date(None).is_ok());
+            assert!(matches!(engine.closing_date(), Ok(None)));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Экран «Журнал действий»: действия видны, новые сверху, страницы идут по ключу `id`.
+    #[test]
+    fn journal_shows_actions_newest_first_and_pages_by_key() {
+        let (dir, path) = temp_base("journal");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(engine.set_closing_date(Some("2026-01-31")).is_ok());
+            let added = engine.admin_add_user(&ostov_api::NewUser {
+                login: "admin".into(),
+                display_name: "Администратор".into(),
+                role: "admin".into(),
+                password: "1".into(),
+            });
+            assert!(added.is_ok(), "{added:?}");
+            assert!(engine.login("admin", "1").is_ok());
+
+            let all = engine.admin_journal(None, 100).unwrap_or_default();
+            assert!(all.len() >= 3, "{all:?}");
+            assert!(all.windows(2).all(|pair| pair[0].id > pair[1].id));
+            assert!(
+                all.iter()
+                    .any(|entry| entry.action == "Установка даты закрытия"
+                        && entry.details.contains("31.01.2026")),
+                "{all:?}"
+            );
+
+            let first = engine.admin_journal(None, 2).unwrap_or_default();
+            assert_eq!(first.len(), 2);
+            let key = first.last().map(|entry| entry.id.to_string());
+            let second = engine.admin_journal(key.as_deref(), 2).unwrap_or_default();
+            let paged: Vec<i64> = first.iter().chain(&second).map(|entry| entry.id).collect();
+            let expected: Vec<i64> = all.iter().map(|entry| entry.id).take(paged.len()).collect();
+            assert_eq!(paged, expected);
         }
         let _ = std::fs::remove_dir_all(dir);
     }

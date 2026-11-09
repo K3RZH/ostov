@@ -4,7 +4,7 @@ import { IconButton } from "../components/icon-button.slint";
 import { WindowControls } from "../components/window-controls.slint";
 import { UserRow } from "users-view.slint";
 import { TabHost, TabItem } from "tab-host.slint";
-import { MenuAction } from "../components/context-menu.slint";
+import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 import { NavPanel, NavRow } from "../components/nav-panel.slint";
 
 component Separator inherits Rectangle {
@@ -21,13 +21,18 @@ export component MainPage inherits Rectangle {
     in property <string> mode-text;
     in property <string> user-text;
     in property <string> user-initials;
+    // Роли пользователя для меню под аватаром; сменить пользователя можно, только если база
+    // спрашивает вход.
+    in property <string> user-roles-text;
+    in property <bool> can-switch-user;
+    callback switch-user();
+    callback close-base();
     in property <string> status-message: "Готово";
-    in property <string> app-version: "v0.1.0";
+    in property <string> app-version;
     in property <[NavRow]> nav;
     in property <[TabItem]> tabs;
     in property <int> active-tab;
     in-out property <bool> nav-collapsed;
-    in-out property <string> search;
     callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
@@ -54,6 +59,7 @@ export component MainPage inherits Rectangle {
     in property <string> user-message;
     callback user-add-clicked();
     callback user-toggle(int);
+    callback user-password(int);
 
     background: Theme.bg;
 
@@ -104,53 +110,9 @@ export component MainPage inherits Rectangle {
                     alignment: center;
                     Text { text: root.base-name; font-size: Theme.font-body; color: Theme.text-muted; }
                 }
+                // Поиск по системе, «+», уведомления и справка вернутся вместе с командами ядра
+                // (глобальный поиск, фоновые задачи); пока их нет, кнопок без действия нет тоже.
                 Rectangle { horizontal-stretch: 1; }
-                Rectangle {
-                    width: 400px;
-                    horizontal-stretch: 0;
-                    VerticalLayout {
-                        alignment: center;
-                        Rectangle {
-                            height: 32px;
-                            border-radius: Shape.control-radius;
-                            background: Theme.surface-alt;
-                            border-width: 1px;
-                            border-color: Theme.border;
-                            HorizontalLayout {
-                                padding-left: Theme.space-8;
-                                padding-right: Theme.space-8;
-                                spacing: Theme.space-8;
-                                VerticalLayout { alignment: center; Icon { name: "search"; tint: Theme.text-muted; width: 16px; height: 16px; } }
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                    TextInput {
-                                        width: parent.width;
-                                        height: parent.height;
-                                        single-line: true;
-                                        vertical-alignment: center;
-                                        font-size: Theme.font-body;
-                                        color: Theme.text;
-                                        text <=> root.search;
-                                    }
-                                    if root.search == "" : Text {
-                                        x: 0px;
-                                        width: parent.width;
-                                        text: "Поиск по системе";
-                                        font-size: Theme.font-body;
-                                        color: Theme.text-muted;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: left;
-                                    }
-                                }
-                                VerticalLayout { alignment: center; Text { text: "Ctrl+K"; font-size: Theme.font-caption; color: Theme.text-muted; } }
-                            }
-                        }
-                    }
-                }
-                Rectangle { horizontal-stretch: 1; }
-                VerticalLayout { alignment: center; IconButton { icon: "plus"; } }
-                VerticalLayout { alignment: center; IconButton { icon: "bell"; } }
-                VerticalLayout { alignment: center; IconButton { icon: "help"; } }
                 VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
@@ -158,8 +120,14 @@ export component MainPage inherits Rectangle {
                         width: 28px;
                         height: 28px;
                         border-radius: 14px;
+                        border-width: avatar-touch.has-hover ? 1px : 0px;
+                        border-color: Theme.accent-text;
                         background: Theme.accent-soft;
                         Text { text: root.user-initials; font-size: Theme.font-caption; font-weight: 600; color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
+                        avatar-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => { user-menu.show(); }
+                        }
                     }
                 }
             }
@@ -189,6 +157,7 @@ export component MainPage inherits Rectangle {
                 follower-active: root.follower-active;
                 user-add-clicked => { root.user-add-clicked(); }
                 user-toggle(i) => { root.user-toggle(i); }
+                user-password(i) => { root.user-password(i); }
             }
         }
 
@@ -218,5 +187,45 @@ export component MainPage inherits Rectangle {
         }
     }
 
+    // Меню пользователя под аватаром: кто вошёл и что можно сделать с сессией.
+    user-menu := PopupWindow {
+        x: root.width - MenuMetrics.width - Theme.space-12;
+        y: 46px;
+        width: MenuMetrics.width;
+        height: 56px + Theme.space-4 + MenuMetrics.height(2);
+        close-policy: PopupClosePolicy.close-on-click-outside;
 
+        VerticalLayout {
+            spacing: Theme.space-4;
+            Rectangle {
+                height: 56px;
+                border-radius: Shape.control-radius;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                background: Theme.surface;
+                VerticalLayout {
+                    padding-left: Theme.space-12;
+                    padding-right: Theme.space-12;
+                    alignment: center;
+                    spacing: 2px;
+                    Text { text: root.user-text; font-size: Theme.font-body; font-weight: 600; color: Theme.text; overflow: elide; }
+                    Text { text: root.user-roles-text; font-size: Theme.font-caption; color: Theme.text-muted; overflow: elide; }
+                }
+            }
+            MenuPanel {
+                actions: [
+                    { id: "switch", label: "Сменить пользователя", icon: "user", danger: false, enabled: root.can-switch-user, divider: false },
+                    { id: "close", label: "Закрыть базу", icon: "database", danger: false, enabled: true, divider: true },
+                ];
+                chosen(id) => {
+                    user-menu.close();
+                    if (id == "switch") {
+                        root.switch-user();
+                    } else if (id == "close") {
+                        root.close-base();
+                    }
+                }
+            }
+        }
+    }
 }

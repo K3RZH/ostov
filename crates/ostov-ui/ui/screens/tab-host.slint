@@ -4,6 +4,8 @@ import { Icon } from "../components/icon.slint";
 import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 import { UsersView, UserRow } from "users-view.slint";
 import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
+import { JournalView } from "journal-view.slint";
+import { PeriodView } from "period-view.slint";
 
 export struct TabItem { title: string, icon: string, modified: bool, view: string, preview: bool }
 
@@ -178,6 +180,11 @@ export component TabHost inherits VerticalLayout {
     private property <int> land-index;
     private property <length> land-x;
 
+    // Для каких видов вкладок экран уже есть; остальным показывается заглушка.
+    pure function has-screen(view: string) -> bool {
+        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period"
+    }
+
     pure function slot-x(i: int) -> length {
         Theme.space-8 + i * root.tab-width
     }
@@ -198,6 +205,7 @@ export component TabHost inherits VerticalLayout {
 
     callback user-add-clicked();
     callback user-toggle(int);
+    callback user-password(int);
 
     // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
     private property <length> tab-menu-x;
@@ -338,10 +346,13 @@ export component TabHost inherits VerticalLayout {
                     message: root.user-message;
                     add-clicked => { root.user-add-clicked(); }
                     toggle(i) => { root.user-toggle(i); }
+                    password(i) => { root.user-password(i); }
                 }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }
-                if root.tabs.length == 0 || (root.tabs[root.active-tab].view != "users" && root.tabs[root.active-tab].view != "receipts" && root.tabs[root.active-tab].view != "receipt") : Rectangle {
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "journal" : JournalView { }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "period" : PeriodView { }
+                if root.tabs.length == 0 || !root.has-screen(root.tabs[root.active-tab].view) : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {
                         alignment: center;

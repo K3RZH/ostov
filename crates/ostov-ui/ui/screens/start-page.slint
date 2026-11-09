@@ -74,7 +74,7 @@ export component StartPage inherits Rectangle {
     in-out property <int> selected-recent: 0;
     in property <string> config-name;
     in property <string> config-info;
-    in property <string> app-version: "Версия 0.1.0";
+    in property <string> app-version;
     in-out property <[RecentDb]> recent;
     // Ошибка ядра при открытии базы и «идёт открытие».
     in property <string> error;
@@ -115,7 +115,7 @@ export component StartPage inherits Rectangle {
                             chosen => { root.selected-recent = index; }
                         }
                     }
-                    ErrorBanner { text: root.error; }
+                    if root.error != "" : ErrorBanner { text: root.error; }
                     if root.recent.length > 0 : HorizontalLayout {
                         spacing: Theme.space-8;
                         Button {

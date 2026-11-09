@@ -2,6 +2,7 @@ import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { TextField } from "../components/text-field.slint";
 import { Segment } from "../components/segment.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
 
 // Окно «Новый пользователь»: логин, имя, роль, пароль с повтором.
 export component UserDialog inherits Rectangle {
@@ -16,8 +17,13 @@ export component UserDialog inherits Rectangle {
     callback cancelled();
 
     private property <bool> mismatch: root.repeat != "" && root.password != root.repeat;
-    // Пустой пароль можно на одном компьютере (ADR-033); на сервере его отклонит ядро.
-    private property <bool> valid: root.login != "" && root.password == root.repeat;
+    // Что мешает добавить: серая кнопка без причины выглядит как сломанная. Правила пароля
+    // (длина, пустой ли) интерфейс не знает: их проверяет ядро. Пустой пароль можно на одном
+    // компьютере (ADR-033), на сервере его отклонит ядро.
+    private property <string> missing: root.login == "" ? "Введите логин."
+        : root.password != root.repeat ? "Пароли не совпадают."
+        : "";
+    private property <bool> valid: root.missing == "";
 
     background: Theme.scrim;
 
@@ -64,20 +70,19 @@ export component UserDialog inherits Rectangle {
                 text <=> root.repeat;
                 error: root.mismatch ? "!" : "";
             }
-            if root.mismatch : Text {
-                text: "Пароли не совпадают.";
-                font-size: Theme.font-caption;
-                color: Theme.danger;
-            }
-            if root.error != "" : Text {
-                text: root.error;
-                font-size: Theme.font-caption;
-                color: Theme.danger;
-                wrap: word-wrap;
-            }
+            if root.error != "" : ErrorBanner { text: root.error; }
             HorizontalLayout {
                 spacing: Theme.space-12;
-                alignment: end;
+                // Причина, по которой «Добавить» недоступна, в строке кнопок: высота окна не
+                // меняется, и поля не прыгают под курсором.
+                Text {
+                    text: root.login != "" || root.password != "" || root.repeat != "" ? root.missing : "";
+                    horizontal-stretch: 1;
+                    font-size: Theme.font-caption;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
                 Button { text: "Отмена"; clicked => { root.cancelled(); } }
                 Button {
                     text: "Добавить";

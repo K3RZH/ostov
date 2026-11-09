@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use ostov_api::{MenuItem, Meta, ObjectKind};
+use ostov_api::{MenuItem, Meta, ObjectKind, SystemRights};
 
 /// Значки, которые есть в интерфейсе (`assets/icons`). Имя значка приходит из конфигурации:
 /// незнакомое заменяется значком по виду пункта, а не пустым местом.
@@ -102,6 +102,21 @@ fn view_for(object: &str) -> &'static str {
     if object == "receipt" { "receipts" } else { "" }
 }
 
+/// Экраны «Администрирования» (название, значок, вид вкладки), которые доступны с такими правами.
+/// Ядро проверяет право на каждой команде; здесь пункт только не показывается, чтобы не вести
+/// в экран, который ответит отказом.
+fn admin_screens(rights: SystemRights) -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut screens = Vec::new();
+    if rights.admin {
+        screens.push(("Пользователи и роли", "users", "users"));
+        screens.push(("Журнал действий", "list", "journal"));
+    }
+    if rights.set_closing_date {
+        screens.push(("Закрытие периода", "calendar", "period"));
+    }
+    screens
+}
+
 /// Добавляет пункт меню и его детей. Глубину ограничивает формат YAML (раздел → группа → объект).
 fn push_menu(nodes: &mut Vec<NavNode>, meta: &Meta, item: &MenuItem, parent: Option<usize>) {
     let id = nodes.len();
@@ -139,9 +154,9 @@ fn push_menu(nodes: &mut Vec<NavNode>, meta: &Meta, item: &MenuItem, parent: Opt
 
 impl Shell {
     /// Навигация из метаданных базы: «Главная», меню конфигурации (ядро уже убрало пункты, на
-    /// которые у пользователя нет прав) и «Администрирование» для администратора. Разделы
-    /// верхнего уровня раскрыты.
-    pub fn from_meta(meta: &Meta, admin: bool) -> Self {
+    /// которые у пользователя нет прав) и «Администрирование» с теми экранами, на которые есть
+    /// системное право. Разделы верхнего уровня раскрыты.
+    pub fn from_meta(meta: &Meta, rights: SystemRights) -> Self {
         let mut nodes = vec![node("Главная", "home", None, false)];
         let mut expanded = HashSet::new();
         for item in &meta.menu {
@@ -150,13 +165,16 @@ impl Shell {
             }
             push_menu(&mut nodes, meta, item, None);
         }
-        if admin {
+        let screens = admin_screens(rights);
+        if !screens.is_empty() {
             let group = nodes.len();
             expanded.insert(group);
             nodes.push(node("Администрирование", "settings", None, true));
-            let mut users = node("Пользователи и роли", "users", Some(group), false);
-            users.view = "users";
-            nodes.push(users);
+            for (title, icon, view) in screens {
+                let mut item = node(title, icon, Some(group), false);
+                item.view = view;
+                nodes.push(item);
+            }
         }
         Self::new(nodes, expanded)
     }
@@ -502,7 +520,7 @@ mod tests {
     #[test]
     fn menu_comes_from_configuration() {
         let meta = warehouse_meta();
-        let shell = Shell::from_meta(&meta, false);
+        let shell = Shell::from_meta(&meta, SystemRights::default());
         let titles = titles(&shell);
         assert_eq!(titles.first().map(String::as_str), Some("Главная"));
         for object in &meta.objects {
@@ -517,17 +535,77 @@ mod tests {
 
     #[test]
     fn admin_sees_administration() {
-        let shell = Shell::from_meta(&warehouse_meta(), true);
-        assert!(
-            titles(&shell)
+        let shell = Shell::from_meta(&warehouse_meta(), SystemRights::ALL);
+        let titles = titles(&shell);
+        for title in [
+            "Администрирование",
+            "Пользователи и роли",
+            "Журнал действий",
+            "Закрытие периода",
+        ] {
+            assert!(titles.iter().any(|t| t == title), "нет пункта «{title}»");
+        }
+    }
+
+    #[test]
+    fn administration_items_follow_rights() {
+        let only = |rights: SystemRights| titles(&Shell::from_meta(&warehouse_meta(), rights));
+        // Журнал и пользователи идут с правом администратора, закрытие периода с собственным.
+        let admin = only(SystemRights {
+            admin: true,
+            ..SystemRights::default()
+        });
+        assert!(admin.iter().any(|t| t == "Журнал действий"));
+        assert!(!admin.iter().any(|t| t == "Закрытие периода"));
+        let accountant = only(SystemRights {
+            set_closing_date: true,
+            ..SystemRights::default()
+        });
+        assert!(accountant.iter().any(|t| t == "Администрирование"));
+        assert!(accountant.iter().any(|t| t == "Закрытие периода"));
+        assert!(!accountant.iter().any(|t| t == "Журнал действий"));
+        assert!(!accountant.iter().any(|t| t == "Пользователи и роли"));
+        // Права, не связанные с этими экранами, раздела не открывают.
+        let editor = only(SystemRights {
+            closed_period: true,
+            update_config: true,
+            ..SystemRights::default()
+        });
+        assert!(!editor.iter().any(|t| t == "Администрирование"));
+    }
+
+    #[test]
+    fn administration_items_open_their_screens() {
+        let mut shell = Shell::from_meta(&warehouse_meta(), SystemRights::ALL);
+        for (title, view) in [
+            ("Пользователи и роли", "users"),
+            ("Журнал действий", "journal"),
+            ("Закрытие периода", "period"),
+        ] {
+            let id = shell
+                .nav_rows()
                 .iter()
-                .any(|title| title == "Пользователи и роли")
-        );
+                .find(|row| row.title == title)
+                .map(|row| row.id);
+            assert!(id.is_some(), "нет пункта «{title}»");
+            if let Some(id) = id {
+                shell.click(id);
+                assert_eq!(shell.tabs().last().map(|tab| tab.view), Some(view));
+            }
+        }
+    }
+
+    #[test]
+    fn administration_icons_are_known() {
+        let all = SystemRights::ALL;
+        for (title, icon, _) in admin_screens(all) {
+            assert!(KNOWN_ICONS.contains(&icon), "значок «{icon}» у «{title}»");
+        }
     }
 
     #[test]
     fn object_finds_its_menu_item() {
-        let mut shell = Shell::from_meta(&warehouse_meta(), false);
+        let mut shell = Shell::from_meta(&warehouse_meta(), SystemRights::default());
         let receipts = shell.node_for_object("receipt");
         assert!(receipts.is_some());
         assert_eq!(shell.node_for_object("нет такого"), None);

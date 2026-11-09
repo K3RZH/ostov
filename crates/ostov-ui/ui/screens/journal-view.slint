@@ -1,0 +1,127 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
+import { AdminData } from "admin-data.slint";
+
+component Header inherits Text {
+    font-size: Theme.font-caption;
+    font-weight: 600;
+    color: Theme.text-muted;
+    vertical-alignment: center;
+}
+
+component Cell inherits Text {
+    font-size: Theme.font-body;
+    color: Theme.text;
+    wrap: word-wrap;
+}
+
+// Вкладка «Журнал действий»: кто, когда и что сделал в базе (СТ-34). Показывается новыми сверху,
+// страницами по ключу: кнопка «Ещё» просит следующую. Время в журнале по UTC, поэтому в шапке
+// это сказано: перевод в часовой пояс компьютера без лишних библиотек не сделать.
+export component JournalView inherits Rectangle {
+    // Строки таблицы не ниже этого: короткая запись не должна сжиматься до текста.
+    private property <length> row-min: 44px;
+
+    background: Theme.bg;
+
+    // Каждый раз, когда вкладку открывают, список перечитывается: журнал меняется, пока работают.
+    init => { AdminData.journal-refresh(); }
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: "Журнал действий";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Rectangle { }
+            Button {
+                text: "Обновить";
+                enabled: !AdminData.journal-loading;
+                clicked => { AdminData.journal-refresh(); }
+            }
+        }
+
+        if AdminData.journal-error != "" : ErrorBanner { text: AdminData.journal-error; }
+
+        // Шапка таблицы
+        Rectangle {
+            height: 36px;
+            background: Theme.surface-alt;
+            border-radius: Shape.control-radius;
+            HorizontalLayout {
+                padding-left: Theme.space-12;
+                padding-right: Theme.space-12;
+                spacing: Theme.space-12;
+                Header { text: "Время (UTC)"; width: 140px; }
+                Header { text: "Пользователь"; width: 110px; }
+                Header { text: "Действие"; width: 190px; }
+                Header { text: "Объект"; width: 160px; }
+                Header { text: "Подробности"; horizontal-stretch: 1; }
+            }
+        }
+
+        Flickable {
+            VerticalLayout {
+                alignment: start;
+                for entry in AdminData.journal : Rectangle {
+                    // Высота по самой длинной ячейке: узкие колонки переносят текст так же, как «Подробности».
+                    height: max(root.row-min, max(max(max(when.preferred-height, user.preferred-height), max(action.preferred-height, object.preferred-height)), details.preferred-height) + 2 * Theme.space-12);
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    HorizontalLayout {
+                        padding-left: Theme.space-12;
+                        padding-right: Theme.space-12;
+                        padding-top: Theme.space-12;
+                        padding-bottom: Theme.space-12;
+                        spacing: Theme.space-12;
+                        when := Cell { text: entry.when; width: 140px; color: Theme.text-muted; }
+                        user := Cell { text: entry.user; width: 110px; font-weight: 600; }
+                        action := Cell { text: entry.action; width: 190px; }
+                        object := Cell { text: entry.object; width: 160px; }
+                        details := Cell { text: entry.details; horizontal-stretch: 1; }
+                    }
+                }
+
+                if AdminData.journal.length == 0 && !AdminData.journal-loading && AdminData.journal-error == "" : Text {
+                    text: "В журнале пока нет записей.";
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    height: 80px;
+                    vertical-alignment: center;
+                }
+
+                HorizontalLayout {
+                    padding-top: Theme.space-16;
+                    padding-bottom: Theme.space-8;
+                    spacing: Theme.space-16;
+                    alignment: center;
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: AdminData.journal-loading ? "Загрузка…" : "Показано записей: " + AdminData.journal.length;
+                            font-size: Theme.font-caption;
+                            color: Theme.text-muted;
+                        }
+                    }
+                    if AdminData.journal-more : Button {
+                        text: "Ещё";
+                        enabled: !AdminData.journal-loading;
+                        clicked => { AdminData.journal-load-more(); }
+                    }
+                }
+            }
+        }
+    }
+}

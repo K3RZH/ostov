@@ -1,0 +1,29 @@
+import { Theme } from "../theme.slint";
+
+// Документ, названный в предупреждении (например, расход, который мешает перепровести приход):
+// показывается ссылкой, нажатие открывает его в новой вкладке. kind это имя объекта в ядре.
+export struct DocLink { title: string, kind: string, number: int }
+
+// Ссылка на документ в предупреждении.
+export component DocLinkText inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    width: label.preferred-width;
+    height: label.preferred-height;
+    label := Text {
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: 600;
+        color: Theme.accent-text;
+    }
+    // Подчёркивание: в этой версии Slint у Text нет свойства подчёркивания.
+    Rectangle {
+        y: label.preferred-height - 1px;
+        height: touch.has-hover ? 2px : 1px;
+        background: Theme.accent-text;
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}

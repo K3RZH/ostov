@@ -1,0 +1,97 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
+import { DateField } from "../components/date-field.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
+import { AdminData } from "admin-data.slint";
+
+// Вкладка «Закрытие периода» (СТ-24): дата, по которую документы больше не меняются. Ошибки ядра
+// (нет права, дата не распознана) показываются как пришли.
+export component PeriodView inherits Rectangle {
+    background: Theme.bg;
+
+    // Дату закрытия при каждом открытии вкладки читаем заново: её мог поменять другой администратор.
+    init => { AdminData.closing-reload(); }
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+        alignment: start;
+
+        Text {
+            text: "Закрытие периода";
+            font-size: Theme.font-title;
+            font-weight: 700;
+            color: Theme.text;
+        }
+        Text {
+            text: "Документы с датой по дату закрытия включительно нельзя записать, провести, отменить или пометить на удаление.";
+            font-size: Theme.font-body;
+            color: Theme.text-muted;
+            wrap: word-wrap;
+        }
+
+        if AdminData.closing-error != "" : ErrorBanner { text: AdminData.closing-error; }
+
+        Rectangle {
+            border-radius: Shape.surface-radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+            height: card.preferred-height;
+            card := VerticalLayout {
+                padding: Theme.space-16;
+                spacing: Theme.space-16;
+                HorizontalLayout {
+                    spacing: Theme.space-12;
+                    alignment: start;
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: AdminData.closing-text;
+                            font-size: Theme.font-subtitle;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Chip {
+                            text: AdminData.closing-set ? "Закрыт" : "Открыт";
+                            kind: AdminData.closing-set ? ChipKind.draft : ChipKind.posted;
+                            visible: AdminData.closing-loaded;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-16;
+                    alignment: start;
+                    DateField {
+                        width: 140px;
+                        label: "Закрыть по дату";
+                        day <=> AdminData.closing-day;
+                        month <=> AdminData.closing-month;
+                        year <=> AdminData.closing-year;
+                    }
+                    VerticalLayout {
+                        alignment: end;
+                        Button {
+                            text: "Закрыть период";
+                            kind: ButtonKind.primary;
+                            enabled: !AdminData.closing-busy;
+                            clicked => { AdminData.closing-close(); }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: end;
+                        Button {
+                            text: "Снять закрытие";
+                            enabled: AdminData.closing-set && !AdminData.closing-busy;
+                            clicked => { AdminData.closing-open(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -18,6 +18,7 @@ export component UsersView inherits Rectangle {
     in property <string> message;
     callback add-clicked();
     callback toggle(int);
+    callback password(int);
 
     background: Theme.bg;
 
@@ -72,7 +73,7 @@ export component UsersView inherits Rectangle {
                 Header { text: "Имя"; horizontal-stretch: 1; }
                 Header { text: "Роль"; width: 160px; }
                 Header { text: "Статус"; width: 100px; }
-                Rectangle { width: 110px; }
+                Rectangle { width: 220px; }
             }
         }
 
@@ -124,10 +125,15 @@ export component UsersView inherits Rectangle {
                             }
                         }
                         VerticalLayout {
-                            width: 110px;
+                            width: 220px;
                             alignment: center;
                             HorizontalLayout {
                                 alignment: end;
+                                Button {
+                                    text: "Сменить пароль";
+                                    kind: ButtonKind.text;
+                                    clicked => { root.password(i); }
+                                }
                                 Button {
                                     text: u.active ? "Отключить" : "Включить";
                                     kind: ButtonKind.text;

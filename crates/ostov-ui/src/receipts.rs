@@ -1,5 +1,8 @@
-//! Данные списка «Поступления» и строки документа: типы интерфейса и форматирование.
-//! Сами данные, порядок и поиск дают ядро (Engine API).
+//! Данные списка «Поступления» и строки документа: типы интерфейса. Сами данные, порядок и поиск
+//! дают ядро (Engine API); показ и разбор значений в `values`, ключи сортировки в `sorting`.
+
+use crate::sorting::Sorting;
+use crate::values::{date_text, money};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
@@ -50,91 +53,15 @@ impl Column {
     }
 }
 
-/// Сортировка списка по нескольким колонкам. Порядок ключей это приоритет: он такой, в каком
-/// пользователь включал сортировку. У колонки три состояния: без сортировки, по возрастанию,
-/// по убыванию (щелчок по заголовку переключает по кругу, меню заголовка задаёт прямо).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Sorting {
-    keys: Vec<(usize, bool)>,
-}
-
-impl Sorting {
-    /// Ключи по приоритету: колонка и признак «по убыванию».
-    pub fn keys(&self) -> &[(usize, bool)] {
-        &self.keys
-    }
-
-    fn position(&self, column: usize) -> Option<usize> {
-        self.keys.iter().position(|(c, _)| *c == column)
-    }
-
-    /// Состояние колонки: 0 нет, 1 по возрастанию, 2 по убыванию.
-    pub fn dir(&self, column: usize) -> i32 {
-        match self.position(column).map(|i| self.keys[i].1) {
-            None => 0,
-            Some(false) => 1,
-            Some(true) => 2,
-        }
-    }
-
-    /// Приоритет колонки с единицы; 0, если сортировки нет.
-    pub fn priority(&self, column: usize) -> i32 {
-        self.position(column)
-            .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
-    }
-
-    /// Щелчок по заголовку: нет → по возрастанию (в конец очереди) → по убыванию → нет.
-    pub fn click(&mut self, column: usize) {
-        match self.position(column) {
-            None => self.keys.push((column, false)),
-            Some(i) if !self.keys[i].1 => self.keys[i].1 = true,
-            Some(i) => {
-                self.keys.remove(i);
-            }
-        }
-    }
-
-    /// Задаёт направление; новая колонка встаёт в конец очереди, у включённой место не меняется.
-    pub fn set(&mut self, column: usize, descending: bool) {
-        match self.position(column) {
-            Some(i) => self.keys[i].1 = descending,
-            None => self.keys.push((column, descending)),
-        }
-    }
-
-    pub fn clear(&mut self, column: usize) {
-        if let Some(i) = self.position(column) {
-            self.keys.remove(i);
-        }
-    }
-
-    pub fn clear_all(&mut self) {
-        self.keys.clear();
-    }
-
-    /// Меняет приоритет: `earlier` ставит колонку выше (раньше), иначе ниже.
-    pub fn shift(&mut self, column: usize, earlier: bool) {
-        let Some(i) = self.position(column) else {
-            return;
-        };
-        let j = if earlier {
-            i.checked_sub(1)
-        } else {
-            Some(i + 1).filter(|j| *j < self.keys.len())
-        };
-        if let Some(j) = j {
-            self.keys.swap(i, j);
-        }
-    }
-
-    /// Сравнивает две строки по всем ключам: первый различающийся ключ решает.
-    pub fn compare(&self, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
-        self.keys
-            .iter()
-            .map(|(column, descending)| compare_by(COLUMNS[*column], *descending, a, b))
-            .find(|order| order.is_ne())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
+/// Сравнивает две строки по ключам сортировки: первый различающийся ключ решает. Нужна для
+/// досортировки здесь, когда ключей несколько: ядро сортирует только по одному полю.
+pub fn compare(sorting: &Sorting, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
+    sorting
+        .keys()
+        .iter()
+        .map(|(column, descending)| compare_by(COLUMNS[*column], *descending, a, b))
+        .find(|order| order.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Сравнение по одной колонке. Пустой текст всегда в конце, как у ядра, в любом направлении.
@@ -214,23 +141,6 @@ pub fn split_blockers(message: &str) -> (String, Vec<DocRef>) {
     }
 }
 
-/// Сумма «12 345,60»: неразрывные пробелы между разрядами.
-pub fn money(kopecks: i64) -> String {
-    let rubles = (kopecks / 100).to_string();
-    let mut grouped = String::new();
-    for (i, ch) in rubles.chars().enumerate() {
-        if i > 0 && (rubles.len() - i).is_multiple_of(3) {
-            grouped.push('\u{a0}');
-        }
-        grouped.push(ch);
-    }
-    format!("{grouped},{:02}", kopecks % 100)
-}
-
-pub fn date_text(date: (u16, u8, u8)) -> String {
-    format!("{:02}.{:02}.{}", date.2, date.1, date.0)
-}
-
 impl Receipt {
     pub fn status(&self) -> &'static str {
         if self.deleted {
@@ -255,18 +165,6 @@ impl Receipt {
     }
 }
 
-/// Разбирает дату «дд.мм.гггг»; неверный текст: `None`.
-pub fn parse_date(text: &str) -> Option<(u16, u8, u8)> {
-    let mut parts = text.trim().split('.');
-    let day: u8 = parts.next()?.parse().ok()?;
-    let month: u8 = parts.next()?.parse().ok()?;
-    let year: u16 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=31).contains(&day) || !(1..=12).contains(&month) {
-        return None;
-    }
-    Some((year, month, day))
-}
-
 /// Строка табличной части документа.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
@@ -278,17 +176,6 @@ pub struct Line {
     pub price: i64,
     /// Сумма строки в копейках.
     pub amount: i64,
-}
-
-/// Количество «12,5» или «12,125»: лишние нули в конце не показываем, один знак оставляем.
-pub fn quantity(milli: i64) -> String {
-    let fraction = format!("{:03}", milli % 1000);
-    let fraction = fraction.trim_end_matches('0');
-    format!(
-        "{},{}",
-        milli / 1000,
-        if fraction.is_empty() { "0" } else { fraction }
-    )
 }
 
 impl Line {
@@ -303,59 +190,6 @@ impl Line {
             amount: (price * quantity_milli + 500) / 1000,
         }
     }
-}
-
-/// Разбирает неотрицательное число с запятой или точкой в целые доли: `scale` знаков после
-/// запятой (для количества 1, для денег 2). Лишние знаки отклоняются, а не округляются.
-pub fn parse_decimal(text: &str, scale: u32) -> Option<i64> {
-    let text = text.trim().replace(',', ".");
-    let (whole, fraction) = text.split_once('.').unwrap_or((text.as_str(), ""));
-    let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
-    let scale_len = usize::try_from(scale).ok()?;
-    if (whole.is_empty() && fraction.is_empty())
-        || !digits(whole)
-        || !digits(fraction)
-        || fraction.len() > scale_len
-    {
-        return None;
-    }
-    let whole: i64 = if whole.is_empty() {
-        0
-    } else {
-        whole.parse().ok()?
-    };
-    let fraction_value: i64 = if fraction.is_empty() {
-        0
-    } else {
-        fraction.parse().ok()?
-    };
-    let missing = u32::try_from(scale_len - fraction.len()).ok()?;
-    whole
-        .checked_mul(10_i64.pow(scale))?
-        .checked_add(fraction_value * 10_i64.pow(missing))
-}
-
-/// Оставляет в числе только допустимое: цифры и один разделитель («,» вместо «.»), после
-/// запятой не больше `scale` знаков. Нужна, чтобы в поля количества и цены нельзя было
-/// ввести буквы и лишние знаки.
-pub fn clean_decimal(text: &str, scale: usize) -> String {
-    let mut out = String::new();
-    let mut separator = false;
-    let mut decimals = 0;
-    for c in text.chars() {
-        if c.is_ascii_digit() {
-            if !separator {
-                out.push(c);
-            } else if decimals < scale {
-                out.push(c);
-                decimals += 1;
-            }
-        } else if (c == ',' || c == '.') && !separator && scale > 0 {
-            separator = true;
-            out.push(',');
-        }
-    }
-    out
 }
 
 /// «1 позиция», «2 позиции», «5 позиций».
@@ -416,52 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn click_cycles_through_three_states() {
-        let mut sorting = Sorting::default();
-        assert_eq!(sorting.dir(2), 0);
-        sorting.click(2);
-        assert_eq!(sorting.dir(2), 1);
-        sorting.click(2);
-        assert_eq!(sorting.dir(2), 2);
-        sorting.click(2);
-        assert_eq!(sorting.dir(2), 0);
-        assert!(sorting.keys().is_empty());
-    }
-
-    #[test]
-    fn priority_follows_the_order_of_setting() {
-        let mut sorting = Sorting::default();
-        sorting.click(5);
-        sorting.click(2);
-        sorting.click(1);
-        assert_eq!(
-            [5, 2, 1].map(|c| sorting.priority(c)),
-            [1, 2, 3],
-            "приоритет равен порядку включения"
-        );
-        // Повторный щелчок по включённой колонке место в очереди не меняет.
-        sorting.click(5);
-        assert_eq!((sorting.priority(5), sorting.dir(5)), (1, 2));
-        sorting.shift(1, true);
-        assert_eq!(
-            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
-            [5, 1, 2]
-        );
-        sorting.shift(5, true);
-        sorting.shift(2, false);
-        assert_eq!(
-            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
-            [5, 1, 2]
-        );
-        sorting.clear(1);
-        assert_eq!(sorting.priority(2), 2);
-        sorting.set(0, true);
-        assert_eq!((sorting.priority(0), sorting.dir(0)), (3, 2));
-        sorting.clear_all();
-        assert!(sorting.keys().is_empty());
-    }
-
-    #[test]
     fn first_key_decides_then_the_next() {
         // Статус, потом поставщик по убыванию, потом номер.
         let mut rows = [
@@ -475,7 +263,7 @@ mod tests {
         sorting.set(5, false);
         sorting.set(2, true);
         sorting.set(0, false);
-        rows.sort_by(|a, b| sorting.compare(a, b));
+        rows.sort_by(|a, b| compare(&sorting, a, b));
         let numbers: Vec<u32> = rows.iter().map(|r| r.number).collect();
         // Не проведённые первыми; среди них «Б» раньше «А», пустой поставщик в конце;
         // одинаковые «Б» по номеру. Проведённый последним.

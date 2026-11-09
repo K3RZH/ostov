@@ -1,0 +1,31 @@
+// Строка журнала действий: все ячейки уже готовый текст (время переведено в «дд.мм.гггг чч:мм:сс»).
+export struct JournalRow { when: string, user: string, action: string, object: string, details: string }
+
+// Данные и события экранов «Журнал действий» и «Закрытие периода». Состояние ведёт Rust
+// (src/admin_ui.rs), здесь только свойства и колбэки. Глобальный объект, а не свойства окна:
+// экраны стоят в любом окне с вкладками, и данные не нужно протаскивать через каждый уровень.
+export global AdminData {
+    // Журнал: новые записи сверху, «Ещё» дописывает следующую страницу.
+    in property <[JournalRow]> journal;
+    in property <bool> journal-loading;
+    // Есть ли следующая страница.
+    in property <bool> journal-more;
+    // Текст ошибки ядра (пусто: ошибки нет).
+    in property <string> journal-error;
+    callback journal-refresh();
+    callback journal-load-more();
+
+    // Закрытие периода: текущая дата закрытия текстом и выбранная в поле дата.
+    in property <string> closing-text;
+    // Дата закрытия уже прочитана из ядра (до этого вместо состояния «Загрузка…»).
+    in property <bool> closing-loaded;
+    in property <bool> closing-set;
+    in property <bool> closing-busy;
+    in property <string> closing-error;
+    in-out property <int> closing-day: 1;
+    in-out property <int> closing-month: 1;
+    in-out property <int> closing-year: 2026;
+    callback closing-reload();
+    callback closing-close();
+    callback closing-open();
+}

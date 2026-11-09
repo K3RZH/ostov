@@ -9,6 +9,7 @@ export component AddDialog inherits Rectangle {
     in-out property <bool> server;
     in-out property <string> file;
     in-out property <string> address;
+    in-out property <string> cert;
     in-out property <string> db-name;
     // Ошибка ядра (файл не база Ostov, его нет) и «идёт проверка».
     in property <string> error;
@@ -16,8 +17,9 @@ export component AddDialog inherits Rectangle {
     callback confirmed();
     callback cancelled();
     callback choose-file();
+    callback choose-cert();
 
-    private property <bool> valid: root.server ? root.address != "" && root.db-name != "" : root.file != "";
+    private property <bool> valid: root.server ? root.address != "" && root.db-name != "" && root.cert != "" : root.file != "";
 
     background: Theme.scrim;
 
@@ -79,12 +81,26 @@ export component AddDialog inherits Rectangle {
                 placeholder: "server.local:7700";
                 text <=> root.address;
             }
+            if root.server : HorizontalLayout {
+                spacing: Theme.space-8;
+                TextField {
+                    label: "Сертификат сервера (server.crt)";
+                    placeholder: "файл, который сервер создал при первом запуске";
+                    text <=> root.cert;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    width: 112px;
+                    alignment: end;
+                    Button { text: "Выбрать…"; clicked => { root.choose-cert(); } }
+                }
+            }
             if root.server : TextField {
                 label: "Название в списке";
                 text <=> root.db-name;
             }
 
-            ErrorBanner { text: root.error; }
+            if root.error != "" : ErrorBanner { text: root.error; }
 
             HorizontalLayout {
                 spacing: Theme.space-12;

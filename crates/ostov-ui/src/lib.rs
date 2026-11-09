@@ -11,6 +11,8 @@ mod generated {
 }
 pub use generated::*;
 
+pub mod admin;
+pub mod admin_ui;
 pub mod app;
 pub mod date_input;
 pub mod engine;
@@ -19,9 +21,12 @@ pub mod local_base;
 pub mod receipts;
 pub mod receipts_ui;
 pub mod recent;
+pub mod remote_base;
 pub mod settings;
 pub mod shell;
+pub mod sorting;
 pub mod users;
+pub mod values;
 pub mod windows;
 pub mod workspace;
 
