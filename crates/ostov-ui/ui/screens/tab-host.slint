@@ -6,8 +6,10 @@ import { UsersView, UserRow } from "users-view.slint";
 import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
 import { JournalView } from "journal-view.slint";
 import { PeriodView } from "period-view.slint";
+import { ObjectListView } from "object-list-view.slint";
 
-export struct TabItem { title: string, icon: string, modified: bool, view: string, preview: bool }
+// object: объект конфигурации вкладки (имя в ядре); по нему экран списка берёт свои данные.
+export struct TabItem { title: string, icon: string, modified: bool, view: string, object: string, preview: bool }
 
 component TabView inherits Rectangle {
     in property <TabItem> tab;
@@ -182,7 +184,7 @@ export component TabHost inherits VerticalLayout {
 
     // Для каких видов вкладок экран уже есть; остальным показывается заглушка.
     pure function has-screen(view: string) -> bool {
-        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period"
+        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period" || view == "list"
     }
 
     pure function slot-x(i: int) -> length {
@@ -352,6 +354,9 @@ export component TabHost inherits VerticalLayout {
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "journal" : JournalView { }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "period" : PeriodView { }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "list" : ObjectListView {
+                    object: root.tabs[root.active-tab].object;
+                }
                 if root.tabs.length == 0 || !root.has-screen(root.tabs[root.active-tab].view) : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {

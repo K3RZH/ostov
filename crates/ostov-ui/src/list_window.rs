@@ -460,6 +460,8 @@ pub struct ListModel {
     runner: Runner,
     /// Ответ ядра приходит позже: модель нужна ему живой, но не удерживаемой им.
     this: Weak<ListModel>,
+    /// Кому сказать, что изменились число строк или ошибка: `ModelNotify` знает только строки.
+    changed: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl ListModel {
@@ -481,6 +483,7 @@ impl ListModel {
             engine,
             runner,
             this: Weak::clone(this),
+            changed: RefCell::new(None),
         });
         model.ensure_visible(0, 0);
         model
@@ -496,10 +499,26 @@ impl ListModel {
         self.state.borrow().error().cloned()
     }
 
+    /// Подписка на состояние списка: зовётся, когда пришёл ответ ядра (строки, число строк,
+    /// ошибка) или список открыт заново. Нужна подписи «Показано…» и полосе ошибки: по
+    /// `ModelNotify` их не обновить, ошибка строк не меняет. Подписчик один, новый заменяет.
+    pub fn on_changed(&self, callback: impl Fn() + 'static) {
+        *self.changed.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    fn announce(&self) {
+        // Заём снимаем до вызова: подписчик читает модель и может подписаться заново.
+        let callback = self.changed.borrow().clone();
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
     /// Повторяет упавшие окна для видимых строк.
     pub fn retry(&self) {
         let fetches = self.state.borrow_mut().retry();
         self.dispatch(fetches);
+        self.announce();
     }
 
     /// Показывает строки `first..=last`: недостающие окна грузятся в фоне. Таблица может звать
@@ -514,6 +533,7 @@ impl ListModel {
         self.state.borrow_mut().restart(query);
         self.notify.reset();
         self.ensure_visible(0, 0);
+        self.announce();
     }
 
     /// Обновляет список тем же запросом.
@@ -559,6 +579,9 @@ impl ListModel {
             Accepted::Stale | Accepted::Failed => {}
         }
         self.dispatch(fetches);
+        if accepted != Accepted::Stale {
+            self.announce();
+        }
     }
 }
 
@@ -1017,6 +1040,37 @@ mod tests {
         run_all(&queue);
         assert_eq!(model_id(&model, 15_000), Some(15_001));
         assert_eq!(*engine.seek_positions.lock().unwrap(), vec![15_000]);
+    }
+
+    #[test]
+    fn model_announces_answers_errors_and_restarts() {
+        let engine = FakeEngine::new(500);
+        let queue = Queue::default();
+        let model = model_over(&engine, &queue);
+        let calls = Rc::new(std::cell::Cell::new(0));
+        model.on_changed({
+            let calls = Rc::clone(&calls);
+            move || calls.set(calls.get() + 1)
+        });
+
+        run_all(&queue);
+        assert_eq!((calls.get(), model.total()), (1, Some(500)));
+        // Ошибка строк не меняет, но подписчик о ней узнаёт.
+        engine.fail_seek.store(true, Ordering::SeqCst);
+        assert_eq!(model.row_data(300), Some(LazyRow::Placeholder));
+        run_all(&queue);
+        assert_eq!(calls.get(), 2);
+        assert!(model.error().is_some());
+        // Повтор снимает ошибку сразу, ответ приходит следом.
+        engine.fail_seek.store(false, Ordering::SeqCst);
+        model.retry();
+        assert_eq!(calls.get(), 3);
+        assert!(model.error().is_none());
+        run_all(&queue);
+        assert_eq!(model_id(&model, 300), Some(301));
+        let after_retry = calls.get();
+        model.reload();
+        assert_eq!(calls.get(), after_retry + 1);
     }
 
     #[test]

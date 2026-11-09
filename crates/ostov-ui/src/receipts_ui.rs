@@ -1213,14 +1213,14 @@ fn line_columns() -> Vec<GridColumn> {
 /// Колонки на момент нажатия на ручку: от них считается каждое движение, а не от прошлого.
 type Snapshot = Rc<RefCell<Option<Vec<GridColumn>>>>;
 
-fn snapshot_of(model: &ModelRc<GridColumn>) -> Vec<GridColumn> {
+pub(crate) fn snapshot_of(model: &ModelRc<GridColumn>) -> Vec<GridColumn> {
     use slint::Model;
     model.iter().collect()
 }
 
 /// Пишет колонки в ту же модель на месте: заголовки и строки остаются теми же элементами,
 /// поэтому перетаскивание не прерывается (подмена модели целиком пересоздала бы заголовки).
-fn write_columns(model: &ModelRc<GridColumn>, columns: Vec<GridColumn>) {
+pub(crate) fn write_columns(model: &ModelRc<GridColumn>, columns: Vec<GridColumn>) {
     use slint::Model;
     for (i, column) in columns.into_iter().enumerate() {
         model.set_row_data(i, column);
@@ -1229,7 +1229,7 @@ fn write_columns(model: &ModelRc<GridColumn>, columns: Vec<GridColumn>) {
 
 /// Пересчитывает колонки от снимка: `delta` смещение от точки нажатия, `table_width` ширина
 /// области колонок.
-fn resized_columns(
+pub(crate) fn resized_columns(
     start: &[GridColumn],
     index: i32,
     delta: f32,

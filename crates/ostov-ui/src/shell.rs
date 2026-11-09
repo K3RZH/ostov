@@ -88,6 +88,9 @@ pub struct Tab {
     pub icon: &'static str,
     pub node: usize,
     pub view: &'static str,
+    /// Объект конфигурации пункта (имя в ядре); пусто у пунктов без объекта. По нему вкладка
+    /// списка знает, чей список показывать, в каком бы окне она ни стояла.
+    pub object: String,
     /// Документ, если вкладка открывает документ, а не весь пункт.
     pub doc: Option<DocKey>,
     /// Вкладка предпросмотра: следующее открытие без изменений заменит её.
@@ -121,10 +124,17 @@ fn known_icon(name: Option<&str>, fallback: &'static str) -> &'static str {
         .unwrap_or(fallback)
 }
 
-/// Экран вкладки объекта. Свой экран пока есть только у поступлений (`receipts_ui.rs`,
-/// временный); остальные объекты получат универсальный список (шаг A3 плана).
+/// Вид вкладки с универсальным списком объекта (`list_ui.rs`).
+pub const LIST_VIEW: &str = "list";
+
+/// Экран вкладки объекта: универсальный список. У поступлений пока свой экран
+/// (`receipts_ui.rs`, временный): он уйдёт, когда универсальный список получит форму документа.
 fn view_for(object: &str) -> &'static str {
-    if object == "receipt" { "receipts" } else { "" }
+    if object == "receipt" {
+        "receipts"
+    } else {
+        LIST_VIEW
+    }
 }
 
 /// Экраны «Администрирования» (название, значок, вид вкладки), которые доступны с такими правами.
@@ -359,6 +369,7 @@ impl Shell {
             icon: node.icon,
             node: target,
             view: node.view,
+            object: node.object.clone().unwrap_or_default(),
             doc: None,
             preview: false,
             modified: false,
@@ -410,6 +421,7 @@ impl Shell {
             icon: self.nodes[node].icon,
             node,
             view,
+            object: self.nodes[node].object.clone().unwrap_or_default(),
             doc,
             // «Главная» всегда остаётся.
             preview: node != 0,
@@ -647,6 +659,23 @@ mod tests {
         if let Some(id) = receipts {
             shell.click(id);
             assert_eq!(shell.tabs().last().map(|tab| tab.view), Some("receipts"));
+        }
+    }
+
+    #[test]
+    fn other_objects_open_the_universal_list() {
+        let meta = warehouse_meta();
+        let mut shell = Shell::from_meta(&meta, SystemRights::default());
+        for object in meta.objects.iter().filter(|o| o.name != "receipt") {
+            let id = shell.node_for_object(&object.name);
+            assert!(id.is_some(), "нет пункта «{}»", object.name);
+            if let Some(id) = id {
+                shell.click(id);
+                let tab = shell.tabs().last();
+                assert_eq!(tab.map(|tab| tab.view), Some(LIST_VIEW));
+                // Вкладка помнит свой объект: по нему экран берёт список.
+                assert_eq!(tab.map(|tab| tab.object.as_str()), Some(&*object.name));
+            }
         }
     }
 

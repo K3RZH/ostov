@@ -224,7 +224,8 @@ component GridRowView inherits Rectangle {
                     background: Theme.border-strong;
                 }
             }
-            if col.status : Chip {
+            // Строка ещё едет из ядра: статуса нет, пустой чип не рисуем.
+            if col.status && root.item.cells[i] != "" : Chip {
                 x: Theme.space-12;
                 y: (parent.height - self.height) / 2;
                 text: root.item.cells[i];
@@ -266,6 +267,9 @@ export component ErpGrid inherits Rectangle {
     callback action-chosen(int, string);
     callback sort-clicked(int);
     callback row-activated(int);
+    // Какие строки сейчас на экране (первая и последняя, с нуля): список окнами грузит по ним
+    // недостающие строки одним запросом на всю видимую область.
+    callback visible-changed(int, int);
     // Ширина колонки меняется на каждом движении ручки: начало, смещение от точки нажатия
     // (колонка, смещение, ширина области колонок), конец. Ширины пересчитывает вызывающий
     // (src/grid.rs) от ширин на момент начала, поэтому ошибки не накапливаются.
@@ -347,6 +351,12 @@ export component ErpGrid inherits Rectangle {
             }
         }
         if root.rows.length > 0 : Rectangle {
+            private property <int> first-visible: Math.max(0, Math.floor(-list.content-y / Theme.row-height));
+            private property <int> last-visible: Math.max(self.first-visible,
+                Math.min(root.rows.length - 1, Math.floor((list.visible-height - list.content-y) / Theme.row-height)));
+            init => { root.visible-changed(self.first-visible, self.last-visible); }
+            changed first-visible => { root.visible-changed(self.first-visible, self.last-visible); }
+            changed last-visible => { root.visible-changed(self.first-visible, self.last-visible); }
             list := ListView {
                 x: 0px;
                 width: parent.width - GridMetrics.track-width;
