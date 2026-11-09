@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ostov_api::{EngineError, ErrorCode};
+use ostov_api::{Connector, EngineError, ErrorCode};
 use ostov_core::local::warehouse_model;
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_to_pb, from_status, pb};
@@ -83,7 +83,11 @@ fn postgres(schema: &'static str) -> Option<Connect> {
 }
 
 async fn start(name: &str, connect: Option<Connect>) -> Running {
-    let dir = temp(name);
+    start_in(temp(name), connect).await
+}
+
+/// Сервер в готовой папке: там может уже лежать `base.db`, созданная заранее.
+async fn start_in(dir: PathBuf, connect: Option<Connect>) -> Running {
     let connect = connect.unwrap_or_else(|| sqlite(&dir));
     let hub = tokio::task::spawn_blocking(move || Hub::start(Base::new(connect, model())))
         .await
@@ -417,4 +421,69 @@ async fn client_must_trust_the_server_certificate() {
     let again = Tls::load_or_create(&s.dir.join("tls"), &["localhost".to_owned()]).unwrap();
     let first = std::fs::read_to_string(s.dir.join("tls").join(ostov_server::CERT_FILE)).unwrap();
     assert_eq!(again.cert_pem, first);
+}
+
+/// ADR-033: база с одного компьютера, где пароли заданы по мягкой политике, на сервере.
+#[tokio::test]
+async fn weak_passwords_from_local_base_do_not_pass_server() {
+    let dir = temp("weak");
+    let path = dir.join("base.db").to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let local = ostov_core::LocalConnector::new(model())
+            .with_password_policy(ostov_core::PasswordPolicy::LOCAL);
+        let engine = local.create_local(&path, None, None).unwrap();
+        engine.create_first_admin(ADMIN.0, ADMIN.1).unwrap();
+        for (login, password) in [("keeper", "1234"), ("cook", "")] {
+            engine
+                .admin_add_user(&ostov_api::NewUser {
+                    login: login.into(),
+                    display_name: "Кладовщик".into(),
+                    role: "storekeeper".into(),
+                    password: password.into(),
+                })
+                .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut s = start_in(dir, None).await;
+    let c = &mut s.client;
+    for weak in [("keeper", "1234"), ("cook", "")] {
+        let err = error(c.login(creds(weak)).await);
+        assert_eq!(err.code, ErrorCode::Forbidden, "{weak:?}");
+        assert!(err.message.contains("сменить"), "{}", err.message);
+    }
+    let boss = c.login(creds(ADMIN)).await.unwrap().into_inner().token;
+    let password = |login: &str, password: &str| pb::UserPassword {
+        login: login.into(),
+        password: password.into(),
+    };
+    // На сервере новый пароль тоже только от 12 символов.
+    let short = error(
+        c.admin_set_user_password(authed(password("keeper", "12345"), &boss))
+            .await,
+    );
+    assert_eq!(short.code, ErrorCode::Validation);
+    c.admin_set_user_password(authed(password("keeper", KEEPER.1), &boss))
+        .await
+        .unwrap();
+    let keeper = c.login(creds(KEEPER)).await.unwrap().into_inner().token;
+    c.list(authed(list("goods"), &keeper)).await.unwrap();
+    // Новый пользователь на сервере с коротким или пустым паролем не создаётся.
+    for weak in ["", "1234"] {
+        let err = error(
+            c.admin_add_user(authed(
+                pb::NewUser {
+                    login: "temp".into(),
+                    display_name: "Временный".into(),
+                    role: "storekeeper".into(),
+                    password: weak.into(),
+                },
+                &boss,
+            ))
+            .await,
+        );
+        assert_eq!(err.code, ErrorCode::Validation);
+    }
 }
