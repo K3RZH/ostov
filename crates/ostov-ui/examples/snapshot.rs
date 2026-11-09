@@ -99,10 +99,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ostov_ui::app::refresh(&window, &shell);
             ostov_ui::app::refresh_users(&window, &ostov_ui::users::Directory::demo());
             window.set_roles(ModelRc::new(VecModel::from(
-                ostov_ui::users::ROLES
-                    .iter()
-                    .map(|role| (*role).into())
-                    .collect::<Vec<slint::SharedString>>(),
+                ["admin", "storekeeper"]
+                    .map(slint::SharedString::from)
+                    .to_vec(),
             )));
             window.set_adding_user(screen == "user-dialog");
             window.set_nu_role(1);

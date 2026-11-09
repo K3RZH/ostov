@@ -1,33 +1,25 @@
 //! Логика переходов между страницами приложения: выбор базы, вход, главная.
 //! Локальная база открывается и проверяет вход через ядро; сервер подключим позже.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use crate::engine::{Engine, Meta, NewAdmin, SessionInfo, call_in_background};
-use crate::login::{delay_secs, verify};
+use crate::engine::{
+    Engine, EngineResult, Meta, NewAdmin, NewUser, SessionInfo, call_in_background,
+};
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
-use crate::users::{Directory, ROLES};
+use crate::users::Directory;
 use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
 const PAGE_LOGIN: i32 = 1;
 const PAGE_MAIN: i32 = 2;
-
-/// Защита локальной базы в `RecentDb.protection`: пароль на файл и пользователи независимы.
-const PROTECTION_USERS: i32 = 1;
-const PROTECTION_PASSWORD: i32 = 2;
-/// Пароль на файл и пользователи вместе: сначала пароль файла, потом вход пользователя.
-const PROTECTION_BOTH: i32 = 3;
-/// Сервер без администратора: первый вход создаёт его (СТ-36).
-const PROTECTION_FIRST_RUN: i32 = 4;
 
 /// Какая страница входа нужна после выбора базы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,22 +34,6 @@ pub enum LoginKind {
     LocalPassword,
     /// Локальная база без защиты: сразу открываем.
     None,
-}
-
-/// Выбирает страницу входа по типу и защите базы (0 нет, 1 пользователи, 2 пароль на файл).
-pub fn login_kind(server: bool, protection: i32) -> LoginKind {
-    if server {
-        return if protection == PROTECTION_FIRST_RUN {
-            LoginKind::ServerFirstRun
-        } else {
-            LoginKind::Server
-        };
-    }
-    match protection {
-        PROTECTION_USERS => LoginKind::LocalUser,
-        PROTECTION_PASSWORD | PROTECTION_BOTH => LoginKind::LocalPassword,
-        _ => LoginKind::None,
-    }
 }
 
 /// Текст главной кнопки входа для вида страницы.
@@ -127,41 +103,6 @@ pub fn configure_login(
         }
         LoginKind::None => {}
     }
-}
-
-/// Показывает отказ и блокирует кнопку на время задержки, считая секунды таймером.
-fn start_lock(
-    window: &AppWindow,
-    timer: &slint::Timer,
-    kind: LoginKind,
-    message: &'static str,
-    seconds: u32,
-) {
-    let remaining = Rc::new(Cell::new(seconds));
-    show_lock(window, kind, message, seconds);
-    let weak = window.as_weak();
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_secs(1),
-        move || {
-            let Some(window) = weak.upgrade() else { return };
-            let left = remaining.get().saturating_sub(1);
-            remaining.set(left);
-            if left == 0 {
-                window.set_locked(false);
-                window.set_error("".into());
-                window.set_button_text(button_text(kind).into());
-            } else {
-                show_lock(&window, kind, message, left);
-            }
-        },
-    );
-}
-
-fn show_lock(window: &AppWindow, kind: LoginKind, message: &str, seconds: u32) {
-    window.set_locked(true);
-    window.set_error(format!("{message} Повторить можно через {seconds} с.").into());
-    window.set_button_text(format!("{} (через {seconds} с)", button_text(kind)).into());
 }
 
 fn index(value: i32) -> Option<usize> {
@@ -234,7 +175,7 @@ pub fn refresh_users(window: &AppWindow, directory: &Directory) {
         .iter()
         .map(|user| UserRow {
             login: user.login.as_str().into(),
-            name: user.name.as_str().into(),
+            name: user.display_name.as_str().into(),
             role: user.role.as_str().into(),
             active: user.active,
         })
@@ -301,10 +242,11 @@ pub fn new_database(server: bool, name: &str, folder: &str, address: &str) -> Re
 
 /// Заменяет домашнюю папку на `~`: так путь короче и привычнее.
 fn short_home(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
+    // Сравниваем с разделителем: иначе /home/kerzh2/… стало бы «~2/…».
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home.trim_end_matches('/');
+    match path.strip_prefix(home).filter(|rest| rest.starts_with('/')) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
         _ => path.to_owned(),
     }
 }
@@ -407,11 +349,8 @@ pub fn current_settings(window: &AppWindow) -> Settings {
 struct Session {
     name: String,
     server: bool,
-    protection: i32,
     /// Текущий вид страницы входа (у базы «пароль и пользователи» их два подряд).
     stage: Option<LoginKind>,
-    /// Неудачные попытки подряд: от них зависит задержка (для сервера; локальную держит ядро).
-    failures: u32,
     /// Открытая база. Пока она здесь, файл занят: другая программа его не откроет.
     engine: Option<Arc<dyn Engine>>,
     /// Метаданные базы для этого пользователя (меню и объекты уже обрезаны по правам).
@@ -428,18 +367,31 @@ fn is_admin(user: Option<&SessionInfo>) -> bool {
     user.is_none_or(|user| user.roles.iter().any(|role| role == ADMIN_ROLE))
 }
 
-/// Открывает главную страницу выбранной базы и подключает к ней список поступлений.
-fn enter_main(
-    app: &AppWindow,
-    shell: &Rc<RefCell<Shell>>,
-    receipts: &ReceiptsUi,
-    session: &Session,
-) {
-    *shell.borrow_mut() = open_main(app, session);
-    receipts.after(app, &shell.borrow());
+/// Экраны главной страницы, которым нужна открытая база.
+#[derive(Clone)]
+struct Screens {
+    shell: Rc<RefCell<Shell>>,
+    receipts: ReceiptsUi,
+    users: UsersUi,
+}
+
+/// Открывает главную страницу выбранной базы и подключает к ней экраны.
+fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
+    *screens.shell.borrow_mut() = open_main(app, session);
+    screens.receipts.after(app, &screens.shell.borrow());
     match &session.engine {
-        Some(engine) => receipts.attach(engine.clone()),
-        None => receipts.show_error("Работа с сервером в интерфейсе ещё не подключена."),
+        Some(engine) => screens.receipts.attach(engine.clone()),
+        None => screens
+            .receipts
+            .show_error("Работа с сервером в интерфейсе ещё не подключена."),
+    }
+    let roles = session.meta.as_ref().map_or_else(Vec::new, |meta| {
+        meta.roles.iter().map(|role| role.as_str().into()).collect()
+    });
+    app.set_roles(ModelRc::new(VecModel::<slint::SharedString>::from(roles)));
+    screens.users.clear();
+    if session.admin {
+        screens.users.reload(app);
     }
     app.set_password("".into());
     app.set_repeat("".into());
@@ -447,17 +399,11 @@ fn enter_main(
 }
 
 /// Открывает локальную базу в фоне и спрашивает ядро, нужен ли вход (`hello`).
-fn open_local(
-    app: &AppWindow,
-    db: RecentDb,
-    session: &Rc<RefCell<Session>>,
-    shell: &Rc<RefCell<Shell>>,
-    receipts: &ReceiptsUi,
-) {
+fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, screens: &Screens) {
     app.set_start_busy(true);
     let path = db.path.to_string();
     let weak = app.as_weak();
-    let (session, shell, receipts) = (session.clone(), shell.clone(), receipts.clone());
+    let (session, screens) = (session.clone(), screens.clone());
     call_in_background(
         move || {
             let engine = crate::local_base::open(&path)?;
@@ -495,7 +441,7 @@ fn open_local(
             };
             if kind == LoginKind::None {
                 show_user(&app, None);
-                enter_main(&app, &shell, &receipts, &session.borrow());
+                enter_main(&app, &screens, &session.borrow());
                 return;
             }
             configure_login(&app, kind, &db.name, &db.path);
@@ -505,12 +451,7 @@ fn open_local(
 }
 
 /// Вход в локальную базу: пароль проверяет ядро, задержку после неудач тоже держит оно (СТ-32).
-fn submit_local_login(
-    app: &AppWindow,
-    session: &Rc<RefCell<Session>>,
-    shell: &Rc<RefCell<Shell>>,
-    receipts: &ReceiptsUi,
-) {
+fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Screens) {
     let Some(engine) = session.borrow().engine.clone() else {
         return;
     };
@@ -520,7 +461,9 @@ fn submit_local_login(
     app.set_locked(true);
     app.set_button_text("Проверяем…".into());
     let weak = app.as_weak();
-    let (session, shell, receipts) = (session.clone(), shell.clone(), receipts.clone());
+    let (session, screens) = (session.clone(), screens.clone());
+    // Пока ядро проверяет пароль, можно уйти «Назад» и открыть другую базу: такой ответ лишний.
+    let asked = engine.clone();
     call_in_background(
         move || {
             let user = engine.login(&login, &password)?;
@@ -529,6 +472,15 @@ fn submit_local_login(
         },
         move |result| {
             let Some(app) = weak.upgrade() else { return };
+            let current = session
+                .borrow()
+                .engine
+                .as_ref()
+                .is_some_and(|engine| Arc::ptr_eq(engine, &asked));
+            drop(asked);
+            if !current {
+                return;
+            }
             app.set_locked(false);
             app.set_button_text(button_text(LoginKind::LocalUser).into());
             match result {
@@ -539,9 +491,12 @@ fn submit_local_login(
                         session.meta = Some(meta);
                         session.admin = is_admin(Some(&user));
                     }
-                    enter_main(&app, &shell, &receipts, &session.borrow());
+                    enter_main(&app, &screens, &session.borrow());
                 }
-                Err(error) => app.set_error(error.message.into()),
+                Err(error) => {
+                    app.set_password("".into());
+                    app.set_error(error.message.into());
+                }
             }
         },
     );
@@ -768,35 +723,34 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let shell = Rc::new(RefCell::new(Shell::empty()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
     let windows = crate::windows::Windows::new(&receipts);
-    let directory = Rc::new(RefCell::new(Directory::demo()));
-    refresh_users(&app, &directory.borrow());
-    app.set_roles(ModelRc::new(VecModel::from(
-        ROLES
-            .iter()
-            .map(|role| (*role).into())
-            .collect::<Vec<slint::SharedString>>(),
-    )));
     let session = Rc::new(RefCell::new(Session::default()));
-    // Таймер задержки после неудачных попыток входа (должен жить, пока идёт отсчёт).
-    let lock_timer = Rc::new(slint::Timer::default());
+    let directory = Rc::new(RefCell::new(Directory::default()));
+    let screens = Screens {
+        shell: shell.clone(),
+        receipts: receipts.clone(),
+        users: UsersUi {
+            main: app.as_weak(),
+            windows: windows.clone(),
+            directory: directory.clone(),
+            session: session.clone(),
+        },
+    };
 
     // Закрытие окна пользователем завершает приложение.
     app.window().on_close_requested(quit_on_close);
 
     app.on_open({
         let app = app.as_weak();
-        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
-        let receipts = receipts.clone();
+        let (session, screens) = (session.clone(), screens.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
             let Some(db) = index(app.get_selected_recent()).and_then(|i| recent.row_data(i)) else {
                 return;
             };
-            lock_timer.stop();
             app.set_start_error("".into());
             if !db.server {
-                open_local(&app, db, &session, &shell, &receipts);
+                open_local(&app, db, &session, &screens);
                 return;
             }
             // Сервер подключается через ostov-client (RemoteConnector), это следующий шаг.
@@ -809,68 +763,32 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     app.on_submit({
         let app = app.as_weak();
-        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
-        let receipts = receipts.clone();
+        let (session, screens) = (session.clone(), screens.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let kind = session.borrow().stage.unwrap_or(LoginKind::None);
-            if kind == LoginKind::LocalUser {
-                submit_local_login(&app, &session, &shell, &receipts);
-                return;
-            }
-            let result = verify(
-                kind,
-                app.get_login().as_str(),
-                app.get_password().as_str(),
-                app.get_repeat().as_str(),
-            );
-            if let Err(rejection) = result {
-                let failures = {
-                    let mut session = session.borrow_mut();
-                    if rejection.counts {
-                        session.failures += 1;
-                    }
-                    session.failures
-                };
-                let wait = if rejection.counts {
-                    delay_secs(failures)
-                } else {
-                    0
-                };
-                if wait > 0 {
-                    start_lock(&app, &lock_timer, kind, rejection.message, wait);
-                } else {
-                    app.set_error(rejection.message.into());
+            match kind {
+                LoginKind::LocalUser => submit_local_login(&app, &session, &screens),
+                // Без ядра вход не пускаем: сервер (ostov-client) и пароль файла (В-2) ещё не
+                // подключены, а поддельная проверка на этом пути опасна.
+                LoginKind::Server
+                | LoginKind::ServerFirstRun
+                | LoginKind::LocalPassword
+                | LoginKind::None => {
+                    app.set_error("Этот вход ещё не подключён к ядру.".into());
                 }
-                return;
             }
-            // Сервер и пароль файла ядро пока не проверяет (В-2, ostov-client не подключён).
-            let (name, protection) = {
-                let mut session = session.borrow_mut();
-                session.failures = 0;
-                (session.name.clone(), session.protection)
-            };
-            if kind == LoginKind::LocalPassword && protection == PROTECTION_BOTH {
-                // Файл открыт: теперь вход пользователя.
-                session.borrow_mut().stage = Some(LoginKind::LocalUser);
-                configure_login(&app, LoginKind::LocalUser, &name, &app.get_source_detail());
-                return;
-            }
-            show_user(&app, None);
-            enter_main(&app, &shell, &receipts, &session.borrow());
         }
     });
 
     // «Назад к выбору базы» и «Сменить»: вернуться к списку баз.
     let to_start = {
         let app = app.as_weak();
-        let (lock_timer, session, receipts) =
-            (lock_timer.clone(), session.clone(), receipts.clone());
+        let (session, receipts) = (session.clone(), receipts.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            lock_timer.stop();
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
-            session.borrow_mut().engine = None;
+            *session.borrow_mut() = Session::default();
             receipts.detach();
             app.set_password("".into());
             app.set_repeat("".into());
@@ -1016,14 +934,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
-    wire_users(&app, &app, &directory, &windows);
+    wire_users(&app, &screens.users);
     windows.on_host_created({
-        let (main, directory, windows) = (app.as_weak(), directory.clone(), windows.clone());
+        let (main, users) = (app.as_weak(), screens.users.clone());
         move |window| {
             if let Some(main) = main.upgrade() {
-                refresh_users(window, &directory.borrow());
+                refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
-                wire_users(window, &main, &directory, &windows);
+                wire_users(window, &users);
             }
         }
     });
@@ -1034,63 +952,130 @@ pub fn run() -> Result<(), slint::PlatformError> {
     slint::run_event_loop_until_quit()
 }
 
-/// Подключает «Пользователи и роли» к окну `window`. Справочник один: изменение видно во всех окнах.
-fn wire_users(
-    window: &AppWindow,
-    main: &AppWindow,
-    directory: &Rc<RefCell<Directory>>,
-    windows: &crate::windows::Windows,
-) {
-    let show_all = {
-        let (main, windows, directory) = (main.as_weak(), windows.clone(), directory.clone());
-        move || {
-            if let Some(main) = main.upgrade() {
-                refresh_users(&main, &directory.borrow());
-            }
-            windows.each(|host| refresh_users(host, &directory.borrow()));
+/// «Пользователи и роли» через ядро: список, добавление, включение и отключение. Справочник
+/// один на все окна; проверки (пароль, роль, последний администратор) делает ядро.
+#[derive(Clone)]
+struct UsersUi {
+    main: slint::Weak<AppWindow>,
+    windows: crate::windows::Windows,
+    directory: Rc<RefCell<Directory>>,
+    session: Rc<RefCell<Session>>,
+}
+
+impl UsersUi {
+    fn show_all(&self) {
+        if let Some(main) = self.main.upgrade() {
+            refresh_users(&main, &self.directory.borrow());
         }
-    };
+        self.windows
+            .each(|host| refresh_users(host, &self.directory.borrow()));
+    }
+
+    /// Забывает пользователей прошлой базы.
+    fn clear(&self) {
+        *self.directory.borrow_mut() = Directory::default();
+        self.show_all();
+    }
+
+    /// Выполняет команду ядра в фоне и перечитывает список; `done` получает текст ошибки ядра.
+    fn run(
+        &self,
+        window: &AppWindow,
+        command: impl FnOnce(&dyn Engine) -> EngineResult<()> + Send + 'static,
+        done: impl FnOnce(&AppWindow, Result<(), String>) + 'static,
+    ) {
+        let Some(engine) = self.session.borrow().engine.clone() else {
+            return;
+        };
+        let (users, weak) = (self.clone(), window.as_weak());
+        call_in_background(
+            move || {
+                command(&*engine)?;
+                engine.admin_users()
+            },
+            move |result| {
+                let Some(window) = weak.upgrade() else { return };
+                match result {
+                    Ok(list) => {
+                        *users.directory.borrow_mut() = Directory::new(list);
+                        users.show_all();
+                        done(&window, Ok(()));
+                    }
+                    Err(error) => done(&window, Err(error.message)),
+                }
+            },
+        );
+    }
+
+    fn reload(&self, window: &AppWindow) {
+        self.run(
+            window,
+            |_| Ok(()),
+            |window, result| window.set_user_message(result.err().unwrap_or_default().into()),
+        );
+    }
+}
+
+/// Подключает «Пользователи и роли» к окну `window`.
+fn wire_users(window: &AppWindow, users: &UsersUi) {
     window.on_user_toggle({
-        let (window, directory, show_all) = (window.as_weak(), directory.clone(), show_all.clone());
+        let (window, users) = (window.as_weak(), users.clone());
         move |row| {
             let Some(window) = window.upgrade() else {
                 return;
             };
-            let result = index(row).map_or(Ok(()), |i| directory.borrow_mut().toggle(i));
-            window.set_user_message(result.err().unwrap_or_default().into());
-            show_all();
+            let Some((login, active)) = index(row).and_then(|i| {
+                users
+                    .directory
+                    .borrow()
+                    .get(i)
+                    .map(|u| (u.login.clone(), u.active))
+            }) else {
+                return;
+            };
+            users.run(
+                &window,
+                move |engine| engine.admin_set_user_active(&login, !active),
+                |window, result| window.set_user_message(result.err().unwrap_or_default().into()),
+            );
         }
     });
 
     window.on_user_add_confirmed({
-        let (window, directory) = (window.as_weak(), directory.clone());
+        let (window, users) = (window.as_weak(), users.clone());
         move || {
             let Some(window) = window.upgrade() else {
                 return;
             };
-            let role = index(window.get_nu_role())
-                .and_then(|i| ROLES.get(i).copied())
-                .unwrap_or(ROLES[1]);
-            let result = directory.borrow_mut().add(
-                window.get_nu_login().as_str(),
-                window.get_nu_name().as_str(),
-                role,
+            let Some(role) =
+                index(window.get_nu_role()).and_then(|i| window.get_roles().row_data(i))
+            else {
+                window.set_user_error("Выберите роль.".into());
+                return;
+            };
+            let user = NewUser {
+                login: window.get_nu_login().trim().to_owned(),
+                display_name: window.get_nu_name().trim().to_owned(),
+                role: role.to_string(),
+                password: window.get_nu_password().to_string(),
+            };
+            window.set_user_error("".into());
+            users.run(
+                &window,
+                move |engine| engine.admin_add_user(&user),
+                |window, result| match result {
+                    Err(message) => window.set_user_error(message.into()),
+                    Ok(()) => {
+                        window.set_user_message("".into());
+                        window.set_nu_login("".into());
+                        window.set_nu_name("".into());
+                        window.set_nu_role(0);
+                        window.set_nu_password("".into());
+                        window.set_nu_repeat("".into());
+                        window.set_adding_user(false);
+                    }
+                },
             );
-            match result {
-                Err(message) => window.set_user_error(message.into()),
-                Ok(()) => {
-                    show_all();
-                    window.set_user_message("".into());
-                    window.set_user_error("".into());
-                    window.set_nu_login("".into());
-                    window.set_nu_name("".into());
-                    window.set_nu_role(1);
-                    // Пароль пользователя здесь не храним: его задаст ядро (хэш Argon2id).
-                    window.set_nu_password("".into());
-                    window.set_nu_repeat("".into());
-                    window.set_adding_user(false);
-                }
-            }
         }
     });
 }
@@ -1103,21 +1088,6 @@ fn quit_on_close() -> slint::CloseRequestResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn server_always_asks_login() {
-        assert_eq!(login_kind(true, 0), LoginKind::Server);
-        assert_eq!(login_kind(true, 2), LoginKind::Server);
-        assert_eq!(login_kind(true, 4), LoginKind::ServerFirstRun);
-    }
-
-    #[test]
-    fn local_depends_on_protection() {
-        assert_eq!(login_kind(false, 1), LoginKind::LocalUser);
-        assert_eq!(login_kind(false, 2), LoginKind::LocalPassword);
-        assert_eq!(login_kind(false, 3), LoginKind::LocalPassword);
-        assert_eq!(login_kind(false, 0), LoginKind::None);
-    }
 
     #[test]
     fn initials_take_two_first_letters() {
@@ -1133,5 +1103,34 @@ mod tests {
         assert_eq!(db.name, "Склад.sqlite");
         assert_eq!(db.path, "/data/Ostov/Склад.sqlite");
         assert!(!db.server);
+    }
+
+    #[test]
+    fn short_home_needs_separator() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let home = home.trim_end_matches('/');
+        if home.is_empty() {
+            return;
+        }
+        assert_eq!(
+            short_home(&format!("{home}/Ostov/a.sqlite")),
+            "~/Ostov/a.sqlite"
+        );
+        let neighbour = format!("{home}2/a.sqlite");
+        assert_eq!(short_home(&neighbour), neighbour);
+    }
+
+    #[test]
+    fn base_without_users_is_admin() {
+        assert!(is_admin(None));
+        let user = |roles: &[&str]| SessionInfo {
+            login: "u".into(),
+            display_name: "".into(),
+            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+        };
+        assert!(is_admin(Some(&user(&["admin"]))));
+        assert!(!is_admin(Some(&user(&["storekeeper"]))));
     }
 }
