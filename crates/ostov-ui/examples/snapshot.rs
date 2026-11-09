@@ -1,6 +1,6 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
-//! Экраны: showcase, main, settings, start, start-error, start-empty, create-local, create-server, add-file, add-server,
+//! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error.
 
 use std::io::Write;
@@ -364,6 +364,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Файл базы «~/Ostov/Склад.sqlite» уже открыт другой программой.".into(),
                 );
             }
+            save(&window, dark, &path)
+        }
+        // Подтверждение «Убрать из списка»: для файла (строка 0) и для сервера (строка 1).
+        "start-forget" | "start-forget-server" => {
+            let window = app_window(0)?;
+            window.set_recent(ModelRc::new(VecModel::from(sample_recent())));
+            window.set_selected_recent(i32::from(screen == "start-forget-server"));
+            window.set_forgetting(true);
             save(&window, dark, &path)
         }
         "start-empty" => {

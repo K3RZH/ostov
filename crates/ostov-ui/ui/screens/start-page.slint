@@ -1,6 +1,7 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { Chip } from "../components/chip.slint";
+import { IconButton } from "../components/icon-button.slint";
 import { BrandPanel } from "brand-panel.slint";
 import { ErrorBanner } from "../components/error-banner.slint";
 
@@ -11,7 +12,10 @@ export struct RecentDb { name: string, path: string, when: string, server: bool,
 component RecentRow inherits Rectangle {
     in property <RecentDb> db;
     in property <bool> selected;
+    // Базу, которая открывается, из списка не убрать: ответ придёт к строке, которой уже нет.
+    in property <bool> busy;
     callback chosen();
+    callback forget();
 
     height: 52px;
     border-radius: Shape.control-radius;
@@ -65,6 +69,18 @@ component RecentRow inherits Rectangle {
                 color: Theme.text-muted;
             }
         }
+        // «Убрать из списка» у строки под мышкой и у выбранной. Место держит и скрытая кнопка:
+        // строки не прыгают. Пока мышь на самом крестике, строка его не прячет.
+        VerticalLayout {
+            alignment: center;
+            close := IconButton {
+                icon: "close";
+                control-size: Theme.control-sm;
+                visible: root.selected || touch.has-hover || close.has-hover;
+                enabled: !root.busy;
+                clicked => { root.forget(); }
+            }
+        }
     }
 }
 
@@ -82,6 +98,8 @@ export component StartPage inherits Rectangle {
     callback open();
     callback create-database();
     callback add-existing();
+    // «Убрать из списка» (крестик в строке): подтверждение показывает окно приложения.
+    callback forget();
 
     background: Theme.bg;
 
@@ -112,7 +130,10 @@ export component StartPage inherits Rectangle {
                         for db[index] in root.recent : RecentRow {
                             db: db;
                             selected: index == root.selected-recent;
+                            busy: root.busy;
                             chosen => { root.selected-recent = index; }
+                            // Крестик чужой строки сначала выбирает её: подтверждение говорит о ней.
+                            forget => { root.selected-recent = index; root.forget(); }
                         }
                     }
                     if root.error != "" : ErrorBanner { text: root.error; }
