@@ -1009,6 +1009,15 @@ impl ReceiptsUi {
         self.state.borrow().engine.is_some()
     }
 
+    /// Отключает ядро при возврате к выбору базы: файл базы освобождается, а строки прошлой
+    /// базы не мелькают в следующей.
+    pub fn detach(&self) {
+        let mut state = self.state.borrow_mut();
+        state.engine = None;
+        state.all.clear();
+        state.catalogs = Default::default();
+    }
+
     /// Показывает ошибку подключения вместо списка.
     pub fn show_error(&self, message: &str) {
         for window in all_windows(&self.state.borrow()) {

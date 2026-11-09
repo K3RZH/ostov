@@ -3975,6 +3975,7 @@ version = "0.1.0"
 dependencies = [
  "ostov-api",
  "ostov-core",
+ "ostov-meta",
  "rfd",
  "slint",
  "slint-build",

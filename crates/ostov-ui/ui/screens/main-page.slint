@@ -14,12 +14,13 @@ component Separator inherits Rectangle {
 }
 
 // Главная страница: шапка, навигация, вкладки, содержимое, строка состояния.
-// Сейчас заглушка: данные примерные, содержимое вкладок появится вместе с ядром.
+// База, режим и пользователь приходят из Rust (src/app.rs) после открытия базы.
 export component MainPage inherits Rectangle {
-    in property <string> base-name: "Кафе-2026";
-    in property <string> database-name: "Кафе-2026.sqlite";
-    in property <string> mode-text: "Режим: локально";
-    in property <string> user-text: "Артём (кладовщик)";
+    in property <string> base-name;
+    in property <string> database-name;
+    in property <string> mode-text;
+    in property <string> user-text;
+    in property <string> user-initials;
     in property <string> status-message: "Готово";
     in property <string> app-version: "v0.1.0";
     in property <[NavRow]> nav;
@@ -158,7 +159,7 @@ export component MainPage inherits Rectangle {
                         height: 28px;
                         border-radius: 14px;
                         background: Theme.accent-soft;
-                        Text { text: "АК"; font-size: Theme.font-caption; font-weight: 600; color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { text: root.user-initials; font-size: Theme.font-caption; font-weight: 600; color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
                     }
                 }
             }

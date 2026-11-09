@@ -19,6 +19,7 @@ pub mod local_base;
 pub mod login;
 pub mod receipts;
 pub mod receipts_ui;
+pub mod recent;
 pub mod settings;
 pub mod shell;
 pub mod users;

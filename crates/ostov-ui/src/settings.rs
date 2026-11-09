@@ -118,9 +118,14 @@ impl Settings {
 }
 
 fn path() -> Option<PathBuf> {
+    config_file("ui.conf")
+}
+
+/// Файл в папке настроек приложения: `$XDG_CONFIG_HOME/ostov/` или `~/.config/ostov/`.
+pub(crate) fn config_file(name: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("ostov").join("ui.conf"))
+    Some(base.join("ostov").join(name))
 }

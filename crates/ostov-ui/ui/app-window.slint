@@ -17,12 +17,14 @@ import { WindowBar } from "components/window-bar.slint";
 // оставались невидимые окна. Размер окна при смене страницы задаёт Rust (src/app.rs).
 export component AppWindow inherits Window {
     in-out property <int> page: 0;
-    in property <string> config-name: "Управление складом";
-    in property <string> config-info: "Конфигурация · версия 1.2.0";
+    in property <string> config-name;
+    in property <string> config-info;
 
     // Выбор базы
     in-out property <int> selected-recent <=> start-page.selected-recent;
     in-out property <[RecentDb]> recent <=> start-page.recent;
+    in property <string> start-error <=> start-page.error;
+    in property <bool> start-busy <=> start-page.busy;
     callback open <=> start-page.open;
 
     // Окно «Создать базу»: состояние формы живёт здесь, окно показывается поверх выбора базы.
@@ -38,6 +40,8 @@ export component AppWindow inherits Window {
     in-out property <string> new-password-repeat;
     in-out property <bool> new-protect-password;
     in-out property <bool> new-protect-users;
+    in-out property <string> create-error;
+    in property <bool> create-busy;
     callback create-confirmed();
     callback choose-folder();
 
@@ -47,6 +51,8 @@ export component AppWindow inherits Window {
     in-out property <string> add-file;
     in-out property <string> add-address;
     in-out property <string> add-name;
+    in-out property <string> add-error;
+    in property <bool> add-busy;
     callback add-confirmed();
     callback choose-file();
 
@@ -98,6 +104,8 @@ export component AppWindow inherits Window {
     in property <string> base-name <=> main-page.base-name;
     in property <string> database-name <=> main-page.database-name;
     in property <string> mode-text <=> main-page.mode-text;
+    in property <string> user-text <=> main-page.user-text;
+    in property <string> user-initials <=> main-page.user-initials;
     in property <[NavRow]> nav <=> main-page.nav;
     in property <[TabItem]> tabs <=> main-page.tabs;
     in property <int> active-tab <=> main-page.active-tab;
@@ -240,10 +248,13 @@ export component AppWindow inherits Window {
         password-repeat <=> root.new-password-repeat;
         protect-password <=> root.new-protect-password;
         protect-users <=> root.new-protect-users;
+        error: root.create-error;
+        busy: root.create-busy;
         confirmed => { root.create-confirmed(); }
         choose-folder => { root.choose-folder(); }
         cancelled => {
             root.creating = false;
+            root.create-error = "";
             root.new-password = "";
             root.new-password-repeat = "";
             root.new-admin-password = "";
@@ -260,8 +271,10 @@ export component AppWindow inherits Window {
         file <=> root.add-file;
         address <=> root.add-address;
         db-name <=> root.add-name;
+        error: root.add-error;
+        busy: root.add-busy;
         confirmed => { root.add-confirmed(); }
-        cancelled => { root.adding = false; }
+        cancelled => { root.adding = false; root.add-error = ""; }
         choose-file => { root.choose-file(); }
     }
 

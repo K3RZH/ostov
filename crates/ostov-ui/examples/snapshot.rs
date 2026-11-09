@@ -1,6 +1,6 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
-//! Экраны: showcase, main, settings, start, start-empty, create-local, create-server, add-file, add-server,
+//! Экраны: showcase, main, settings, start, start-error, start-empty, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error.
 
 use std::io::Write;
@@ -43,6 +43,22 @@ fn app_window(page: i32) -> Result<ostov_ui::AppWindow, Box<dyn std::error::Erro
         .set_size(slint::LogicalSize::new(width, height));
     window.set_page(page);
     Ok(window)
+}
+
+/// Недавние базы для снимка стартовой страницы (в приложении список читается из файла).
+fn sample_recent() -> Vec<ostov_ui::RecentDb> {
+    let row = |name: &str, path: &str, server: bool| ostov_ui::RecentDb {
+        name: name.into(),
+        path: path.into(),
+        when: "".into(),
+        server,
+        protection: 0,
+    };
+    vec![
+        row("Склад.sqlite", "~/Ostov/Склад.sqlite", false),
+        row("Кафе, общая база", "server.local:7700", true),
+        row("Бар-2025.sqlite", "~/Документы/Бар-2025.sqlite", false),
+    ]
 }
 
 /// Демо-база для снимков: свой файл во временной папке (не трогает базу приложения).
@@ -249,7 +265,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_add_server(screen == "add-server");
             save(&window, dark, &path)
         }
-        "start" => save(&app_window(0)?, dark, &path),
+        "start" | "start-error" => {
+            let window = app_window(0)?;
+            window.set_recent(ModelRc::new(VecModel::from(sample_recent())));
+            if screen == "start-error" {
+                window.set_start_error(
+                    "Файл базы «~/Ostov/Склад.sqlite» уже открыт другой программой.".into(),
+                );
+            }
+            save(&window, dark, &path)
+        }
         "start-empty" => {
             let window = app_window(0)?;
             window.set_recent(ModelRc::new(VecModel::default()));
