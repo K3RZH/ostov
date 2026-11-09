@@ -103,6 +103,11 @@ pub fn add_user(
             "имя пользователя не может быть пустым".into(),
         ));
     }
+    if display_name.contains('\0') {
+        return Err(SecError::Invalid(
+            "имя пользователя: нельзя символ с кодом 0".into(),
+        ));
+    }
     check_role(&user.role, roles)?;
     user.password.check_length(policy)?;
     if find(db, &login, false)?.is_some() {

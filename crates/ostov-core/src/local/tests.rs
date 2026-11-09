@@ -2347,3 +2347,16 @@ fn console_reset_needs_no_login_but_strict_password() {
     assert_eq!(reset.user, "консоль сервера");
     assert!(!reset.details.contains(ADMIN_PASSWORD));
 }
+
+#[test]
+fn nul_in_text_is_validation_not_database_error() {
+    let base = Base::new("nul-text");
+    let engine = base.create();
+    let data = ObjectData {
+        fields: fields(&[("name", text("Мука\0"))]),
+        ..ObjectData::default()
+    };
+    let err = engine.save("goods", &data, PostAction::Write).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("кодом 0"), "{}", err.message);
+}

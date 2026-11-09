@@ -123,6 +123,13 @@ pub(crate) fn to_value(def: &FieldDef, value: &FieldValue) -> Result<Value, Core
     Ok(match (def.kind, value) {
         (_, FieldValue::Null) => Value::Null,
         (FieldKind::Int, FieldValue::Int(v)) => Value::Int(*v),
+        // PostgreSQL символ с кодом 0 в тексте не принимает: отказываем одинаково на обеих базах.
+        (FieldKind::Text, FieldValue::Text(v)) if v.contains('\0') => {
+            return Err(CoreError::Invalid(format!(
+                "поле «{}»: в тексте нельзя символ с кодом 0",
+                def.title
+            )));
+        }
         (FieldKind::Text, FieldValue::Text(v)) => Value::Text(v.clone()),
         (FieldKind::Decimal { scale }, FieldValue::Decimal(v)) => {
             Value::Int(to_scale(def, *v, scale)?.units())

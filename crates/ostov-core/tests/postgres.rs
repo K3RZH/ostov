@@ -186,6 +186,12 @@ fn warehouse_on_postgres() {
         })
         .unwrap();
     assert_eq!(exact.total, Some(1));
+    let nul = ObjectData {
+        fields: fields(&[("name", text("Мука\0"))]),
+        ..ObjectData::default()
+    };
+    let err = engine.save("goods", &nul, PostAction::Write).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
     assert_eq!(found.rows[0].values["deleted"], Value::Bool(false));
     let sorted = engine
         .list(&ListQuery {
