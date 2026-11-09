@@ -51,8 +51,10 @@ pub struct SessionInfo {
 /// Что видно в файле базы без записи в него: для «Добавить существующую».
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseInfo {
-    /// Имя конфигурации, под которую создана база.
+    /// Имя конфигурации (`name` манифеста), под которую создана база.
     pub config_name: String,
+    /// Её название для людей.
+    pub config_title: String,
     pub file_password: bool,
     /// В базе есть пользователи: после открытия нужен вход.
     pub login_required: bool,
@@ -60,8 +62,8 @@ pub struct BaseInfo {
 
 /// Метаданные — те же типы, что строит `ostov-meta` из конфигурации: одно описание на всех.
 pub use ostov_model::{
-    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, Rights, RoleInfo, SystemRights,
-    TablePartDef,
+    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, RegisterMeta, Rights, RoleInfo,
+    SystemRights, TablePartDef,
 };
 
 // ---------------------------------------------------------------- списки
@@ -70,6 +72,7 @@ pub use ostov_model::{
 pub struct Row {
     pub id: i64,
     /// Поля строки плюс служебные: у документов `number`, `posted`, у всех `deleted` и `version`.
+    /// `posted` и `deleted` — `Value::Bool`.
     pub values: Fields,
 }
 
@@ -86,6 +89,9 @@ pub struct ListQuery {
     pub posted: Option<bool>,
     /// Отбор: только помеченные на удаление или только непомеченные.
     pub deleted: Option<bool>,
+    /// Точный отбор: поле → значение, условия через «и». Текст — без учёта регистра,
+    /// `Null` — пустое поле, ссылка — по id.
+    pub filter: Fields,
     /// Ключ из прошлой страницы; `None` — с начала.
     pub after_key: Option<String>,
     /// Сколько строк, от 1 до 1000 (СТ-51).

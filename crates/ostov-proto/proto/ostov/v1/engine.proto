@@ -196,6 +196,14 @@ message Meta {
   // Было `repeated string roles`, до заголовков ролей.
   reserved 3;
   repeated Role roles = 4;
+  repeated RegisterMeta registers = 5;
+}
+
+message RegisterMeta {
+  string name = 1;
+  string title = 2;
+  repeated FieldDef dimensions = 3;
+  repeated FieldDef resources = 4;
 }
 
 // ---------------------------------------------------------------- списки и объекты
@@ -209,6 +217,8 @@ message ListQuery {
   optional bool deleted = 6;
   optional string after_key = 7;
   uint32 size = 8;
+  // Точный отбор: поле → значение.
+  map<string, Value> filter = 9;
 }
 
 message Row {

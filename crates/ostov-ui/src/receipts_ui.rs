@@ -248,6 +248,7 @@ fn read_catalog(engine: &dyn Engine, object: &str) -> EngineResult<Vec<Row>> {
             search: None,
             posted: None,
             deleted: None,
+            filter: Default::default(),
             after_key: after_key.take(),
             size: PAGE_SIZE,
         })?;
@@ -389,6 +390,7 @@ fn last_number(engine: &dyn Engine) -> EngineResult<u32> {
         search: None,
         posted: None,
         deleted: None,
+        filter: Default::default(),
         after_key: None,
         size: 1,
     })?;
@@ -678,6 +680,7 @@ fn parse_iso_date(text: &str) -> Option<(u16, u8, u8)> {
 
 /// Строка списка ядра в строку списка интерфейса; без номера строка не показывается.
 fn receipt_from_row(row: &Row) -> Option<Receipt> {
+    let flag = |name: &str| matches!(row.values.get(name), Some(Value::Bool(true)));
     let int = |name: &str| match row.values.get(name) {
         Some(Value::Int(value)) => Some(*value),
         _ => None,
@@ -702,8 +705,8 @@ fn receipt_from_row(row: &Row) -> Option<Receipt> {
             Some(Value::Decimal { units, scale }) => kopecks(*units, *scale),
             _ => 0,
         },
-        posted: int("posted").unwrap_or(0) != 0,
-        deleted: int("deleted").unwrap_or(0) != 0,
+        posted: flag("posted"),
+        deleted: flag("deleted"),
     })
 }
 
@@ -720,6 +723,7 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
             search: request.search.clone(),
             posted: None,
             deleted: None,
+            filter: Default::default(),
             after_key: after_key.take(),
             size: PAGE_SIZE,
         })?;

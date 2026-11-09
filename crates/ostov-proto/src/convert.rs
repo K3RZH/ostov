@@ -320,6 +320,16 @@ impl From<api::Meta> for pb::Meta {
                     title: r.title,
                 })
                 .collect(),
+            registers: m
+                .registers
+                .into_iter()
+                .map(|r| pb::RegisterMeta {
+                    name: r.name,
+                    title: r.title,
+                    dimensions: r.dimensions.into_iter().map(Into::into).collect(),
+                    resources: r.resources.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -355,9 +365,19 @@ impl TryFrom<pb::Meta> for api::Meta {
                 rights: o.rights.map(Into::into).unwrap_or_default(),
             });
         }
+        let mut registers = Vec::with_capacity(m.registers.len());
+        for r in m.registers {
+            registers.push(api::RegisterMeta {
+                name: r.name,
+                title: r.title,
+                dimensions: defs_from_pb(r.dimensions)?,
+                resources: defs_from_pb(r.resources)?,
+            });
+        }
         Ok(Self {
             menu: m.menu.into_iter().map(Into::into).collect(),
             objects,
+            registers,
             roles: m
                 .roles
                 .into_iter()
@@ -383,22 +403,26 @@ impl From<api::ListQuery> for pb::ListQuery {
             deleted: q.deleted,
             after_key: q.after_key,
             size: q.size,
+            filter: fields_to_pb(q.filter).values,
         }
     }
 }
 
-impl From<pb::ListQuery> for api::ListQuery {
-    fn from(q: pb::ListQuery) -> Self {
-        Self {
+impl TryFrom<pb::ListQuery> for api::ListQuery {
+    type Error = EngineError;
+
+    fn try_from(q: pb::ListQuery) -> Result<Self> {
+        Ok(Self {
             object: q.object,
             order: q.order,
             descending: q.descending,
             search: q.search,
             posted: q.posted,
             deleted: q.deleted,
+            filter: fields_from_pb(Some(pb::Fields { values: q.filter }))?,
             after_key: q.after_key,
             size: q.size,
-        }
+        })
     }
 }
 

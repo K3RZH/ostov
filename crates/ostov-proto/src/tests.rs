@@ -69,13 +69,19 @@ fn lists_and_reports_survive_the_wire() {
         search: Some("мельн".into()),
         posted: Some(false),
         deleted: None,
+        filter: [
+            (
+                "warehouse".to_owned(),
+                api::Value::Ref { id: 3, title: None },
+            ),
+            ("name".to_owned(), api::Value::Text("Мука".into())),
+        ]
+        .into(),
         after_key: Some("ключ".into()),
         size: 50,
     };
-    assert_eq!(
-        api::ListQuery::from(wire(pb::ListQuery::from(query.clone()))),
-        query
-    );
+    let back: api::ListQuery = wire(pb::ListQuery::from(query.clone())).try_into().unwrap();
+    assert_eq!(back, query);
 
     let page = api::ListPage {
         rows: vec![api::Row {
@@ -112,6 +118,12 @@ fn meta_survives_the_wire() {
         read_only: false,
     };
     let meta = api::Meta {
+        registers: vec![api::RegisterMeta {
+            name: "stock".into(),
+            title: "Остатки".into(),
+            dimensions: vec![field(api::FieldKind::Ref)],
+            resources: vec![field(api::FieldKind::Decimal { scale: 3 })],
+        }],
         menu: vec![api::MenuItem {
             title: "Склад".into(),
             icon: Some("warehouse".into()),

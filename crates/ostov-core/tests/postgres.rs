@@ -179,6 +179,14 @@ fn warehouse_on_postgres() {
         })
         .unwrap();
     assert_eq!(found.rows.len(), 1);
+    let exact = engine
+        .list(&ListQuery {
+            filter: fields(&[("name", text("МУКА"))]),
+            ..query("goods")
+        })
+        .unwrap();
+    assert_eq!(exact.total, Some(1));
+    assert_eq!(found.rows[0].values["deleted"], Value::Bool(false));
     let sorted = engine
         .list(&ListQuery {
             order: Some("supplier".into()),

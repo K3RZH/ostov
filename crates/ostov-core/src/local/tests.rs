@@ -142,7 +142,7 @@ fn receipt_is_saved_posted_and_listed() {
 
     let page = engine.list(&query("receipt", 10)).unwrap();
     assert_eq!(page.total, Some(1));
-    assert_eq!(page.rows[0].values["posted"], Value::Int(1));
+    assert_eq!(page.rows[0].values["posted"], Value::Bool(true));
     assert_eq!(page.rows[0].values["number"], Value::Int(1));
     assert_eq!(page.rows[0].values["warehouse"], titled(main, "Основной"));
 
@@ -346,11 +346,11 @@ fn demo_base_has_data_to_scroll() {
         .collect();
     let posted = all
         .iter()
-        .filter(|r| r.values["posted"] == Value::Int(1))
+        .filter(|r| r.values["posted"] == Value::Bool(true))
         .count();
     let deleted = all
         .iter()
-        .filter(|r| r.values["deleted"] == Value::Int(1))
+        .filter(|r| r.values["deleted"] == Value::Bool(true))
         .count();
     assert_eq!(all.len(), 300);
     assert_eq!(deleted, 10);
@@ -1159,7 +1159,7 @@ fn list_rows_carry_version_and_filter_by_status() {
             }
         }
     };
-    let flag = |r: &Row, name: &str| r.values[name] == Value::Int(1);
+    let flag = |r: &Row, name: &str| r.values[name] == Value::Bool(true);
 
     // Пометка на удаление по версии прямо из строки списка, без лишнего get.
     let first = all(ListQuery {
@@ -2090,7 +2090,8 @@ fn checking_base_does_not_write() {
     }
     let before = std::fs::read(&base.path).unwrap();
     let info = LocalConnector::default().check_local(&base.path).unwrap();
-    assert_eq!(info.config_name, "Склад");
+    assert_eq!(info.config_name, "warehouse");
+    assert_eq!(info.config_title, "Склад");
     assert!(!info.login_required);
     assert!(!info.file_password);
     assert_eq!(std::fs::read(&base.path).unwrap(), before);
@@ -2112,6 +2113,7 @@ fn checking_base_does_not_write() {
 fn base_of_other_configuration_is_not_touched() {
     let base = Base::new("other-config");
     let mut model = super::warehouse_model();
+    model.name = "recipes".into();
     model.title = "Рецептуры".into();
     model.documents.clear();
     model.registers.clear();
@@ -2123,11 +2125,117 @@ fn base_of_other_configuration_is_not_touched() {
     );
     let before = std::fs::read(&base.path).unwrap();
     let info = LocalConnector::default().check_local(&base.path).unwrap();
-    assert_eq!(info.config_name, "Рецептуры");
+    assert_eq!(info.config_name, "recipes");
+    assert_eq!(info.config_title, "Рецептуры");
     let err = LocalConnector::default()
         .open_local(&base.path, None)
         .err()
         .unwrap();
     assert_eq!(err.code, ErrorCode::Incompatible);
     assert_eq!(std::fs::read(&base.path).unwrap(), before);
+}
+
+#[test]
+fn exact_filter_by_fields() {
+    let base = Base::new("filter");
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    add(&*engine, "goods", "Мука в/с");
+    add(&*engine, "goods", "мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let kitchen = add(&*engine, "warehouses", "Кухня");
+    let supplier = add(&*engine, "suppliers", "Мельница");
+    for warehouse in [main, main, kitchen] {
+        let doc = receipt(warehouse, supplier, &[(flour, 1000, 100)]);
+        engine.save("receipt", &doc, PostAction::Write).unwrap();
+    }
+    let with = |object: &str, filter: &[(&str, Value)]| ListQuery {
+        filter: fields(filter),
+        ..query(object, 10)
+    };
+
+    // Текст — точно, но без учёта регистра: «Мука в/с» не попадает.
+    let page = engine
+        .list(&with("goods", &[("name", text("МУКА"))]))
+        .unwrap();
+    assert_eq!(page.total, Some(2));
+    let page = engine
+        .list(&with("receipt", &[("warehouse", refer(main))]))
+        .unwrap();
+    assert_eq!(page.total, Some(2));
+    let both = with(
+        "receipt",
+        &[("warehouse", refer(kitchen)), ("supplier", refer(supplier))],
+    );
+    assert_eq!(engine.list(&both).unwrap().total, Some(1));
+    let empty = with("receipt", &[("warehouse", Value::Null)]);
+    assert_eq!(engine.list(&empty).unwrap().total, Some(0));
+
+    // Отбор живёт в токене: seek видит те же строки.
+    let page = engine
+        .list(&with("receipt", &[("warehouse", refer(main))]))
+        .unwrap();
+    let jump = engine.seek(&page.token, 1, 10).unwrap();
+    assert_eq!(jump.rows.len(), 1);
+    assert_eq!(jump.total, Some(2));
+
+    let err = engine.list(&with("goods", &[("color", text("красный"))]));
+    assert_eq!(err.unwrap_err().code, ErrorCode::Validation);
+    let err = engine.list(&with("receipt", &[("warehouse", text("Основной"))]));
+    assert_eq!(err.unwrap_err().code, ErrorCode::Validation);
+}
+
+#[test]
+fn meta_has_registers_in_config_order() {
+    let base = Base::new("meta-registers");
+    let meta = base.create().get_meta().unwrap();
+    let [stock] = meta.registers.as_slice() else {
+        panic!("ожидался один регистр: {:?}", meta.registers);
+    };
+    assert_eq!(stock.name, "stock");
+    let names = |defs: &[ostov_api::FieldDef]| -> Vec<String> {
+        defs.iter().map(|d| d.name.clone()).collect()
+    };
+    assert_eq!(names(&stock.dimensions), ["warehouse", "goods"]);
+    assert_eq!(names(&stock.resources), ["qty"]);
+}
+
+#[test]
+fn old_base_with_title_instead_of_name_opens() {
+    let base = Base::new("old-config");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        ostov_store::Driver::execute(&mut db, "DELETE FROM ostov_base WHERE key = 'title'", &[])
+            .unwrap();
+        ostov_store::Driver::execute(
+            &mut db,
+            "UPDATE ostov_base SET value = 'Склад' WHERE key = 'config'",
+            &[],
+        )
+        .unwrap();
+    }
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(
+        (info.config_name.as_str(), info.config_title.as_str()),
+        ("Склад", "Склад")
+    );
+    drop(
+        LocalConnector::default()
+            .open_local(&base.path, None)
+            .unwrap(),
+    );
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "warehouse");
+
+    // Новое название той же конфигурации базу не отрезает.
+    let mut model = super::warehouse_model();
+    model.title = "Склад и кухня".into();
+    drop(
+        LocalConnector::new(model)
+            .open_local(&base.path, None)
+            .unwrap(),
+    );
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_title, "Склад и кухня");
 }

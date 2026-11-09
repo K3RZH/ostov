@@ -182,6 +182,17 @@ pub struct Meta {
     pub objects: Vec<ObjectMeta>,
     /// Роли для экрана «Пользователи и роли»: из конфигурации и встроенная `admin`.
     pub roles: Vec<RoleInfo>,
+    /// Регистры: по ним строятся отчёты `<имя>_balance` и `<имя>_turnover`.
+    pub registers: Vec<RegisterMeta>,
+}
+
+/// Регистр для отчётов: измерения и ресурсы в порядке конфигурации.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterMeta {
+    pub name: String,
+    pub title: String,
+    pub dimensions: Vec<FieldDef>,
+    pub resources: Vec<FieldDef>,
 }
 
 /// Роль в списке выбора: имя для команд и заголовок для окна.
@@ -271,6 +282,16 @@ impl Meta {
                     name: ADMIN_ROLE.to_owned(),
                     title: ADMIN_TITLE.to_owned(),
                 }])
+                .collect(),
+            registers: config
+                .registers
+                .iter()
+                .map(|r| RegisterMeta {
+                    name: r.name.clone(),
+                    title: r.title.clone(),
+                    dimensions: r.dimensions.clone(),
+                    resources: r.resources.clone(),
+                })
                 .collect(),
         }
     }
