@@ -1,7 +1,8 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
-//! Экраны: showcase, main, settings, start, start-error, start-empty, create-local, create-server, add-file, add-server,
-//! login-server, login-first-run, login-local, password, login-error, journal, period, period-error.
+//! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
+//! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
+//! list-goods, list-issue, list-sorted, list-search, list-error.
 
 use std::io::Write;
 
@@ -139,6 +140,78 @@ fn admin_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std:
     save(&window, dark, path)
 }
 
+/// Крутит цикл событий, пока ответы ядра не лягут в окно.
+fn pump(millis: u64) -> Result<(), Box<dyn std::error::Error>> {
+    slint::Timer::single_shot(std::time::Duration::from_millis(millis), || {
+        let _ = slint::quit_event_loop();
+    });
+    slint::run_event_loop()?;
+    Ok(())
+}
+
+/// Универсальный список на настоящей демо-базе: `ListUi` читает строки у ядра, как в приложении.
+fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let engine = snapshot_engine()?;
+    let window = app_window(2)?;
+    let meta = ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+    let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::from_meta(
+        &meta,
+        ostov_api::SystemRights::ALL,
+    )));
+    let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+    let object = if screen == "list-goods" || screen == "list-search" {
+        "goods"
+    } else {
+        "issue"
+    };
+    let node = shell
+        .borrow()
+        .node_for_object(object)
+        .ok_or("нет пункта меню")?;
+    shell.borrow_mut().click(node);
+    ostov_ui::app::refresh(&window, &shell.borrow());
+    window.set_base_name("Склад".into());
+    window.set_mode_text("Режим: локально".into());
+    window.set_user_text("Администратор".into());
+    window.set_user_initials("А".into());
+
+    let windows = ostov_ui::windows::Windows::new(&receipts);
+    let lists = ostov_ui::list_ui::ListUi::new(window.as_weak(), windows);
+    lists.attach_window(&window);
+    // Объект, которого нет в базе: ядро отвечает ошибкой, она видна полосой с «Повторить».
+    let mut objects = meta.objects.clone();
+    if let Some(ghost) = objects.iter().find(|o| o.name == "goods").cloned() {
+        objects.push(ostov_api::ObjectMeta {
+            name: "ghost".into(),
+            title: "Объект без таблицы".into(),
+            ..ghost
+        });
+    }
+    lists.start(engine, &objects);
+    window.show()?;
+    pump(800)?;
+    let data = window.global::<ostov_ui::ListData>();
+    match screen {
+        // Дата по убыванию: два щелчка по заголовку.
+        "list-sorted" => {
+            data.invoke_sort(1);
+            data.invoke_sort(1);
+        }
+        "list-search" => {
+            data.set_query("мас".into());
+            data.invoke_query_changed("мас".into());
+        }
+        "list-error" => data.invoke_show("ghost".into()),
+        _ => {}
+    }
+    pump(800)?;
+    println!("{}", data.get_summary());
+    save(&window, dark, path)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let dark = args.next().is_some_and(|theme| theme == "тёмная");
@@ -177,6 +250,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save(&window, dark, &path)
         }
         "journal" | "period" | "period-error" => admin_screen(&screen, dark, &path),
+        "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error" => {
+            list_screen(&screen, dark, &path)
+        }
         "main-meta" => {
             // Меню из встроенной конфигурации «Склад», как его строит приложение.
             let window = app_window(2)?;
@@ -364,6 +440,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Файл базы «~/Ostov/Склад.sqlite» уже открыт другой программой.".into(),
                 );
             }
+            save(&window, dark, &path)
+        }
+        // Подтверждение «Убрать из списка»: для файла (строка 0) и для сервера (строка 1).
+        "start-forget" | "start-forget-server" => {
+            let window = app_window(0)?;
+            window.set_recent(ModelRc::new(VecModel::from(sample_recent())));
+            window.set_selected_recent(i32::from(screen == "start-forget-server"));
+            window.set_forgetting(true);
             save(&window, dark, &path)
         }
         "start-empty" => {

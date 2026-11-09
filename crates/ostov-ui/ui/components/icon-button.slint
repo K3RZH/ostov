@@ -6,6 +6,8 @@ export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <length> control-size: Theme.control-md;
     in property <bool> enabled: true;
+    // Наведение на саму кнопку: владелец может держать её видимой, пока мышь на ней.
+    out property <bool> has-hover: touch.has-hover;
     callback clicked();
 
     width: root.control-size;

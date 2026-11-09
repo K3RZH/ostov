@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use crate::shell::{Shell, Tab};
+use crate::shell::{DocKey, Shell, Tab};
 
 pub type WindowId = u32;
 
@@ -25,22 +25,30 @@ pub trait DocTabs {
     fn select_index(&mut self, index: usize);
     fn close_index(&mut self, index: usize);
     fn set_tab_modified(&mut self, index: usize, modified: bool);
-    fn set_title_of_doc(&mut self, doc: u32, title: String);
-    fn renumber(&mut self, old: u32, new: u32);
-    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str);
+    fn set_title_of_doc(&mut self, doc: &DocKey, title: String);
+    /// Документ записан: вкладка с временным ключом получает настоящий.
+    fn rekey(&mut self, old: &DocKey, new: &DocKey);
+    fn open_document(&mut self, node: usize, doc: DocKey, title: String, view: &'static str);
     /// Закрепляет вкладку: следующее открытие её не заменит.
     fn pin_index(&mut self, index: usize);
 
-    fn tab_of_doc(&self, doc: u32) -> Option<usize> {
-        self.tab_list().iter().position(|t| t.doc == Some(doc))
+    fn tab_of_doc(&self, doc: &DocKey) -> Option<usize> {
+        self.tab_list()
+            .iter()
+            .position(|t| t.doc.as_ref() == Some(doc))
     }
 
-    fn active_document(&self) -> Option<u32> {
-        self.tab_list().get(self.active_index()).and_then(|t| t.doc)
+    fn active_document(&self) -> Option<&DocKey> {
+        self.tab_list()
+            .get(self.active_index())
+            .and_then(|t| t.doc.as_ref())
     }
 
-    fn documents(&self) -> HashSet<u32> {
-        self.tab_list().iter().filter_map(|t| t.doc).collect()
+    fn documents(&self) -> HashSet<DocKey> {
+        self.tab_list()
+            .iter()
+            .filter_map(|t| t.doc.clone())
+            .collect()
     }
 }
 
@@ -60,13 +68,13 @@ impl DocTabs for Shell {
     fn set_tab_modified(&mut self, index: usize, modified: bool) {
         self.set_modified(index, modified);
     }
-    fn set_title_of_doc(&mut self, doc: u32, title: String) {
+    fn set_title_of_doc(&mut self, doc: &DocKey, title: String) {
         self.set_doc_title(doc, title);
     }
-    fn renumber(&mut self, old: u32, new: u32) {
-        self.renumber_doc(old, new);
+    fn rekey(&mut self, old: &DocKey, new: &DocKey) {
+        self.rekey_doc(old, new);
     }
-    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+    fn open_document(&mut self, node: usize, doc: DocKey, title: String, view: &'static str) {
         self.open_doc(node, doc, title, view);
     }
     fn pin_index(&mut self, index: usize) {
@@ -90,35 +98,32 @@ impl DocTabs for TabList {
     fn set_tab_modified(&mut self, index: usize, modified: bool) {
         self.set_modified(index, modified);
     }
-    fn set_title_of_doc(&mut self, doc: u32, title: String) {
+    fn set_title_of_doc(&mut self, doc: &DocKey, title: String) {
         self.set_doc_title(doc, title);
     }
-    fn renumber(&mut self, old: u32, new: u32) {
-        self.renumber_doc(old, new);
+    fn rekey(&mut self, old: &DocKey, new: &DocKey) {
+        self.rekey_doc(old, new);
     }
     fn pin_index(&mut self, _index: usize) {
         // Вкладки дополнительного окна всегда закреплены.
     }
-    fn open_document(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+    fn open_document(&mut self, node: usize, doc: DocKey, title: String, view: &'static str) {
         // Значок документа берём у вкладки его списка.
         let icon = self
             .tabs
             .iter()
             .find(|t| t.node == node)
             .map_or("file", |t| t.icon);
-        self.open_doc(
+        self.open_doc(Tab {
+            title,
+            icon,
             node,
-            doc,
-            Tab {
-                title,
-                icon,
-                node,
-                view,
-                doc: Some(doc),
-                preview: false,
-                modified: false,
-            },
-        );
+            view,
+            object: doc.object.clone(),
+            doc: Some(doc),
+            preview: false,
+            modified: false,
+        });
     }
 }
 
@@ -181,7 +186,7 @@ impl TabList {
         if self.active > index {
             self.active -= 1;
         } else if self.active == index {
-            let parent = closed.doc.and_then(|_| {
+            let parent = closed.doc.as_ref().and_then(|_| {
                 self.tabs
                     .iter()
                     .position(|t| t.node == closed.node && t.doc.is_none())
@@ -205,12 +210,13 @@ impl TabList {
         }
     }
 
-    /// Открывает документ: уже открытый выбирается, новый встаёт рядом с вкладкой своего списка.
-    pub fn open_doc(&mut self, node: usize, doc: u32, tab: Tab) {
+    /// Открывает документ вкладки `tab`: уже открытый выбирается, новый встаёт рядом с вкладкой
+    /// своего списка.
+    pub fn open_doc(&mut self, tab: Tab) {
         if let Some(index) = self
             .tabs
             .iter()
-            .position(|t| t.node == node && t.doc == Some(doc))
+            .position(|t| t.node == tab.node && t.doc == tab.doc)
         {
             self.active = index;
             return;
@@ -218,7 +224,7 @@ impl TabList {
         let parent = self
             .tabs
             .iter()
-            .position(|t| t.node == node && t.doc.is_none());
+            .position(|t| t.node == tab.node && t.doc.is_none());
         self.insert(parent.map_or(self.tabs.len(), |p| p + 1), tab);
     }
 
@@ -228,24 +234,24 @@ impl TabList {
         }
     }
 
-    pub fn doc_tab(&self, doc: u32) -> Option<usize> {
-        self.tabs.iter().position(|t| t.doc == Some(doc))
+    pub fn doc_tab(&self, doc: &DocKey) -> Option<usize> {
+        self.tabs.iter().position(|t| t.doc.as_ref() == Some(doc))
     }
 
-    pub fn active_doc(&self) -> Option<u32> {
-        self.tabs.get(self.active).and_then(|t| t.doc)
+    pub fn active_doc(&self) -> Option<&DocKey> {
+        self.tabs.get(self.active).and_then(|t| t.doc.as_ref())
     }
 
-    pub fn set_doc_title(&mut self, doc: u32, title: String) {
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.doc == Some(doc)) {
+    pub fn set_doc_title(&mut self, doc: &DocKey, title: String) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.doc.as_ref() == Some(doc)) {
             tab.title = title;
         }
     }
 
-    pub fn renumber_doc(&mut self, old: u32, new: u32) {
+    pub fn rekey_doc(&mut self, old: &DocKey, new: &DocKey) {
         for tab in &mut self.tabs {
-            if tab.doc == Some(old) {
-                tab.doc = Some(new);
+            if tab.doc.as_ref() == Some(old) {
+                tab.doc = Some(new.clone());
             }
         }
     }
@@ -304,7 +310,7 @@ impl Workspace {
     }
 
     /// Окно, в котором открыта вкладка документа.
-    pub fn window_of_doc(&self, shell: &Shell, doc: u32) -> Option<WindowRef> {
+    pub fn window_of_doc(&self, shell: &Shell, doc: &DocKey) -> Option<WindowRef> {
         if shell.doc_tab(doc).is_some() {
             return Some(WindowRef::Main);
         }
@@ -473,11 +479,15 @@ mod tests {
             .unwrap_or_default()
     }
 
+    fn receipt(id: i64) -> DocKey {
+        DocKey::new("receipt", id)
+    }
+
     /// Оболочка с тремя вкладками: «Главная», список поступлений и документ.
     fn shell_with_tabs() -> Shell {
         let mut shell = Shell::demo();
         shell.click(3);
-        shell.open_doc(3, 7, "Поступление № 7".into(), "receipt");
+        shell.open_doc(3, receipt(7), "Поступление № 7".into(), "receipt");
         shell
     }
 
@@ -647,16 +657,72 @@ mod tests {
             icon: "doc",
             node: 3,
             view: "receipt",
-            doc: Some(9),
+            object: "receipt".into(),
+            doc: Some(receipt(9)),
             preview: false,
             modified: false,
         };
         let list = ws.list_mut(id).unwrap();
-        list.open_doc(3, 9, doc.clone());
-        list.open_doc(3, 9, doc);
+        list.open_doc(doc.clone());
+        list.open_doc(doc);
         assert_eq!(list.tabs().len(), 2);
-        assert_eq!(list.tabs()[1].doc, Some(9));
+        assert_eq!(list.tabs()[1].doc, Some(receipt(9)));
         assert_eq!(list.active(), 1);
-        assert_eq!(ws.window_of_doc(&shell, 9), Some(WindowRef::Extra(id)));
+        assert_eq!(
+            ws.window_of_doc(&shell, &receipt(9)),
+            Some(WindowRef::Extra(id))
+        );
+    }
+
+    #[test]
+    fn detached_document_keeps_its_key_and_follows_save() {
+        let mut shell = Shell::demo();
+        shell.click(3);
+        let temporary = receipt(-1);
+        shell.open_doc(3, temporary.clone(), "Новое поступление".into(), "receipt");
+        let mut ws = Workspace::new();
+        let id = ws
+            .detach(&mut shell, WindowRef::Main, 2)
+            .unwrap()
+            .opened
+            .unwrap();
+        assert_eq!(shell.doc_tab(&temporary), None);
+        assert_eq!(
+            ws.window_of_doc(&shell, &temporary),
+            Some(WindowRef::Extra(id))
+        );
+        let saved = receipt(51);
+        let list = ws.list_mut(id).unwrap();
+        DocTabs::rekey(list, &temporary, &saved);
+        assert_eq!(list.active_document(), Some(&saved));
+        assert_eq!(ws.window_of_doc(&shell, &temporary), None);
+        // Вкладка возвращается в главное окно уже с настоящим ключом.
+        ws.move_tab(&mut shell, WindowRef::Extra(id), 0, WindowRef::Main, 2)
+            .unwrap();
+        assert_eq!(shell.active_doc(), Some(&saved));
+        assert_eq!(ws.window_of_doc(&shell, &saved), Some(WindowRef::Main));
+    }
+
+    #[test]
+    fn same_id_of_different_objects_is_found_in_its_own_window() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let id = ws
+            .detach(&mut shell, WindowRef::Main, 2)
+            .unwrap()
+            .opened
+            .unwrap();
+        let issue = DocKey::new("issue", 7);
+        shell.open_doc(4, issue.clone(), "Расход № 7".into(), "");
+        assert_eq!(
+            ws.window_of_doc(&shell, &receipt(7)),
+            Some(WindowRef::Extra(id))
+        );
+        assert_eq!(ws.window_of_doc(&shell, &issue), Some(WindowRef::Main));
+        assert_eq!(shell.documents(), HashSet::from([issue]));
+        assert_eq!(
+            ws.list(id).map(DocTabs::documents),
+            Some(HashSet::from([receipt(7)]))
+        );
     }
 }

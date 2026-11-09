@@ -1,0 +1,101 @@
+import { Theme } from "../theme.slint";
+import { Button } from "../components/button.slint";
+import { TextField } from "../components/text-field.slint";
+import { AlertBanner } from "../components/alert-banner.slint";
+import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
+
+// Данные и события универсального списка объекта. Состояние ведёт Rust (src/list_ui.rs), здесь
+// только свойства и колбэки. Глобальный объект, а не свойства окна: экран стоит в любом окне с
+// вкладками. В окне виден один список: тот, что у активной вкладки.
+export global ListData {
+    // Чей список сейчас показан в этом окне (имя объекта в ядре). Выставляет Rust в ответ на show.
+    in property <string> object;
+    in property <string> title;
+    in property <[GridColumn]> columns;
+    // Строки приходят окнами: строка, которая ещё едет из ядра, это пустые ячейки.
+    in property <[GridRow]> rows;
+    // «Показано N из M» или «Загрузка…».
+    in property <string> summary;
+    in property <string> empty-text;
+    // Текст ошибки ядра (пусто: ошибки нет).
+    in property <string> error;
+    // Сортировка одним ключом: направление по колонкам (0 нет, 1 по возрастанию, 2 по убыванию).
+    in property <[int]> sort-dirs;
+    in property <int> sort-count;
+    in-out property <int> selected-row: -1;
+    in-out property <string> query;
+    // Экран открылся или вкладка сменила объект.
+    callback show(string);
+    callback sort(int);
+    callback query-changed(string);
+    callback retry();
+    callback visible-changed(int, int);
+    callback resize-begin();
+    callback resize(int, length, length);
+    callback resize-end();
+}
+
+// Вкладка со списком любого справочника или документа: колонки строятся по метаданным.
+export component ObjectListView inherits Rectangle {
+    in property <string> object;
+
+    background: Theme.bg;
+
+    init => { ListData.show(root.object); }
+    // Соседняя вкладка тоже список: экран тот же, меняется только объект.
+    changed object => { ListData.show(root.object); }
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+
+        Text {
+            text: ListData.title;
+            font-size: Theme.font-title;
+            font-weight: 700;
+            color: Theme.text;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            // Формы объекта пока нет: открывать нечем.
+            Button {
+                text: "Открыть";
+                enabled: false;
+            }
+            Rectangle { }
+            TextField {
+                width: 280px;
+                placeholder: "Поиск по списку";
+                text <=> ListData.query;
+                edited(text) => { ListData.query-changed(text); }
+            }
+        }
+        if ListData.error != "" : AlertBanner {
+            text: ListData.error;
+            action-text: "Повторить";
+            action => { ListData.retry(); }
+        }
+        ErpGrid {
+            vertical-stretch: 1;
+            columns: ListData.columns;
+            rows: ListData.rows;
+            empty-text: ListData.empty-text;
+            sort-dirs: ListData.sort-dirs;
+            sort-count: ListData.sort-count;
+            selected-row <=> ListData.selected-row;
+            sort-clicked(i) => { ListData.sort(i); }
+            visible-changed(first, last) => { ListData.visible-changed(first, last); }
+            resize-begin => { ListData.resize-begin(); }
+            resize-column(i, delta, width) => { ListData.resize(i, delta, width); }
+            resize-end => { ListData.resize-end(); }
+        }
+        HorizontalLayout {
+            alignment: start;
+            Text {
+                text: ListData.summary;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+            }
+        }
+    }
+}

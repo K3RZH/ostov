@@ -12,6 +12,7 @@ use crate::engine::{
     Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, SystemRights,
     call_in_background,
 };
+use crate::list_ui::ListUi;
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
@@ -120,6 +121,7 @@ pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
             icon: tab.icon.into(),
             modified: tab.modified,
             view: tab.view.into(),
+            object: tab.object.as_str().into(),
             preview: tab.preview,
         })
         .collect()
@@ -283,6 +285,46 @@ fn add_recent(app: &AppWindow, db: RecentDb) {
     app.set_selected_recent(0);
 }
 
+/// «Убрать из списка»: забывается запись, запомненный логин и (у сервера) копия сертификата.
+/// Файл базы и сама база на сервере не трогаются. Список сохраняется первым: если файл не
+/// записался, в окне остаётся то, что лежит на диске, а не то, что вернулось бы после перезапуска.
+fn forget_recent(app: &AppWindow, row: i32) {
+    // Ответ ядра на открытие вернётся к строке, которой уже нет.
+    if app.get_start_busy() {
+        return;
+    }
+    let recent = app.get_recent();
+    let Some(position) = index(row) else { return };
+    let Some(db) = recent.row_data(position) else {
+        return;
+    };
+    app.set_start_error("".into());
+    let rows = crate::recent::remove(recent.iter(), db.server, &db.path);
+    if let Err(message) = crate::recent::save(&rows) {
+        app.set_start_error(message.into());
+        return;
+    }
+    crate::recent::remember_login(&db.path, None);
+    if db.server
+        && let Err(error) = crate::remote_base::forget_certificate(&db.path)
+    {
+        app.set_start_error(error.message.into());
+    }
+    let selected = crate::recent::selection_after_remove(position, rows.len());
+    app.set_recent(ModelRc::new(VecModel::from(rows)));
+    app.set_selected_recent(i32::try_from(selected).unwrap_or(0));
+}
+
+/// Подключает подтверждение «Убрать из списка» (окно в app-window.slint) к `forget_recent`.
+pub fn wire_forget(app: &AppWindow) {
+    let weak = app.as_weak();
+    app.on_forget_confirmed(move |row| {
+        if let Some(app) = weak.upgrade() {
+            forget_recent(&app, row);
+        }
+    });
+}
+
 /// Пользователь в шапке: имя из сессии ядра. База без пользователей вход не спрашивает.
 fn show_user(app: &AppWindow, user: Option<&SessionInfo>, roles: &[RoleInfo]) {
     let name = user.map(|user| {
@@ -437,6 +479,7 @@ struct Screens {
     receipts: ReceiptsUi,
     users: UsersUi,
     admin: AdminUi,
+    lists: ListUi,
 }
 
 /// Открывает главную страницу выбранной базы и подключает к ней экраны.
@@ -444,8 +487,15 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
     *screens.shell.borrow_mut() = open_main(app, session);
     screens.receipts.after(app, &screens.shell.borrow());
     match &session.engine {
-        Some(engine) => screens.receipts.attach(engine.clone()),
-        None => screens.receipts.show_error("База не открыта."),
+        Some(engine) => {
+            screens.receipts.attach(engine.clone());
+            let objects = session.meta.as_ref().map_or(&[][..], |meta| &meta.objects);
+            screens.lists.start(engine.clone(), objects);
+        }
+        None => {
+            screens.receipts.show_error("База не открыта.");
+            screens.lists.clear();
+        }
     }
     let roles = session
         .meta
@@ -966,6 +1016,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     apply_settings(&app, Settings::load());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
+    wire_forget(&app);
     if let Some((title, version)) = crate::local_base::config_title() {
         app.set_config_name(title.into());
         app.set_config_info(format!("Конфигурация · версия {version}").into());
@@ -988,6 +1039,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let session = session.clone();
             move || session.borrow().engine.clone()
         }),
+        lists: ListUi::new(app.as_weak(), windows.clone()),
     };
 
     // Закрытие окна пользователем завершает приложение.
@@ -1033,8 +1085,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let to_start = {
         let app = app.as_weak();
         let (session, receipts, admin) = (session.clone(), receipts.clone(), screens.admin.clone());
+        let lists = screens.lists.clone();
         move || {
             let Some(app) = app.upgrade() else { return };
+            // Списки держат движок: забываем их до закрытия базы, иначе файл остался бы занят.
+            lists.clear();
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
             release(std::mem::take(&mut *session.borrow_mut()));
             receipts.detach();
@@ -1098,6 +1153,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     screens.receipts.detach();
                     screens.users.clear();
                     screens.admin.clear();
+                    screens.lists.clear();
                     configure_login(&app, kind, &name, &key);
                     prefill_login(&app, &key);
                     show_page(&app, PAGE_LOGIN);
@@ -1249,9 +1305,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     wire_users(&app, &screens.users);
     screens.admin.attach_window(&app);
+    screens.lists.attach_window(&app);
     windows.on_host_created({
         let (main, users, admin) = (app.as_weak(), screens.users.clone(), screens.admin.clone());
+        let lists = screens.lists.clone();
         move |window| {
+            lists.attach_window(window);
             if let Some(main) = main.upgrade() {
                 refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
