@@ -1,0 +1,130 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { IconButton } from "icon-button.slint";
+
+// Строка дерева навигации. Раскрытие и выбор считает Rust (src/shell.rs), здесь только вид.
+export struct NavRow {
+    id: int,
+    title: string,
+    icon: string,
+    level: int,
+    is-group: bool,
+    expanded: bool,
+    selected: bool,
+    favorite: bool,
+}
+
+
+component NavRowView inherits Rectangle {
+    in property <NavRow> entry;
+    in property <bool> collapsed;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Shape.control-radius;
+    background: root.entry.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-8 + (root.collapsed ? 0px : root.entry.level * 16px);
+        padding-right: Theme.space-8;
+        spacing: Theme.space-8;
+        alignment: root.collapsed ? center : start;
+
+        if !root.collapsed : VerticalLayout {
+            alignment: center;
+            if root.entry.is-group : Icon {
+                name: root.entry.expanded ? "chevron-down" : "chevron-right";
+                tint: Theme.text-muted;
+                width: 16px;
+                height: 16px;
+            }
+            // Полоска перед значком отделяет элементы от групп.
+            if !root.entry.is-group : Rectangle {
+                width: 16px;
+                height: 16px;
+                Rectangle {
+                    x: 7px;
+                    y: 1px;
+                    width: 2px;
+                    height: 14px;
+                    border-radius: 1px;
+                    background: root.entry.selected ? Theme.accent-text : Theme.border-strong;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.entry.icon;
+                tint: root.entry.is-group ? Theme.text-muted : Theme.accent-text;
+            }
+        }
+        if !root.collapsed : Text {
+            text: root.entry.title;
+            font-size: Theme.font-body;
+            font-weight: root.entry.is-group || root.entry.selected ? 600 : 400;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if !root.collapsed && root.entry.favorite : VerticalLayout {
+            alignment: center;
+            Icon { name: "star-filled"; tint: Theme.accent-text; width: 16px; height: 16px; }
+        }
+    }
+}
+
+// Панель навигации: полная (280 px) или свёрнутая до значков (56 px). Стоит в главном окне и в
+// дополнительных окнах (там по умолчанию свёрнута).
+export component NavPanel inherits Rectangle {
+    in property <[NavRow]> rows;
+    in-out property <bool> collapsed;
+    callback clicked(int);
+
+    width: root.collapsed ? 56px : 280px;
+    background: Theme.bg;
+    animate width { duration: 150ms; easing: ease-out; }
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.border;
+    }
+    VerticalLayout {
+        padding: Theme.space-8;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            height: 32px;
+            padding-left: Theme.space-8;
+            alignment: root.collapsed ? center : space-between;
+            if !root.collapsed : Text {
+                text: "НАВИГАЦИЯ";
+                font-size: Theme.font-caption;
+                font-weight: 600;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            IconButton {
+                icon: root.collapsed ? "chevrons-right" : "chevrons-left";
+                control-size: 28px;
+                clicked => { root.collapsed = !root.collapsed; }
+            }
+        }
+        Flickable {
+            VerticalLayout {
+                spacing: 2px;
+                alignment: start;
+                for item in root.rows : NavRowView {
+                    entry: item;
+                    collapsed: root.collapsed;
+                    clicked => { root.clicked(item.id); }
+                }
+            }
+        }
+    }
+}

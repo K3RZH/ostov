@@ -1,8 +1,10 @@
-//! Данные списка «Поступления» для макета: примерные документы, сортировка, поиск.
-//! Настоящие данные придут из ядра (Engine API); логика сортировки и отбора останется.
+//! Данные списка «Поступления» и строки документа: типы интерфейса и форматирование.
+//! Сами данные, порядок и поиск дают ядро (Engine API).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
+    /// Идентификатор в ядре (`Row::id`); у ещё не записанного документа 0.
+    pub id: i64,
     pub number: u32,
     /// Дата как (год, месяц, день): так сортировка совпадает с календарной.
     pub date: (u16, u8, u8),
@@ -11,8 +13,8 @@ pub struct Receipt {
     /// Сумма в копейках: деньги не храним дробным числом.
     pub amount: i64,
     pub posted: bool,
-    /// Строки документа; `None`: ещё не открывали (покажем примерные).
-    pub lines: Option<Vec<Line>>,
+    /// Помечен на удаление: окончательно удаляется отдельным действием.
+    pub deleted: bool,
 }
 
 /// Колонки списка в порядке показа.
@@ -35,18 +37,6 @@ pub const COLUMNS: [Column; 6] = [
     Column::Status,
 ];
 
-/// Справочник поставщиков (для выпадающего списка).
-pub const SUPPLIERS: [&str; 6] = [
-    "Мясной двор",
-    "Овощи оптом",
-    "Молочный комбинат",
-    "Бакалея-Центр",
-    "Рыбный ряд",
-    "Пекарня №3",
-];
-/// Перечисление складов (для выпадающего списка).
-pub const WAREHOUSES: [&str; 3] = ["Основной", "Кухня", "Бар"];
-
 impl Column {
     pub fn title(self) -> &'static str {
         match self {
@@ -60,33 +50,168 @@ impl Column {
     }
 }
 
-/// Примерные документы: детерминированный генератор, чтобы список не менялся между запусками.
-pub fn demo(count: u32) -> Vec<Receipt> {
-    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    (0..count)
-        .map(|i| {
-            let r = next();
-            Receipt {
-                number: count - i,
-                date: (
-                    2026,
-                    1 + u8::try_from((r >> 8) % 10).unwrap_or(0),
-                    1 + u8::try_from((r >> 16) % 28).unwrap_or(0),
-                ),
-                supplier: SUPPLIERS[usize::try_from((r >> 24) % 6).unwrap_or(0)].to_owned(),
-                warehouse: WAREHOUSES[usize::try_from((r >> 32) % 3).unwrap_or(0)].to_owned(),
-                amount: i64::try_from((r >> 40) % 9_000_000).unwrap_or(0) + 10_000,
-                posted: (r >> 60) % 4 != 0,
-                lines: None,
+/// Сортировка списка по нескольким колонкам. Порядок ключей это приоритет: он такой, в каком
+/// пользователь включал сортировку. У колонки три состояния: без сортировки, по возрастанию,
+/// по убыванию (щелчок по заголовку переключает по кругу, меню заголовка задаёт прямо).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sorting {
+    keys: Vec<(usize, bool)>,
+}
+
+impl Sorting {
+    /// Ключи по приоритету: колонка и признак «по убыванию».
+    pub fn keys(&self) -> &[(usize, bool)] {
+        &self.keys
+    }
+
+    fn position(&self, column: usize) -> Option<usize> {
+        self.keys.iter().position(|(c, _)| *c == column)
+    }
+
+    /// Состояние колонки: 0 нет, 1 по возрастанию, 2 по убыванию.
+    pub fn dir(&self, column: usize) -> i32 {
+        match self.position(column).map(|i| self.keys[i].1) {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        }
+    }
+
+    /// Приоритет колонки с единицы; 0, если сортировки нет.
+    pub fn priority(&self, column: usize) -> i32 {
+        self.position(column)
+            .map_or(0, |i| i32::try_from(i + 1).unwrap_or(0))
+    }
+
+    /// Щелчок по заголовку: нет → по возрастанию (в конец очереди) → по убыванию → нет.
+    pub fn click(&mut self, column: usize) {
+        match self.position(column) {
+            None => self.keys.push((column, false)),
+            Some(i) if !self.keys[i].1 => self.keys[i].1 = true,
+            Some(i) => {
+                self.keys.remove(i);
             }
+        }
+    }
+
+    /// Задаёт направление; новая колонка встаёт в конец очереди, у включённой место не меняется.
+    pub fn set(&mut self, column: usize, descending: bool) {
+        match self.position(column) {
+            Some(i) => self.keys[i].1 = descending,
+            None => self.keys.push((column, descending)),
+        }
+    }
+
+    pub fn clear(&mut self, column: usize) {
+        if let Some(i) = self.position(column) {
+            self.keys.remove(i);
+        }
+    }
+
+    pub fn clear_all(&mut self) {
+        self.keys.clear();
+    }
+
+    /// Меняет приоритет: `earlier` ставит колонку выше (раньше), иначе ниже.
+    pub fn shift(&mut self, column: usize, earlier: bool) {
+        let Some(i) = self.position(column) else {
+            return;
+        };
+        let j = if earlier {
+            i.checked_sub(1)
+        } else {
+            Some(i + 1).filter(|j| *j < self.keys.len())
+        };
+        if let Some(j) = j {
+            self.keys.swap(i, j);
+        }
+    }
+
+    /// Сравнивает две строки по всем ключам: первый различающийся ключ решает.
+    pub fn compare(&self, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
+        self.keys
+            .iter()
+            .map(|(column, descending)| compare_by(COLUMNS[*column], *descending, a, b))
+            .find(|order| order.is_ne())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+/// Сравнение по одной колонке. Пустой текст всегда в конце, как у ядра, в любом направлении.
+fn compare_by(column: Column, descending: bool, a: &Receipt, b: &Receipt) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let order = match column {
+        Column::Number => a.number.cmp(&b.number),
+        Column::Date => a.date.cmp(&b.date),
+        Column::Amount => a.amount.cmp(&b.amount),
+        Column::Status => a.posted.cmp(&b.posted),
+        Column::Supplier | Column::Warehouse => {
+            let (x, y) = if column == Column::Supplier {
+                (&a.supplier, &b.supplier)
+            } else {
+                (&a.warehouse, &b.warehouse)
+            };
+            match (x.is_empty(), y.is_empty()) {
+                (true, true) => return Ordering::Equal,
+                (true, false) => return Ordering::Greater,
+                (false, true) => return Ordering::Less,
+                _ => x.to_lowercase().cmp(&y.to_lowercase()),
+            }
+        }
+    };
+    if descending { order.reverse() } else { order }
+}
+
+/// Документ, названный в предупреждении ядра: вид («Расход») и номер.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRef {
+    pub kind: String,
+    pub number: u32,
+}
+
+impl DocRef {
+    /// Имя объекта в ядре по названию вида документа; неизвестный вид: пусто.
+    pub fn object(&self) -> &'static str {
+        match self.kind.as_str() {
+            "Поступление" => "receipt",
+            "Расход" => "issue",
+            _ => "",
+        }
+    }
+
+    /// Подпись ссылки: «Расход №1».
+    pub fn title(&self) -> String {
+        format!("{} №{}", self.kind, self.number)
+    }
+}
+
+/// Фраза ядра о документах, которые мешают («Списывают в этот день: Расход №1, Поступление №54.»).
+const BLOCKERS: &str = " Списывают в этот день: ";
+
+/// Отделяет документы от текста предупреждения: текст без перечня и список ссылок. Пока ядро
+/// отдаёт только строку, ссылки разбираются из неё; когда появятся структурные ссылки в ошибке
+/// (запрос к ядру в Вызовы-ядра-из-ostov-ui.md), заменить эту функцию. «Этот документ» не ссылка:
+/// он и так открыт. Если ссылок нет, текст остаётся как пришёл.
+pub fn split_blockers(message: &str) -> (String, Vec<DocRef>) {
+    let Some((text, tail)) = message.split_once(BLOCKERS) else {
+        return (message.to_owned(), Vec::new());
+    };
+    let refs: Vec<DocRef> = tail
+        .trim_end_matches('.')
+        .split(", ")
+        .filter_map(|item| {
+            let (kind, number) = item.rsplit_once(" №")?;
+            Some(DocRef {
+                kind: kind.trim().to_owned(),
+                number: number.trim().parse().ok()?,
+            })
         })
-        .collect()
+        .collect();
+    if refs.is_empty() {
+        (message.to_owned(), Vec::new())
+    } else {
+        (text.to_owned(), refs)
+    }
 }
 
 /// Сумма «12 345,60»: неразрывные пробелы между разрядами.
@@ -108,10 +233,12 @@ pub fn date_text(date: (u16, u8, u8)) -> String {
 
 impl Receipt {
     pub fn status(&self) -> &'static str {
-        if self.posted {
+        if self.deleted {
+            "К удалению"
+        } else if self.posted {
             "Проведён"
         } else {
-            "Черновик"
+            "Записан"
         }
     }
 
@@ -126,35 +253,6 @@ impl Receipt {
             self.status().to_owned(),
         ]
     }
-
-    fn matches(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        query.is_empty()
-            || self
-                .cells()
-                .iter()
-                .any(|cell| cell.to_lowercase().contains(&query))
-    }
-}
-
-/// Сортирует по колонке; при равенстве порядок сохраняется (сортировка устойчивая).
-pub fn sort(receipts: &mut [Receipt], column: Column, descending: bool) {
-    receipts.sort_by(|a, b| {
-        let order = match column {
-            Column::Number => a.number.cmp(&b.number),
-            Column::Date => a.date.cmp(&b.date),
-            Column::Supplier => a.supplier.cmp(&b.supplier),
-            Column::Warehouse => a.warehouse.cmp(&b.warehouse),
-            Column::Amount => a.amount.cmp(&b.amount),
-            Column::Status => a.posted.cmp(&b.posted),
-        };
-        if descending { order.reverse() } else { order }
-    });
-}
-
-/// Документы, подходящие под строку поиска (по любой ячейке, без учёта регистра).
-pub fn filter<'a>(receipts: &'a [Receipt], query: &str) -> Vec<&'a Receipt> {
-    receipts.iter().filter(|r| r.matches(query)).collect()
 }
 
 /// Разбирает дату «дд.мм.гггг»; неверный текст: `None`.
@@ -174,91 +272,37 @@ pub fn parse_date(text: &str) -> Option<(u16, u8, u8)> {
 pub struct Line {
     pub name: String,
     pub unit: String,
-    /// Количество в десятых долях единицы.
-    pub quantity_tenths: i64,
+    /// Количество в тысячных долях единицы (ядро хранит три знака).
+    pub quantity_milli: i64,
     /// Цена за единицу в копейках.
     pub price: i64,
     /// Сумма строки в копейках.
     pub amount: i64,
 }
 
-/// Справочник номенклатуры: название и единица измерения.
-pub const GOODS: [(&str, &str); 8] = [
-    ("Мука пшеничная в/с", "кг"),
-    ("Говядина охлаждённая", "кг"),
-    ("Молоко 3,2%", "л"),
-    ("Сахар-песок", "кг"),
-    ("Масло сливочное 82%", "кг"),
-    ("Яйцо куриное С1", "шт"),
-    ("Картофель", "кг"),
-    ("Томаты", "кг"),
-];
-
-/// Примерные строки документа: детерминированные, сумма строк равна сумме документа.
-pub fn lines(receipt: &Receipt) -> Vec<Line> {
-    let count = 3 + usize::try_from(receipt.number % 4).unwrap_or(0);
-    let weights: Vec<i64> = (0..count)
-        .map(|i| {
-            1 + i64::from(
-                receipt
-                    .number
-                    .wrapping_mul(31)
-                    .wrapping_add(u32::try_from(i).unwrap_or(0) * 17)
-                    % 7,
-            )
-        })
-        .collect();
-    let total_weight: i64 = weights.iter().sum();
-    let mut left = receipt.amount;
-    weights
-        .iter()
-        .enumerate()
-        .map(|(i, weight)| {
-            let amount = if i + 1 == count {
-                left
-            } else {
-                receipt.amount * weight / total_weight
-            };
-            left -= amount;
-            let (name, unit) =
-                GOODS[(usize::try_from(receipt.number).unwrap_or(0) + i * 3) % GOODS.len()];
-            let quantity_tenths =
-                100 + i64::from(receipt.number % 9) * 70 + i64::try_from(i).unwrap_or(0) * 35;
-            Line {
-                name: name.to_owned(),
-                unit: unit.to_owned(),
-                quantity_tenths,
-                price: amount * 10 / quantity_tenths.max(1),
-                amount,
-            }
-        })
-        .collect()
-}
-
-/// Количество «12,5».
-pub fn quantity(tenths: i64) -> String {
-    format!("{},{}", tenths / 10, tenths % 10)
+/// Количество «12,5» или «12,125»: лишние нули в конце не показываем, один знак оставляем.
+pub fn quantity(milli: i64) -> String {
+    let fraction = format!("{:03}", milli % 1000);
+    let fraction = fraction.trim_end_matches('0');
+    format!(
+        "{},{}",
+        milli / 1000,
+        if fraction.is_empty() { "0" } else { fraction }
+    )
 }
 
 impl Line {
     /// Строка из введённых данных: сумма это цена, умноженная на количество.
-    pub fn new(name: &str, quantity_tenths: i64, price: i64) -> Self {
+    pub fn new(name: &str, unit: &str, quantity_milli: i64, price: i64) -> Self {
         Self {
             name: name.to_owned(),
-            unit: unit_of(name).to_owned(),
-            quantity_tenths,
+            unit: unit.to_owned(),
+            quantity_milli,
             price,
-            amount: price * quantity_tenths / 10,
+            // Половина вверх, как считает ядро.
+            amount: (price * quantity_milli + 500) / 1000,
         }
     }
-}
-
-/// Единица измерения товара по справочнику (нет в справочнике: «шт»).
-pub fn unit_of(name: &str) -> &'static str {
-    GOODS
-        .iter()
-        .find(|(good, _)| *good == name)
-        .map_or("шт", |(_, unit)| unit)
 }
 
 /// Разбирает неотрицательное число с запятой или точкой в целые доли: `scale` знаков после
@@ -326,4 +370,126 @@ pub fn positions(count: usize) -> String {
         "позиций"
     };
     format!("{count} {word}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn receipt(number: u32, supplier: &str, amount: i64, posted: bool, day: u8) -> Receipt {
+        Receipt {
+            id: i64::from(number),
+            number,
+            date: (2026, 1, day),
+            supplier: supplier.to_owned(),
+            warehouse: String::new(),
+            amount,
+            posted,
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn blockers_become_links() {
+        let message = "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000. Списывают в этот день: Расход №1, Поступление №54.";
+        let (text, refs) = split_blockers(message);
+        assert_eq!(
+            text,
+            "Не хватает остатка на 10.02.2026: Склад «Основной», Товар «Мука» — Количество стало бы −2,000."
+        );
+        assert_eq!(
+            refs.iter().map(DocRef::title).collect::<Vec<_>>(),
+            ["Расход №1", "Поступление №54"]
+        );
+        assert_eq!(refs[0].object(), "issue");
+        assert_eq!(refs[1].object(), "receipt");
+    }
+
+    #[test]
+    fn this_document_is_not_a_link() {
+        let message = "Не хватает остатка на 15.01.2026: Товар «Мука» — Количество стало бы −3,000. Списывают в этот день: этот документ.";
+        assert_eq!(split_blockers(message), (message.to_owned(), Vec::new()));
+        assert_eq!(
+            split_blockers("Другая ошибка."),
+            ("Другая ошибка.".to_owned(), Vec::new())
+        );
+    }
+
+    #[test]
+    fn click_cycles_through_three_states() {
+        let mut sorting = Sorting::default();
+        assert_eq!(sorting.dir(2), 0);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 1);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 2);
+        sorting.click(2);
+        assert_eq!(sorting.dir(2), 0);
+        assert!(sorting.keys().is_empty());
+    }
+
+    #[test]
+    fn priority_follows_the_order_of_setting() {
+        let mut sorting = Sorting::default();
+        sorting.click(5);
+        sorting.click(2);
+        sorting.click(1);
+        assert_eq!(
+            [5, 2, 1].map(|c| sorting.priority(c)),
+            [1, 2, 3],
+            "приоритет равен порядку включения"
+        );
+        // Повторный щелчок по включённой колонке место в очереди не меняет.
+        sorting.click(5);
+        assert_eq!((sorting.priority(5), sorting.dir(5)), (1, 2));
+        sorting.shift(1, true);
+        assert_eq!(
+            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
+            [5, 1, 2]
+        );
+        sorting.shift(5, true);
+        sorting.shift(2, false);
+        assert_eq!(
+            sorting.keys().iter().map(|k| k.0).collect::<Vec<_>>(),
+            [5, 1, 2]
+        );
+        sorting.clear(1);
+        assert_eq!(sorting.priority(2), 2);
+        sorting.set(0, true);
+        assert_eq!((sorting.priority(0), sorting.dir(0)), (3, 2));
+        sorting.clear_all();
+        assert!(sorting.keys().is_empty());
+    }
+
+    #[test]
+    fn first_key_decides_then_the_next() {
+        // Статус, потом поставщик по убыванию, потом номер.
+        let mut rows = [
+            receipt(1, "Б", 10, true, 1),
+            receipt(2, "А", 10, false, 1),
+            receipt(3, "Б", 10, false, 1),
+            receipt(4, "Б", 10, false, 1),
+            receipt(5, "", 10, false, 1),
+        ];
+        let mut sorting = Sorting::default();
+        sorting.set(5, false);
+        sorting.set(2, true);
+        sorting.set(0, false);
+        rows.sort_by(|a, b| sorting.compare(a, b));
+        let numbers: Vec<u32> = rows.iter().map(|r| r.number).collect();
+        // Не проведённые первыми; среди них «Б» раньше «А», пустой поставщик в конце;
+        // одинаковые «Б» по номеру. Проведённый последним.
+        assert_eq!(numbers, [3, 4, 2, 5, 1]);
+    }
+
+    #[test]
+    fn empty_text_stays_last_in_both_directions() {
+        let (a, b) = (receipt(1, "", 0, false, 1), receipt(2, "Я", 0, false, 1));
+        for descending in [false, true] {
+            assert_eq!(
+                compare_by(Column::Supplier, descending, &a, &b),
+                std::cmp::Ordering::Greater
+            );
+        }
+    }
 }

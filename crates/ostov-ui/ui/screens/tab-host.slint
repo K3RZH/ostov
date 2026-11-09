@@ -1,0 +1,408 @@
+import { Theme } from "../theme.slint";
+import { IconButton } from "../components/icon-button.slint";
+import { Icon } from "../components/icon.slint";
+import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
+import { UsersView, UserRow } from "users-view.slint";
+import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
+
+export struct TabItem { title: string, icon: string, modified: bool, view: string, preview: bool }
+
+component TabView inherits Rectangle {
+    in property <TabItem> tab;
+    in property <bool> active;
+    // Цвет панели вкладок: у неактивной вкладки он же, чтобы при анимации вкладки не просвечивали
+    // друг сквозь друга.
+    in property <brush> strip-bg;
+    callback selected();
+    callback closed();
+    // Правая кнопка: координаты нажатия в окне.
+    callback context(length, length);
+    // Вкладку тащат: положение указателя в окне. Что делать, решает панель вкладок.
+    callback drag-moved(length, length);
+    callback drag-ended(length, length);
+    // Эту вкладку тащат: она бледнеет, вместо неё по панели идёт «призрак».
+    in property <bool> lifted;
+
+    // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
+    callback scrolled(length);
+
+    height: 40px;
+    // Поднятая вкладка непрозрачная: иначе под тенью виден серый прямоугольник.
+    background: root.lifted ? Theme.surface : root.active ? Theme.bg : root.strip-bg;
+    // Идущая за указателем вкладка поверх соседей, остальные плавно расступаются.
+    z: root.lifted ? 10 : 0;
+    drop-shadow-blur: root.lifted ? 10px : 0px;
+    // Без условия прозрачная вкладка рисует свою тень серым прямоугольником.
+    drop-shadow-color: root.lifted ? #00000040 : transparent;
+    drop-shadow-offset-y: 2px;
+    animate x { duration: root.lifted ? 0ms : 160ms; easing: ease-out; }
+
+    if root.active : Rectangle {
+        y: 0px;
+        height: 2px;
+        background: Theme.accent;
+    }
+
+    private property <length> press-x;
+    private property <length> press-y;
+    private property <bool> dragging;
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.selected(); }
+        scroll-event(event) => {
+            root.scrolled(event.delta-y + event.delta-x);
+            accept
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.press-x = self.absolute-position.x + self.mouse-x;
+                root.press-y = self.absolute-position.y + self.mouse-y;
+                root.dragging = false;
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.context(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        // Конец перетаскивания надёжнее ловить по состоянию кнопки, а не по событию отпускания.
+        changed pressed => {
+            if (!self.pressed && root.dragging) {
+                root.dragging = false;
+                root.drag-ended(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                // Меньше 6 px это обычный щелчок, а не перетаскивание.
+                if (!root.dragging && (abs(self.absolute-position.x + self.mouse-x - root.press-x) > 6px
+                    || abs(self.absolute-position.y + self.mouse-y - root.press-y) > 6px)) {
+                    root.dragging = true;
+                    root.selected();
+                }
+                if (root.dragging) {
+                    root.drag-moved(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                }
+            }
+        }
+    }
+
+    content := HorizontalLayout {
+        padding-left: Theme.space-12;
+        padding-right: Theme.space-8;
+        spacing: Theme.space-8;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: root.tab.icon;
+                tint: root.active ? Theme.accent-text : Theme.text-muted;
+            }
+        }
+        Text {
+            text: root.tab.title;
+            font-size: Theme.font-body;
+            font-weight: root.active ? 600 : 400;
+            // Курсив: вкладка предпросмотра, её заменит следующее открытие.
+            font-italic: root.tab.preview;
+            color: root.active ? Theme.text : Theme.text-muted;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        if root.tab.modified : VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: "close";
+                control-size: 24px;
+                clicked => { root.closed(); }
+            }
+        }
+    }
+}
+
+// Панель вкладок и содержимое активной вкладки. Стоит в любом окне: в главном рядом с навигацией,
+// в дополнительном окне (вынесенные вкладки) под панелью окна.
+export component TabHost inherits VerticalLayout {
+    in property <[TabItem]> tabs;
+    in property <int> active-tab;
+    in property <[UserRow]> users;
+    in property <string> user-message;
+    callback tab-selected(int);
+    callback tab-closed(int);
+    callback tab-detached(int);
+    callback tab-returned(int);
+    // Порядок вкладок изменили перетаскиванием: откуда и куда (новый индекс).
+    callback tab-reordered(int, int);
+    // Дополнительное окно: в меню вкладки есть «Вернуть в главное окно».
+    in property <bool> extra;
+    // Перетаскивание вкладки для кода окон: индекс, положение указателя в окне, ушёл ли за панель.
+    callback tab-drag-moved(int, length, length, bool);
+    callback tab-drag-ended(int, length, length, bool);
+    // Куда падает вкладка из другого окна: подсветка панели и место вставки (-1: нет).
+    in property <bool> drop-target;
+    in property <int> insert-at: -1;
+    // Вместо «призрака» за указателем идёт настоящее окно с вкладкой.
+    in property <bool> follower-active;
+    // Где в окне стоит панель вкладок (для поиска окна под указателем).
+    out property <length> strip-left: bar.absolute-position.x;
+    out property <length> strip-top: bar.absolute-position.y;
+    out property <length> strip-width: bar.width;
+    out property <length> strip-tab-width: root.tab-width;
+
+    // Перетаскивание вкладки: какую тащат и где указатель относительно панели вкладок.
+    private property <int> drag-index: -1;
+    private property <length> drag-x;
+    private property <length> drag-y;
+    // Указатель ушёл от панели вверх или вниз: при отпускании вкладка станет отдельным окном.
+    // Тоже ушёл вбок за край окна (слева от панели в главном окне стоит навигация, это не выход).
+    // Единственная вкладка дополнительного окна остаётся на месте: тащится всё окно.
+    private property <bool> drag-out: root.drag-index >= 0 && !(root.extra && root.tabs.length == 1)
+        && (root.drag-y < -24px || root.drag-y > bar.height + 24px
+            || root.drag-x > bar.width + 24px || root.drag-x < -bar.absolute-position.x - 24px);
+    // Где внутри вкладки взялись за неё (чтобы вкладка не прыгала под указателем).
+    private property <length> grab-dx;
+    // Положение идущей за указателем вкладки в содержимом панели: двигать можно по всей ширине
+    // панели, даже правее последней вкладки, а при отпускании вкладка встаёт в свой слот.
+    private property <length> dragged-x: Math.max(Theme.space-8, Math.min(root.tabs-overflow ? Theme.space-8 + root.tab-width * (root.tabs.length - 1) : Math.max(Theme.space-8 + root.tab-width * (root.tabs.length - 1), flick.width - root.tab-width), root.drag-x - flick.content-x - root.grab-dx));
+    // Куда встанет вкладка: по середине идущей вкладки, как в браузере.
+    private property <int> drop-index: Math.max(0, Math.min(root.tabs.length - 1, Math.floor((root.dragged-x + root.tab-width / 2 - Theme.space-8) / root.tab-width)));
+
+    private property <bool> land-on;
+    private property <int> land-index;
+    private property <length> land-x;
+
+    pure function slot-x(i: int) -> length {
+        Theme.space-8 + i * root.tab-width
+    }
+
+    // Где стоит вкладка i. При перетаскивании соседи сдвигаются на одно место, освобождая его
+    // (если вкладку вытащили за панель, соседи смыкаются).
+    pure function tab-x(i: int) -> length {
+        // Вкладка, которую только что отпустили: появляется там, где была под указателем, и плавно
+        // садится в свой слот (таймер ниже снимает флаг на следующем кадре).
+        root.land-on && i == root.land-index ? root.land-x
+        : root.drag-index < 0 ? root.slot-x(i)
+        : i == root.drag-index ? root.dragged-x
+        : root.drag-out ? root.slot-x(i > root.drag-index ? i - 1 : i)
+        : (root.drop-index > root.drag-index && i > root.drag-index && i <= root.drop-index) ? root.slot-x(i - 1)
+        : (root.drop-index < root.drag-index && i >= root.drop-index && i < root.drag-index) ? root.slot-x(i + 1)
+        : root.slot-x(i)
+    }
+
+    callback user-add-clicked();
+    callback user-toggle(int);
+
+    // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
+    private property <length> tab-menu-x;
+    private property <length> tab-menu-y;
+    private property <int> tab-menu-index: -1;
+
+    private property <length> tab-min: 140px;
+    private property <length> tab-max: 240px;
+    private property <bool> tabs-overflow: root.tabs.length * root.tab-min + 16px > bar.width;
+    private property <length> tab-width: root.tabs-overflow ? root.tab-min : min(root.tab-max, (bar.width - 16px) / max(1, root.tabs.length));
+
+    // Сдвиг панели вкладок: положительное число уводит вкладки вправо, отрицательное влево.
+    function scroll-tabs(delta: length) {
+        flick.content-x = min(0px, max(flick.width - flick.content-width, flick.content-x + delta));
+    }
+
+    // Активная вкладка всегда в видимой части панели.
+    function reveal(index: int) {
+        if (!root.tabs-overflow) {
+            flick.content-x = 0px;
+        } else if (Theme.space-8 + index * root.tab-min < -flick.content-x) {
+            flick.content-x = -(Theme.space-8 + index * root.tab-min);
+        } else if (Theme.space-8 + (index + 1) * root.tab-min > -flick.content-x + flick.width) {
+            flick.content-x = -(Theme.space-8 + (index + 1) * root.tab-min - flick.width);
+        }
+    }
+
+    changed active-tab => { root.reveal(root.active-tab); }
+    changed tabs => { root.reveal(root.active-tab); }
+
+                // Вкладки: сжимаются до 140 px, дальше панель прокручивается колесом или стрелками.
+                bar := Rectangle {
+                    height: 40px;
+                    background: root.drop-target ? Theme.accent-soft : Theme.surface-alt;
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    Timer {
+                        interval: 16ms;
+                        running: root.land-on;
+                        triggered => { root.land-on = false; }
+                    }
+                    flick := Flickable {
+                        x: 0px;
+                        y: 0px;
+                        width: parent.width - (root.tabs-overflow ? 64px : 0px);
+                        height: parent.height;
+                        content-width: root.tabs-overflow ? root.tabs.length * root.tab-min + 16px : self.width;
+                        content-height: self.height;
+                        Rectangle {
+                            width: flick.content-width;
+                            height: parent.height;
+                            for tab[i] in root.tabs : TabView {
+                                x: root.tab-x(i);
+                                y: 0px;
+                                width: root.tab-width;
+                                tab: tab;
+                                strip-bg: bar.background;
+                                active: i == root.active-tab;
+                                visible: !(i == root.drag-index && root.drag-out);
+                                selected => { root.tab-selected(i); }
+                                closed => { root.tab-closed(i); }
+                                lifted: i == root.drag-index;
+                                drag-moved(x, y) => {
+                                    if (root.drag-index != i) {
+                                        root.drag-index = i;
+                                        root.grab-dx = (x - bar.absolute-position.x) - flick.content-x - root.slot-x(i);
+                                    }
+                                    root.drag-x = x - bar.absolute-position.x;
+                                    root.drag-y = y - bar.absolute-position.y;
+                                    root.tab-drag-moved(i, x, y, root.drag-out);
+                                }
+                                drag-ended(x, y) => {
+                                    if (!root.drag-out && root.drop-index != i) {
+                                        root.land-x = root.dragged-x;
+                                        root.land-index = root.drop-index;
+                                        root.land-on = true;
+                                        root.tab-reordered(i, root.drop-index);
+                                    }
+                                    root.tab-drag-ended(i, x, y, root.drag-out);
+                                    root.drag-index = -1;
+                                }
+                                context(ax, ay) => {
+                                    root.tab-menu-index = i;
+                                    root.tab-menu-x = min(ax - root.absolute-position.x, root.width - MenuMetrics.width - 4px);
+                                    root.tab-menu-y = ay - root.absolute-position.y + 4px;
+                                    tab-menu.show();
+                                }
+                                scrolled(delta) => { root.scroll-tabs(delta); }
+                            }
+                        }
+                    }
+                    // Вкладка вытащена за панель: за указателем идёт её «призрак», при отпускании откроется окно.
+                    if root.drag-index >= 0 && root.drag-out && !root.follower-active : Rectangle {
+                        x: root.drag-x - root.tab-width / 2;
+                        y: root.drag-y - 20px;
+                        z: 20;
+                        width: root.tab-width;
+                        height: 40px;
+                        border-radius: 6px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.accent;
+                        drop-shadow-blur: 12px;
+                        drop-shadow-color: #00000050;
+                        drop-shadow-offset-y: 3px;
+                        Text {
+                            text: root.tabs[root.drag-index].title;
+                            font-size: Theme.font-body;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+                    if root.drop-target && root.insert-at >= 0 : Rectangle {
+                        x: Theme.space-8 + flick.content-x + root.insert-at * root.tab-width - 1.5px;
+                        y: 6px;
+                        width: 3px;
+                        height: parent.height - 12px;
+                        border-radius: 1.5px;
+                        background: Theme.accent;
+                    }
+                    if root.tabs-overflow : HorizontalLayout {
+                        x: parent.width - 64px;
+                        width: 64px;
+                        padding: 6px;
+                        spacing: 4px;
+                        IconButton { icon: "chevrons-left"; control-size: 28px; clicked => { root.scroll-tabs(root.tab-min); } }
+                        IconButton { icon: "chevrons-right"; control-size: 28px; clicked => { root.scroll-tabs(-root.tab-min); } }
+                    }
+                }
+                // Содержимое вкладки
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "users" : UsersView {
+                    users: root.users;
+                    message: root.user-message;
+                    add-clicked => { root.user-add-clicked(); }
+                    toggle(i) => { root.user-toggle(i); }
+                }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }
+                if root.tabs.length == 0 || (root.tabs[root.active-tab].view != "users" && root.tabs[root.active-tab].view != "receipts" && root.tabs[root.active-tab].view != "receipt") : Rectangle {
+                    background: Theme.bg;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: Theme.space-8;
+                        Text {
+                            text: root.tabs.length > 0 ? root.tabs[root.active-tab].title : "Нет открытых вкладок";
+                            font-size: Theme.font-title;
+                            font-weight: 700;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "Экран этого пункта ещё не сделан: появится вместе с универсальным списком";
+                            font-size: Theme.font-body;
+                            color: Theme.text-muted;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+    // Меню вкладки: вынести в отдельное окно, вернуть в главное (в дополнительном окне), закрыть.
+    tab-menu := PopupWindow {
+        x: root.tab-menu-x;
+        y: root.tab-menu-y;
+        width: MenuMetrics.width;
+        height: MenuMetrics.height(root.extra ? 3 : 2);
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        if !root.extra : MenuPanel {
+            actions: [
+                { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
+                  enabled: root.tab-menu-index >= 0, divider: false },
+                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
+            ];
+            chosen(id) => {
+                if (id == "detach") {
+                    root.tab-detached(root.tab-menu-index);
+                } else if (id == "close") {
+                    root.tab-closed(root.tab-menu-index);
+                }
+                tab-menu.close();
+            }
+        }
+        if root.extra : MenuPanel {
+            actions: [
+                { id: "return", label: "Вернуть в главное окно", icon: "undo", danger: false,
+                  enabled: root.tab-menu-index >= 0, divider: false },
+                { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
+                  enabled: root.tabs.length > 1 && root.tab-menu-index >= 0, divider: false },
+                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
+            ];
+            chosen(id) => {
+                if (id == "return") {
+                    root.tab-returned(root.tab-menu-index);
+                } else if (id == "detach") {
+                    root.tab-detached(root.tab-menu-index);
+                } else if (id == "close") {
+                    root.tab-closed(root.tab-menu-index);
+                }
+                tab-menu.close();
+            }
+        }
+    }
+}

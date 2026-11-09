@@ -2,6 +2,7 @@ import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { TextField } from "../components/text-field.slint";
 import { ModeOption } from "create-dialog.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
 
 // Окно «Добавить существующую базу»: готовый файл на этом компьютере или база на сервере.
 export component AddDialog inherits Rectangle {
@@ -9,6 +10,9 @@ export component AddDialog inherits Rectangle {
     in-out property <string> file;
     in-out property <string> address;
     in-out property <string> db-name;
+    // Ошибка ядра (файл не база Ostov, его нет) и «идёт проверка».
+    in property <string> error;
+    in property <bool> busy;
     callback confirmed();
     callback cancelled();
     callback choose-file();
@@ -72,7 +76,7 @@ export component AddDialog inherits Rectangle {
             }
             if root.server : TextField {
                 label: "Адрес сервера";
-                placeholder: "kafe-srv.local:7443";
+                placeholder: "server.local:7700";
                 text <=> root.address;
             }
             if root.server : TextField {
@@ -80,14 +84,16 @@ export component AddDialog inherits Rectangle {
                 text <=> root.db-name;
             }
 
+            ErrorBanner { text: root.error; }
+
             HorizontalLayout {
                 spacing: Theme.space-12;
                 alignment: end;
                 Button { text: "Отмена"; clicked => { root.cancelled(); } }
                 Button {
-                    text: "Добавить";
+                    text: root.busy ? "Проверяем…" : "Добавить";
                     kind: ButtonKind.primary;
-                    enabled: root.valid;
+                    enabled: root.valid && !root.busy;
                     clicked => { root.confirmed(); }
                 }
             }

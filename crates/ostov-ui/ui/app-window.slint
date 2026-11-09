@@ -1,24 +1,30 @@
 import { Theme } from "theme.slint";
 import { StartPage, RecentDb } from "screens/start-page.slint";
 import { LoginPage } from "screens/login-page.slint";
-import { MainPage, NavRow, TabItem } from "screens/main-page.slint";
+import { MainPage } from "screens/main-page.slint";
+import { NavPanel, NavRow } from "components/nav-panel.slint";
+import { TabHost, TabItem } from "screens/tab-host.slint";
 import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
+import { WindowBar } from "components/window-bar.slint";
 
-// Единственное окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная).
+// Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
+// дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
 // Раньше было три окна, которые прятали и показывали по очереди: на GNOME/Wayland после этого
 // оставались невидимые окна. Размер окна при смене страницы задаёт Rust (src/app.rs).
 export component AppWindow inherits Window {
     in-out property <int> page: 0;
-    in property <string> config-name: "Управление складом";
-    in property <string> config-info: "Конфигурация · версия 1.2.0";
+    in property <string> config-name;
+    in property <string> config-info;
 
     // Выбор базы
     in-out property <int> selected-recent <=> start-page.selected-recent;
     in-out property <[RecentDb]> recent <=> start-page.recent;
+    in property <string> start-error <=> start-page.error;
+    in property <bool> start-busy <=> start-page.busy;
     callback open <=> start-page.open;
 
     // Окно «Создать базу»: состояние формы живёт здесь, окно показывается поверх выбора базы.
@@ -34,6 +40,8 @@ export component AppWindow inherits Window {
     in-out property <string> new-password-repeat;
     in-out property <bool> new-protect-password;
     in-out property <bool> new-protect-users;
+    in-out property <string> create-error;
+    in property <bool> create-busy;
     callback create-confirmed();
     callback choose-folder();
 
@@ -43,6 +51,8 @@ export component AppWindow inherits Window {
     in-out property <string> add-file;
     in-out property <string> add-address;
     in-out property <string> add-name;
+    in-out property <string> add-error;
+    in property <bool> add-busy;
     callback add-confirmed();
     callback choose-file();
 
@@ -94,6 +104,8 @@ export component AppWindow inherits Window {
     in property <string> base-name <=> main-page.base-name;
     in property <string> database-name <=> main-page.database-name;
     in property <string> mode-text <=> main-page.mode-text;
+    in property <string> user-text <=> main-page.user-text;
+    in property <string> user-initials <=> main-page.user-initials;
     in property <[NavRow]> nav <=> main-page.nav;
     in property <[TabItem]> tabs <=> main-page.tabs;
     in property <int> active-tab <=> main-page.active-tab;
@@ -103,22 +115,50 @@ export component AppWindow inherits Window {
     callback nav-clicked <=> main-page.nav-clicked;
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
+    callback tab-detached <=> main-page.tab-detached;
+    callback tab-reordered <=> main-page.tab-reordered;
+    // Перетаскивание вкладок между окнами: код окон (src/windows.rs) двигает окно с вкладкой.
+    callback tab-drag-moved(int, length, length, bool);
+    callback tab-drag-ended(int, length, length, bool);
+    in property <bool> drop-target;
+    in property <int> insert-at: -1;
+    out property <length> strip-left: root.page == 4 ? host-tabs.strip-left : main-page.strip-left;
+    out property <length> strip-top: root.page == 4 ? host-tabs.strip-top : main-page.strip-top;
+    out property <length> strip-width: root.page == 4 ? host-tabs.strip-width : main-page.strip-width;
+    out property <length> strip-tab-width: root.page == 4 ? host-tabs.strip-tab-width : main-page.strip-tab-width;
+    // Страница 4 (дополнительное окно с вкладками): вернуть вкладку в главное окно.
+    callback tab-returned(int);
+    // Страница 4: заголовок окна.
+    in property <string> doc-title;
+
+    // Своя панель окна вместо системной: на главной странице её роль играет шапка, на остальных
+    // тонкая полоса `WindowBar`. Края окна тянутся за `resize-border-width`.
+    no-frame: true;
+    resize-border-width: 6px;
+    // Окно идёт за указателем: поверх остальных (иначе GNOME прячет новое окно за активным)
+    // и меньше обычного (см. DRAG_SIZE в src/windows.rs).
+    in property <bool> keep-on-top;
+    always-on-top: root.keep-on-top;
+    // Вместо «призрака» вкладки за указателем идёт настоящее окно.
+    in property <bool> follower-active;
+    private property <length> chrome-height: root.page == 2 ? 0px : 36px;
 
     title: root.page == 0 ? "Ostov — Выбор базы"
         : root.page == 1 ? "Ostov — " + login-page.heading
+        : root.page == 4 ? root.doc-title + " — Ostov"
         : "Ostov — " + main-page.base-name;
     preferred-width: 1200px;
     preferred-height: 760px;
-    min-width: root.page == 2 ? 1000px : 960px;
-    min-height: root.page == 0 ? 720px : 600px;
+    min-width: root.keep-on-top ? 480px : root.page == 2 ? 1000px : root.page == 4 ? 760px : 960px;
+    min-height: root.keep-on-top ? 320px : root.page == 0 ? 720px : root.page == 4 ? 520px : 600px;
     default-font-family: "Open Sans";
     background: Theme.bg;
 
     start-page := StartPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 0;
         config-name: root.config-name;
         config-info: root.config-info;
@@ -128,9 +168,9 @@ export component AppWindow inherits Window {
 
     login-page := LoginPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 1;
         config-name: root.config-name;
         config-info: root.config-info;
@@ -138,19 +178,65 @@ export component AppWindow inherits Window {
 
     main-page := MainPage {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         visible: root.page == 2;
+        maximized: root.maximized;
+        drop-target: root.drop-target;
+        insert-at: root.insert-at;
+        follower-active: root.follower-active;
+        tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
+        tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
+        minimize => { root.minimized = true; }
+        toggle-maximize => { root.maximized = !root.maximized; }
+        close-window => { root.close(); }
         settings-clicked => { root.settings-open = true; }
         user-add-clicked => { root.adding-user = true; }
     }
 
+    // Дополнительное окно: навигация (свёрнута до значков, пока не развернули) и вкладки. Пункт
+    // навигации открывает вкладку в этом же окне.
+    in-out property <bool> host-nav-collapsed: true;
+    host-nav := NavPanel {
+        visible: root.page == 4;
+        x: 0px;
+        y: root.chrome-height;
+        height: root.height - root.chrome-height;
+        rows: root.nav;
+        collapsed <=> root.host-nav-collapsed;
+        clicked(id) => { root.nav-clicked(id); }
+    }
+    host-tabs := TabHost {
+        visible: root.page == 4;
+        x: host-nav.width;
+        y: root.chrome-height;
+        width: root.width - host-nav.width;
+        height: root.height - root.chrome-height;
+        extra: true;
+        tabs: root.tabs;
+        active-tab: root.active-tab;
+        users: root.users;
+        user-message: root.user-message;
+        tab-selected(i) => { root.tab-selected(i); }
+        tab-closed(i) => { root.tab-closed(i); }
+        tab-detached(i) => { root.tab-detached(i); }
+        tab-reordered(from, to) => { root.tab-reordered(from, to); }
+        tab-drag-moved(i, x, y, out) => { root.tab-drag-moved(i, x, y, out); }
+        tab-drag-ended(i, x, y, out) => { root.tab-drag-ended(i, x, y, out); }
+        drop-target: root.drop-target;
+        insert-at: root.insert-at;
+        follower-active: root.follower-active;
+        tab-returned(i) => { root.tab-returned(i); }
+        user-add-clicked => { root.adding-user = true; }
+        user-toggle(i) => { root.user-toggle(i); }
+    }
+
     if root.creating && root.page == 0 : CreateDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         server <=> root.create-server;
         db-name <=> root.new-name;
         folder <=> root.new-folder;
@@ -162,10 +248,13 @@ export component AppWindow inherits Window {
         password-repeat <=> root.new-password-repeat;
         protect-password <=> root.new-protect-password;
         protect-users <=> root.new-protect-users;
+        error: root.create-error;
+        busy: root.create-busy;
         confirmed => { root.create-confirmed(); }
         choose-folder => { root.choose-folder(); }
         cancelled => {
             root.creating = false;
+            root.create-error = "";
             root.new-password = "";
             root.new-password-repeat = "";
             root.new-admin-password = "";
@@ -175,23 +264,25 @@ export component AppWindow inherits Window {
 
     if root.adding && root.page == 0 : AddDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         server <=> root.add-server;
         file <=> root.add-file;
         address <=> root.add-address;
         db-name <=> root.add-name;
+        error: root.add-error;
+        busy: root.add-busy;
         confirmed => { root.add-confirmed(); }
-        cancelled => { root.adding = false; }
+        cancelled => { root.adding = false; root.add-error = ""; }
         choose-file => { root.choose-file(); }
     }
 
     if root.settings-open : SettingsDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         dark: root.dark-theme;
         radius-mode: root.radius-mode;
         density-mode: root.density-mode;
@@ -205,9 +296,9 @@ export component AppWindow inherits Window {
 
     if root.adding-user : UserDialog {
         x: 0px;
-        y: 0px;
+        y: root.chrome-height;
         width: root.width;
-        height: root.height;
+        height: root.height - root.chrome-height;
         roles: root.roles;
         error: root.user-error;
         login <=> root.nu-login;
@@ -221,5 +312,24 @@ export component AppWindow inherits Window {
             root.nu-password = "";
             root.nu-repeat = "";
         }
+    }
+
+    if root.page != 2 : WindowBar {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.chrome-height;
+        title: root.title;
+        maximized: root.maximized;
+        minimize => { root.minimized = true; }
+        toggle-maximize => { root.maximized = !root.maximized; }
+        close-window => { root.close(); }
+    }
+
+    // Без системной рамки у окна нет границы: рисуем свою (пропускает события, ничего не ловит).
+    Rectangle {
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        visible: !root.maximized;
     }
 }

@@ -1,0 +1,72 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+
+// Пункт контекстного меню. id возвращается в колбэке, по нему Rust понимает действие.
+// divider: тонкая черта над пунктом (группировка). danger: опасное действие красным.
+export struct MenuAction { id: string, label: string, icon: string, danger: bool, enabled: bool, divider: bool }
+
+export global MenuMetrics {
+    out property <length> item-height: 32px;
+    out property <length> padding: 4px;
+    out property <length> width: 232px;
+
+    pure public function height(count: int) -> length {
+        return count * self.item-height + 2 * self.padding;
+    }
+}
+
+// Панель меню: содержимое всплывающего окна. Высоту окна задаёт владелец через MenuMetrics.height.
+export component MenuPanel inherits Rectangle {
+    in property <[MenuAction]> actions;
+    callback chosen(string);
+
+    border-radius: Shape.control-radius;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    background: Theme.surface;
+
+    VerticalLayout {
+        padding: MenuMetrics.padding;
+        for action in root.actions : Rectangle {
+            height: MenuMetrics.item-height;
+            border-radius: Shape.control-radius;
+            background: action.enabled && touch.has-hover ? (action.danger ? Theme.danger-soft : Theme.accent-soft) : transparent;
+
+            if action.divider : Rectangle {
+                x: Theme.space-8;
+                y: 0px;
+                width: parent.width - 2 * Theme.space-8;
+                height: 1px;
+                background: Theme.border;
+            }
+
+            HorizontalLayout {
+                padding-left: Theme.space-8;
+                padding-right: Theme.space-8;
+                spacing: Theme.space-8;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        name: action.icon;
+                        tint: !action.enabled ? Theme.disabled-text : action.danger ? Theme.danger : Theme.accent-text;
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+                Text {
+                    text: action.label;
+                    font-size: Theme.font-body;
+                    color: !action.enabled ? Theme.disabled-text : action.danger ? Theme.danger : Theme.text;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            touch := TouchArea {
+                enabled: action.enabled;
+                mouse-cursor: action.enabled ? MouseCursor.pointer : MouseCursor.default;
+                clicked => { root.chosen(action.id); }
+            }
+        }
+    }
+}

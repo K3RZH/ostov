@@ -1,29 +1,25 @@
-//! Логика переходов между страницами приложения. Без ядра: только выбор нужной страницы входа.
+//! Логика переходов между страницами приложения: выбор базы, вход, главная.
+//! Локальная база открывается и проверяет вход через ядро; сервер подключим позже.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
 
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use crate::login::{delay_secs, verify};
+use crate::engine::{
+    Engine, EngineResult, Meta, NewAdmin, NewUser, SessionInfo, call_in_background,
+};
+use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
-use crate::users::{Directory, ROLES};
+use crate::users::Directory;
 use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
 const PAGE_LOGIN: i32 = 1;
 const PAGE_MAIN: i32 = 2;
-
-/// Защита локальной базы в `RecentDb.protection`: пароль на файл и пользователи независимы.
-const PROTECTION_USERS: i32 = 1;
-const PROTECTION_PASSWORD: i32 = 2;
-/// Пароль на файл и пользователи вместе: сначала пароль файла, потом вход пользователя.
-const PROTECTION_BOTH: i32 = 3;
-/// Сервер без администратора: первый вход создаёт его (СТ-36).
-const PROTECTION_FIRST_RUN: i32 = 4;
 
 /// Какая страница входа нужна после выбора базы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,22 +34,6 @@ pub enum LoginKind {
     LocalPassword,
     /// Локальная база без защиты: сразу открываем.
     None,
-}
-
-/// Выбирает страницу входа по типу и защите базы (0 нет, 1 пользователи, 2 пароль на файл).
-pub fn login_kind(server: bool, protection: i32) -> LoginKind {
-    if server {
-        return if protection == PROTECTION_FIRST_RUN {
-            LoginKind::ServerFirstRun
-        } else {
-            LoginKind::Server
-        };
-    }
-    match protection {
-        PROTECTION_USERS => LoginKind::LocalUser,
-        PROTECTION_PASSWORD | PROTECTION_BOTH => LoginKind::LocalPassword,
-        _ => LoginKind::None,
-    }
 }
 
 /// Текст главной кнопки входа для вида страницы.
@@ -125,50 +105,49 @@ pub fn configure_login(
     }
 }
 
-/// Показывает отказ и блокирует кнопку на время задержки, считая секунды таймером.
-fn start_lock(
-    window: &AppWindow,
-    timer: &slint::Timer,
-    kind: LoginKind,
-    message: &'static str,
-    seconds: u32,
-) {
-    let remaining = Rc::new(Cell::new(seconds));
-    show_lock(window, kind, message, seconds);
-    let weak = window.as_weak();
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_secs(1),
-        move || {
-            let Some(window) = weak.upgrade() else { return };
-            let left = remaining.get().saturating_sub(1);
-            remaining.set(left);
-            if left == 0 {
-                window.set_locked(false);
-                window.set_error("".into());
-                window.set_button_text(button_text(kind).into());
-            } else {
-                show_lock(&window, kind, message, left);
-            }
-        },
-    );
-}
-
-fn show_lock(window: &AppWindow, kind: LoginKind, message: &str, seconds: u32) {
-    window.set_locked(true);
-    window.set_error(format!("{message} Повторить можно через {seconds} с.").into());
-    window.set_button_text(format!("{} (через {seconds} с)", button_text(kind)).into());
-}
-
 fn index(value: i32) -> Option<usize> {
     usize::try_from(value).ok()
 }
 
 /// Переносит состояние оболочки в окно.
-pub fn refresh(window: &AppWindow, shell: &Shell) {
-    let rows: Vec<NavRow> = shell
-        .nav_rows()
-        .into_iter()
+/// Вкладки в виде для Slint.
+pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
+    tabs.iter()
+        .map(|tab| TabItem {
+            title: tab.title.as_str().into(),
+            icon: tab.icon.into(),
+            modified: tab.modified,
+            view: tab.view.into(),
+            preview: tab.preview,
+        })
+        .collect()
+}
+
+/// Обновляет вкладки окна на месте: строки модели не пересоздаются, поэтому вкладка, которую
+/// сейчас тащат, не теряет захват мыши (замена всей модели пересоздаёт все вкладки).
+pub fn set_tabs(window: &AppWindow, items: Vec<TabItem>) {
+    let model = window.get_tabs();
+    if let Some(vec) = model.as_any().downcast_ref::<VecModel<TabItem>>() {
+        for (i, item) in items.iter().enumerate() {
+            if i < vec.row_count() {
+                if vec.row_data(i).as_ref() != Some(item) {
+                    vec.set_row_data(i, item.clone());
+                }
+            } else {
+                vec.push(item.clone());
+            }
+        }
+        while vec.row_count() > items.len() {
+            vec.remove(vec.row_count() - 1);
+        }
+        return;
+    }
+    window.set_tabs(ModelRc::new(VecModel::from(items)));
+}
+
+/// Строки дерева навигации в виде для Slint.
+pub fn nav_items(rows: Vec<crate::shell::NavRowData>) -> Vec<NavRow> {
+    rows.into_iter()
         .map(|row| NavRow {
             id: i32::try_from(row.id).unwrap_or_default(),
             title: row.title.into(),
@@ -179,20 +158,13 @@ pub fn refresh(window: &AppWindow, shell: &Shell) {
             selected: row.selected,
             favorite: row.favorite,
         })
-        .collect();
-    let tabs: Vec<TabItem> = shell
-        .tabs()
-        .iter()
-        .map(|tab| TabItem {
-            title: tab.title.as_str().into(),
-            icon: tab.icon.into(),
-            modified: tab.modified,
-            view: tab.view.into(),
-            preview: tab.preview,
-        })
-        .collect();
-    window.set_nav(ModelRc::new(VecModel::from(rows)));
-    window.set_tabs(ModelRc::new(VecModel::from(tabs)));
+        .collect()
+}
+
+pub fn refresh(window: &AppWindow, shell: &Shell) {
+    let tabs = tab_items(shell.tabs());
+    window.set_nav(ModelRc::new(VecModel::from(nav_items(shell.nav_rows()))));
+    set_tabs(window, tabs);
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }
 
@@ -203,7 +175,7 @@ pub fn refresh_users(window: &AppWindow, directory: &Directory) {
         .iter()
         .map(|user| UserRow {
             login: user.login.as_str().into(),
-            name: user.name.as_str().into(),
+            name: user.display_name.as_str().into(),
             role: user.role.as_str().into(),
             active: user.active,
         })
@@ -225,13 +197,17 @@ fn show_page(window: &AppWindow, page: i32) {
         .set_size(slint::LogicalSize::new(width, height));
 }
 
-/// Готовит главную страницу для выбранной базы.
-fn open_main(window: &AppWindow, base: &str, server: bool) -> Shell {
-    let shell = Shell::demo();
+/// Готовит главную страницу для выбранной базы: дерево навигации из метаданных.
+fn open_main(window: &AppWindow, session: &Session) -> Shell {
+    let shell = session
+        .meta
+        .as_ref()
+        .map_or_else(Shell::empty, |meta| Shell::from_meta(meta, session.admin));
+    let base = session.name.as_str();
     window.set_base_name(base.trim_end_matches(".sqlite").into());
     window.set_database_name(base.into());
     window.set_mode_text(
-        if server {
+        if session.server {
             "Режим: сервер"
         } else {
             "Режим: локально"
@@ -242,74 +218,108 @@ fn open_main(window: &AppWindow, base: &str, server: bool) -> Shell {
     shell
 }
 
-/// Строка списка для только что созданной базы. Сервер: путь хранит адрес, защита не нужна.
-/// Локальная: файл `<имя>.sqlite` в папке, защита по флажкам (можно и пароль, и пользователей).
-pub fn new_database(
-    server: bool,
-    name: &str,
-    folder: &str,
-    address: &str,
-    protect_password: bool,
-    protect_users: bool,
-) -> RecentDb {
+/// Строка списка для только что созданной базы. Сервер: путь хранит адрес. Локальная: файл
+/// `<имя>.sqlite` в папке. Нужен ли вход, при открытии скажет ядро (`hello`), здесь не храним.
+pub fn new_database(server: bool, name: &str, folder: &str, address: &str) -> RecentDb {
     if server {
         return RecentDb {
             name: name.into(),
             path: address.into(),
-            when: "только что".into(),
+            when: "".into(),
             server: true,
             protection: 0,
         };
     }
     let file = format!("{name}.sqlite");
-    let protection = match (protect_password, protect_users) {
-        (true, true) => PROTECTION_BOTH,
-        (true, false) => PROTECTION_PASSWORD,
-        (false, true) => PROTECTION_USERS,
-        (false, false) => 0,
-    };
     RecentDb {
-        path: format!("{}/{file}", folder.trim_end_matches('/')).into(),
+        path: short_home(&format!("{}/{file}", folder.trim_end_matches('/'))).into(),
         name: file.into(),
-        when: "только что".into(),
+        when: "".into(),
         server: false,
-        protection,
+        protection: 0,
     }
 }
 
 /// Заменяет домашнюю папку на `~`: так путь короче и привычнее.
 fn short_home(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
+    // Сравниваем с разделителем: иначе при HOME=/home/ann путь /home/ann2/… стал бы «~2/…».
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home = home.trim_end_matches('/');
+    match path.strip_prefix(home).filter(|rest| rest.starts_with('/')) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
         _ => path.to_owned(),
     }
 }
 
-/// Строка списка для добавленной существующей базы. Защиту файла заранее не знаем (ядра нет),
-/// поэтому считаем, что её нет.
+/// Строка списка для добавленной существующей базы.
 pub fn existing_database(server: bool, file: &str, address: &str, name: &str) -> RecentDb {
     if server {
         return RecentDb {
             name: name.into(),
             path: address.into(),
-            when: "только что".into(),
+            when: "".into(),
             server: true,
             protection: 0,
         };
     }
     RecentDb {
         name: file.rsplit('/').next().unwrap_or(file).into(),
-        path: file.into(),
-        when: "только что".into(),
+        path: short_home(file).into(),
+        when: "".into(),
         server: false,
         protection: 0,
     }
 }
 
+/// Ставит базу первой в списке недавних и сохраняет список.
+fn add_recent(app: &AppWindow, db: RecentDb) {
+    let rows = crate::recent::push_front(app.get_recent().iter(), db);
+    if let Err(message) = crate::recent::save(&rows) {
+        app.set_start_error(message.into());
+    }
+    app.set_recent(ModelRc::new(VecModel::from(rows)));
+    app.set_selected_recent(0);
+}
+
+/// Пользователь в шапке: имя из сессии ядра. База без пользователей вход не спрашивает.
+fn show_user(app: &AppWindow, user: Option<&SessionInfo>) {
+    let name = user.map(|user| {
+        if user.display_name.trim().is_empty() {
+            user.login.as_str()
+        } else {
+            user.display_name.as_str()
+        }
+    });
+    app.set_user_text(name.unwrap_or("Без входа").into());
+    app.set_user_initials(name.map(initials).unwrap_or_default().into());
+}
+
+/// Инициалы для кружка в шапке: первые буквы двух первых слов.
+fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .take(2)
+        .filter_map(|word| word.chars().next())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// Размер дополнительного окна с вкладками.
+pub const HOST_SIZE: slint::LogicalSize = slint::LogicalSize {
+    width: 1000.0,
+    height: 700.0,
+};
+
+/// Дополнительное окно с вкладками (страница 4): те же настройки вида, что у главного.
+pub fn prepare_host_window(window: &AppWindow, settings: Settings) {
+    apply_settings(window, settings);
+    window.set_page(4);
+    window.window().set_size(HOST_SIZE);
+}
+
 /// Применяет настройки интерфейса: тема и скругление глобальные, окно тоже запоминает выбор.
 fn apply_settings(window: &AppWindow, settings: Settings) {
+    // Каждому окну нужны маска и разбор поля даты; настройки применяются к каждому окну.
+    crate::date_input::install(window);
     window.global::<Theme>().set_dark(settings.dark);
     window
         .global::<Shape>()
@@ -325,7 +335,7 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
 }
 
 /// Настройки, которые сейчас выбраны в окне.
-fn current_settings(window: &AppWindow) -> Settings {
+pub fn current_settings(window: &AppWindow) -> Settings {
     Settings {
         dark: window.get_dark_theme(),
         radius: window.get_radius_mode(),
@@ -339,14 +349,366 @@ fn current_settings(window: &AppWindow) -> Settings {
 struct Session {
     name: String,
     server: bool,
-    protection: i32,
     /// Текущий вид страницы входа (у базы «пароль и пользователи» их два подряд).
     stage: Option<LoginKind>,
-    /// Неудачные попытки подряд: от них зависит задержка.
-    failures: u32,
+    /// Открытая база. Пока она здесь, файл занят: другая программа его не откроет.
+    engine: Option<Arc<dyn Engine>>,
+    /// Метаданные базы для этого пользователя (меню и объекты уже обрезаны по правам).
+    meta: Option<Meta>,
+    /// Показывать ли «Администрирование». Права всё равно проверяет ядро на каждой команде.
+    admin: bool,
+    /// Вошёл ли пользователь (в базе без пользователей входа нет).
+    logged_in: bool,
+}
+
+/// Встроенная роль администратора в ядре (`ostov-model`).
+const ADMIN_ROLE: &str = "admin";
+
+/// База без пользователей пускает без входа, там пользователь и есть администратор.
+fn is_admin(user: Option<&SessionInfo>) -> bool {
+    user.is_none_or(|user| user.roles.iter().any(|role| role == ADMIN_ROLE))
+}
+
+/// Экраны главной страницы, которым нужна открытая база.
+#[derive(Clone)]
+struct Screens {
+    shell: Rc<RefCell<Shell>>,
+    receipts: ReceiptsUi,
+    users: UsersUi,
+}
+
+/// Открывает главную страницу выбранной базы и подключает к ней экраны.
+fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
+    *screens.shell.borrow_mut() = open_main(app, session);
+    screens.receipts.after(app, &screens.shell.borrow());
+    match &session.engine {
+        Some(engine) => screens.receipts.attach(engine.clone()),
+        None => screens
+            .receipts
+            .show_error("Работа с сервером в интерфейсе ещё не подключена."),
+    }
+    let roles = session.meta.as_ref().map_or_else(Vec::new, |meta| {
+        meta.roles.iter().map(|role| role.as_str().into()).collect()
+    });
+    app.set_roles(ModelRc::new(VecModel::<slint::SharedString>::from(roles)));
+    screens.users.clear();
+    if session.admin {
+        screens.users.reload(app);
+    }
+    app.set_password("".into());
+    app.set_repeat("".into());
+    show_page(app, PAGE_MAIN);
+}
+
+/// Открывает локальную базу в фоне и спрашивает ядро, нужен ли вход (`hello`).
+fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, screens: &Screens) {
+    app.set_start_busy(true);
+    let path = db.path.to_string();
+    let weak = app.as_weak();
+    let (session, screens) = (session.clone(), screens.clone());
+    call_in_background(
+        move || {
+            let engine = crate::local_base::open(&path)?;
+            let hello = engine.hello()?;
+            // Без входа метаданные можно взять сразу; со входом их даст ядро после login.
+            let meta = if hello.login_required {
+                None
+            } else {
+                Some(engine.get_meta()?)
+            };
+            Ok((engine, hello, meta))
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_start_busy(false);
+            let (engine, hello, meta) = match result {
+                Ok(opened) => opened,
+                Err(error) => {
+                    app.set_start_error(error.message.into());
+                    return;
+                }
+            };
+            let kind = if hello.login_required {
+                LoginKind::LocalUser
+            } else {
+                LoginKind::None
+            };
+            *session.borrow_mut() = Session {
+                name: db.name.to_string(),
+                stage: Some(kind),
+                engine: Some(engine),
+                meta,
+                admin: is_admin(None),
+                ..Session::default()
+            };
+            if kind == LoginKind::None {
+                show_user(&app, None);
+                enter_main(&app, &screens, &session.borrow());
+                return;
+            }
+            configure_login(&app, kind, &db.name, &db.path);
+            show_page(&app, PAGE_LOGIN);
+        },
+    );
+}
+
+/// Вход в локальную базу: пароль проверяет ядро, задержку после неудач тоже держит оно (СТ-32).
+fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Screens) {
+    let Some(engine) = session.borrow().engine.clone() else {
+        return;
+    };
+    let login = app.get_login().trim().to_owned();
+    let password = app.get_password().to_string();
+    app.set_error("".into());
+    app.set_locked(true);
+    app.set_button_text("Проверяем…".into());
+    let weak = app.as_weak();
+    let (session, screens) = (session.clone(), screens.clone());
+    // Пока ядро проверяет пароль, можно уйти «Назад» и открыть другую базу: такой ответ лишний.
+    let asked = engine.clone();
+    call_in_background(
+        move || {
+            let user = engine.login(&login, &password)?;
+            let meta = engine.get_meta()?;
+            Ok((user, meta))
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            let current = session
+                .borrow()
+                .engine
+                .as_ref()
+                .is_some_and(|engine| Arc::ptr_eq(engine, &asked));
+            drop(asked);
+            if !current {
+                return;
+            }
+            app.set_locked(false);
+            app.set_button_text(button_text(LoginKind::LocalUser).into());
+            match result {
+                Ok((user, meta)) => {
+                    show_user(&app, Some(&user));
+                    {
+                        let mut session = session.borrow_mut();
+                        session.meta = Some(meta);
+                        session.admin = is_admin(Some(&user));
+                        session.logged_in = true;
+                    }
+                    enter_main(&app, &screens, &session.borrow());
+                }
+                Err(error) => {
+                    app.set_password("".into());
+                    app.set_error(error.message.into());
+                }
+            }
+        },
+    );
+}
+
+/// Создаёт файл базы в фоне; в список база попадает, только если ядро её создало.
+fn create_local(app: &AppWindow, db: RecentDb) {
+    let file_password = app
+        .get_new_protect_password()
+        .then(|| app.get_new_password().to_string());
+    let admin = app.get_new_protect_users().then(|| NewAdmin {
+        login: app.get_new_admin_login().trim().to_owned(),
+        password: app.get_new_admin_password().to_string(),
+    });
+    let path = db.path.to_string();
+    app.set_create_error("".into());
+    app.set_create_busy(true);
+    let weak = app.as_weak();
+    call_in_background(
+        // Базу сразу закрываем: открывать её будет «Открыть», как любую другую.
+        move || {
+            crate::local_base::create(&path, file_password.as_deref(), admin.as_ref()).map(|_| ())
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_create_busy(false);
+            match result {
+                Ok(()) => {
+                    add_recent(&app, db);
+                    reset_create(&app);
+                }
+                Err(error) => app.set_create_error(error.message.into()),
+            }
+        },
+    );
+}
+
+/// Очищает окно «Создать базу» и закрывает его. Пароли в свойствах окна не оставляем.
+fn reset_create(app: &AppWindow) {
+    app.set_new_name("".into());
+    app.set_new_address("".into());
+    app.set_new_admin_login("".into());
+    app.set_new_admin_password("".into());
+    app.set_new_admin_repeat("".into());
+    app.set_new_password("".into());
+    app.set_new_password_repeat("".into());
+    app.set_new_protect_password(false);
+    app.set_new_protect_users(false);
+    app.set_create_error("".into());
+    app.set_creating(false);
+}
+
+/// Проверяет добавляемый файл ядром (это база Ostov, её можно открыть) и закрывает его.
+fn add_local(app: &AppWindow, db: RecentDb) {
+    let path = db.path.to_string();
+    app.set_add_error("".into());
+    app.set_add_busy(true);
+    let weak = app.as_weak();
+    call_in_background(
+        move || crate::local_base::open(&path).map(|_| ()),
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_add_busy(false);
+            match result {
+                Ok(()) => {
+                    add_recent(&app, db);
+                    reset_add(&app);
+                }
+                Err(error) => app.set_add_error(error.message.into()),
+            }
+        },
+    );
+}
+
+fn reset_add(app: &AppWindow) {
+    app.set_add_file("".into());
+    app.set_add_address("".into());
+    app.set_add_name("".into());
+    app.set_add_error("".into());
+    app.set_adding(false);
 }
 
 /// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
+/// Обработчики навигации и вкладок окна: выбор, закрытие, порядок, перетаскивание. Подключаются
+/// так же в тестовом стенде (`examples/drag_e2e.rs`), который шлёт окну настоящие события мыши.
+pub fn wire_tabs(
+    app: &AppWindow,
+    shell: &Rc<RefCell<Shell>>,
+    receipts: &crate::receipts_ui::ReceiptsUi,
+    windows: &crate::windows::Windows,
+) {
+    app.on_nav_clicked({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |id| {
+            let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(id) = index(id) {
+                shell.click(id);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+            drop(shell);
+            // Группу могли раскрыть: дерево в дополнительных окнах то же.
+            windows.refresh_hosts();
+        }
+    });
+
+    app.on_tab_selected({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(tab) = index(tab) {
+                shell.select_tab(tab);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+        }
+    });
+
+    app.on_tab_reordered({
+        let (app, shell, receipts, windows) = (
+            app.as_weak(),
+            shell.clone(),
+            receipts.clone(),
+            windows.clone(),
+        );
+        move |from, to| {
+            let Some(app) = app.upgrade() else { return };
+            let (Some(from), Some(to)) = (index(from), index(to)) else {
+                return;
+            };
+            windows.set_active(crate::workspace::WindowRef::Main);
+            receipts.before(&app, &mut shell.borrow_mut());
+            windows.reorder(&app, &shell, crate::workspace::WindowRef::Main, from, to);
+            receipts.after(&app, &shell.borrow());
+        }
+    });
+
+    app.on_tab_drag_moved({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            windows.drag_moved(
+                &app,
+                &shell,
+                crate::workspace::WindowRef::Main,
+                tab,
+                &app,
+                x,
+                y,
+                out,
+            );
+        }
+    });
+
+    app.on_tab_drag_ended({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move |tab, x, y, out| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            let main = crate::workspace::WindowRef::Main;
+            windows.set_active(main);
+            if windows.drag_ended(&app, &shell, main, tab, &app, x, y, out) || !out {
+                return;
+            }
+            // Запасной путь (чистый Wayland): окно создаётся при отпускании.
+            windows.detach_from_main(&app, &shell, tab);
+        }
+    });
+
+    app.on_tab_detached({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(tab) = index(tab) else { return };
+            windows.detach_from_main(&app, &shell, tab);
+        }
+    });
+    app.on_tab_closed({
+        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        move |tab| {
+            let Some(app) = app.upgrade() else { return };
+            let mut shell = shell.borrow_mut();
+            receipts.before(&app, &mut shell);
+            if let Some(tab) = index(tab) {
+                shell.close_tab(tab);
+            }
+            receipts.after(&app, &shell);
+            refresh(&app, &shell);
+        }
+    });
+}
+
 pub fn run() -> Result<(), slint::PlatformError> {
     use slint::Model;
 
@@ -356,113 +718,81 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
-    let shell = Rc::new(RefCell::new(Shell::demo()));
+    app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
+    if let Some((title, version)) = crate::local_base::config_title() {
+        app.set_config_name(title.into());
+        app.set_config_info(format!("Конфигурация · версия {version}").into());
+    }
+    let shell = Rc::new(RefCell::new(Shell::empty()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
-    let directory = Rc::new(RefCell::new(Directory::demo()));
-    refresh_users(&app, &directory.borrow());
-    app.set_roles(ModelRc::new(VecModel::from(
-        ROLES
-            .iter()
-            .map(|role| (*role).into())
-            .collect::<Vec<slint::SharedString>>(),
-    )));
+    let windows = crate::windows::Windows::new(&receipts);
     let session = Rc::new(RefCell::new(Session::default()));
-    // Таймер задержки после неудачных попыток входа (должен жить, пока идёт отсчёт).
-    let lock_timer = Rc::new(slint::Timer::default());
+    let directory = Rc::new(RefCell::new(Directory::default()));
+    let screens = Screens {
+        shell: shell.clone(),
+        receipts: receipts.clone(),
+        users: UsersUi {
+            main: app.as_weak(),
+            windows: windows.clone(),
+            directory: directory.clone(),
+            session: session.clone(),
+        },
+    };
 
     // Закрытие окна пользователем завершает приложение.
     app.window().on_close_requested(quit_on_close);
 
     app.on_open({
         let app = app.as_weak();
-        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
-        let receipts = receipts.clone();
+        let (session, screens) = (session.clone(), screens.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
             let Some(db) = index(app.get_selected_recent()).and_then(|i| recent.row_data(i)) else {
                 return;
             };
-            let kind = login_kind(db.server, db.protection);
-            *session.borrow_mut() = Session {
-                name: db.name.to_string(),
-                server: db.server,
-                protection: db.protection,
-                stage: Some(kind),
-                failures: 0,
-            };
-            lock_timer.stop();
-            if kind == LoginKind::None {
-                *shell.borrow_mut() = open_main(&app, &db.name, db.server);
-                receipts.after(&app, &shell.borrow());
-                show_page(&app, PAGE_MAIN);
+            app.set_start_error("".into());
+            if !db.server {
+                open_local(&app, db, &session, &screens);
                 return;
             }
-            configure_login(&app, kind, &db.name, &db.path);
-            show_page(&app, PAGE_LOGIN);
+            // Сервер подключается через ostov-client (RemoteConnector), это следующий шаг.
+            app.set_start_error(
+                "Подключение к серверу в интерфейсе ещё не сделано: пока открываются только файлы баз."
+                    .into(),
+            );
         }
     });
 
     app.on_submit({
         let app = app.as_weak();
-        let (session, shell, lock_timer) = (session.clone(), shell.clone(), lock_timer.clone());
-        let receipts = receipts.clone();
+        let (session, screens) = (session.clone(), screens.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let kind = session.borrow().stage.unwrap_or(LoginKind::None);
-            let result = verify(
-                kind,
-                app.get_login().as_str(),
-                app.get_password().as_str(),
-                app.get_repeat().as_str(),
-            );
-            if let Err(rejection) = result {
-                let failures = {
-                    let mut session = session.borrow_mut();
-                    if rejection.counts {
-                        session.failures += 1;
-                    }
-                    session.failures
-                };
-                let wait = if rejection.counts {
-                    delay_secs(failures)
-                } else {
-                    0
-                };
-                if wait > 0 {
-                    start_lock(&app, &lock_timer, kind, rejection.message, wait);
-                } else {
-                    app.set_error(rejection.message.into());
+            match kind {
+                LoginKind::LocalUser => submit_local_login(&app, &session, &screens),
+                // Без ядра вход не пускаем: сервер (ostov-client) и пароль файла (В-2) ещё не
+                // подключены, а поддельная проверка на этом пути опасна.
+                LoginKind::Server
+                | LoginKind::ServerFirstRun
+                | LoginKind::LocalPassword
+                | LoginKind::None => {
+                    app.set_error("Этот вход ещё не подключён к ядру.".into());
                 }
-                return;
             }
-            // Проверку сделает ядро (Engine API); пока пускаем, если данные не пустые.
-            let (name, server, protection) = {
-                let mut session = session.borrow_mut();
-                session.failures = 0;
-                (session.name.clone(), session.server, session.protection)
-            };
-            if kind == LoginKind::LocalPassword && protection == PROTECTION_BOTH {
-                // Файл открыт: теперь вход пользователя.
-                session.borrow_mut().stage = Some(LoginKind::LocalUser);
-                configure_login(&app, LoginKind::LocalUser, &name, &app.get_source_detail());
-                return;
-            }
-            *shell.borrow_mut() = open_main(&app, &name, server);
-            receipts.after(&app, &shell.borrow());
-            app.set_password("".into());
-            app.set_repeat("".into());
-            show_page(&app, PAGE_MAIN);
         }
     });
 
     // «Назад к выбору базы» и «Сменить»: вернуться к списку баз.
     let to_start = {
         let app = app.as_weak();
-        let lock_timer = lock_timer.clone();
+        let (session, receipts) = (session.clone(), receipts.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            lock_timer.stop();
+            // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
+            *session.borrow_mut() = Session::default();
+            receipts.detach();
             app.set_password("".into());
             app.set_repeat("".into());
             app.set_error("".into());
@@ -481,25 +811,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 app.get_new_name().trim(),
                 app.get_new_folder().as_str(),
                 app.get_new_address().trim(),
-                app.get_new_protect_password(),
-                app.get_new_protect_users(),
             );
-            // Ядро ещё не создаёт файл базы: добавляем строку в список, чтобы пройти весь путь.
-            let mut rows = vec![db];
-            rows.extend(app.get_recent().iter());
-            app.set_recent(ModelRc::new(VecModel::from(rows)));
-            app.set_selected_recent(0);
-            app.set_new_name("".into());
-            app.set_new_address("".into());
-            app.set_new_admin_login("".into());
-            app.set_new_admin_password("".into());
-            app.set_new_admin_repeat("".into());
-            // Пароль базы здесь не храним: файл создаст ядро, ему и передадим.
-            app.set_new_password("".into());
-            app.set_new_password_repeat("".into());
-            app.set_new_protect_password(false);
-            app.set_new_protect_users(false);
-            app.set_creating(false);
+            if db.server {
+                // Базу на сервере создаст первый вход (create_remote), пока только запоминаем адрес.
+                add_recent(&app, db);
+                reset_create(&app);
+                return;
+            }
+            create_local(&app, db);
         }
     });
 
@@ -524,7 +843,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_theme_chosen({
-        let app = app.as_weak();
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |dark| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -532,12 +851,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_radius_chosen({
-        let app = app.as_weak();
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |radius| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -545,12 +865,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_density_chosen({
-        let app = app.as_weak();
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |density| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -558,12 +879,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
 
     app.on_font_chosen({
-        let app = app.as_weak();
+        let (app, windows) = (app.as_weak(), windows.clone());
         move |font| {
             let Some(app) = app.upgrade() else { return };
             let settings = Settings {
@@ -571,6 +893,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ..current_settings(&app)
             };
             apply_settings(&app, settings);
+            windows.each(|window| apply_settings(window, settings));
             settings.save();
         }
     });
@@ -605,103 +928,193 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 app.get_add_address().trim(),
                 app.get_add_name().trim(),
             );
-            let mut rows = vec![db];
-            rows.extend(app.get_recent().iter());
-            app.set_recent(ModelRc::new(VecModel::from(rows)));
-            app.set_selected_recent(0);
-            app.set_add_file("".into());
-            app.set_add_address("".into());
-            app.set_add_name("".into());
-            app.set_adding(false);
+            if db.server {
+                add_recent(&app, db);
+                reset_add(&app);
+                return;
+            }
+            add_local(&app, db);
         }
     });
 
-    app.on_user_toggle({
-        let app = app.as_weak();
-        let directory = directory.clone();
-        move |row| {
-            let Some(app) = app.upgrade() else { return };
-            let result = index(row).map_or(Ok(()), |i| directory.borrow_mut().toggle(i));
-            app.set_user_message(result.err().unwrap_or_default().into());
-            refresh_users(&app, &directory.borrow());
-        }
-    });
-
-    app.on_user_add_confirmed({
-        let app = app.as_weak();
-        let directory = directory.clone();
-        move || {
-            let Some(app) = app.upgrade() else { return };
-            let role = index(app.get_nu_role())
-                .and_then(|i| ROLES.get(i).copied())
-                .unwrap_or(ROLES[1]);
-            let result = directory.borrow_mut().add(
-                app.get_nu_login().as_str(),
-                app.get_nu_name().as_str(),
-                role,
-            );
-            match result {
-                Err(message) => app.set_user_error(message.into()),
-                Ok(()) => {
-                    refresh_users(&app, &directory.borrow());
-                    app.set_user_message("".into());
-                    app.set_user_error("".into());
-                    app.set_nu_login("".into());
-                    app.set_nu_name("".into());
-                    app.set_nu_role(1);
-                    // Пароль пользователя здесь не храним: его задаст ядро (хэш Argon2id).
-                    app.set_nu_password("".into());
-                    app.set_nu_repeat("".into());
-                    app.set_adding_user(false);
-                }
+    wire_users(&app, &screens.users);
+    windows.on_host_created({
+        let (main, users) = (app.as_weak(), screens.users.clone());
+        move |window| {
+            if let Some(main) = main.upgrade() {
+                refresh_users(window, &users.directory.borrow());
+                window.set_roles(main.get_roles());
+                wire_users(window, &users);
             }
         }
     });
 
-    app.on_nav_clicked({
-        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
-        move |id| {
-            let Some(app) = app.upgrade() else { return };
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(id) = index(id) {
-                shell.click(id);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
-
-    app.on_tab_selected({
-        let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
-        move |tab| {
-            let Some(app) = app.upgrade() else { return };
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(tab) = index(tab) {
-                shell.select_tab(tab);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
-
-    app.on_tab_closed({
-        let (app, shell, receipts) = (app.as_weak(), shell, receipts);
-        move |tab| {
-            let Some(app) = app.upgrade() else { return };
-            let mut shell = shell.borrow_mut();
-            receipts.before(&app, &mut shell);
-            if let Some(tab) = index(tab) {
-                shell.close_tab(tab);
-            }
-            receipts.after(&app, &shell);
-            refresh(&app, &shell);
-        }
-    });
+    wire_tabs(&app, &shell, &receipts, &windows);
 
     app.show()?;
     slint::run_event_loop_until_quit()
+}
+
+/// «Пользователи и роли» через ядро: список, добавление, включение и отключение. Справочник
+/// один на все окна; проверки (пароль, роль, последний администратор) делает ядро.
+#[derive(Clone)]
+struct UsersUi {
+    main: slint::Weak<AppWindow>,
+    windows: crate::windows::Windows,
+    directory: Rc<RefCell<Directory>>,
+    session: Rc<RefCell<Session>>,
+}
+
+impl UsersUi {
+    fn show_all(&self) {
+        if let Some(main) = self.main.upgrade() {
+            refresh_users(&main, &self.directory.borrow());
+        }
+        self.windows
+            .each(|host| refresh_users(host, &self.directory.borrow()));
+    }
+
+    /// Забывает пользователей прошлой базы.
+    fn clear(&self) {
+        *self.directory.borrow_mut() = Directory::default();
+        self.show_all();
+    }
+
+    /// Выполняет команду ядра в фоне и перечитывает список; `done` получает текст ошибки ядра.
+    fn run(
+        &self,
+        window: &AppWindow,
+        command: impl FnOnce(&dyn Engine) -> EngineResult<()> + Send + 'static,
+        done: impl FnOnce(&AppWindow, Result<(), String>) + 'static,
+    ) {
+        let Some(engine) = self.session.borrow().engine.clone() else {
+            return;
+        };
+        let (users, weak) = (self.clone(), window.as_weak());
+        call_in_background(
+            move || {
+                command(&*engine)?;
+                engine.admin_users()
+            },
+            move |result| {
+                let Some(window) = weak.upgrade() else { return };
+                match result {
+                    Ok(list) => {
+                        *users.directory.borrow_mut() = Directory::new(list);
+                        users.show_all();
+                        done(&window, Ok(()));
+                    }
+                    Err(error) => done(&window, Err(error.message)),
+                }
+            },
+        );
+    }
+
+    /// В базе появился первый пользователь: ядро теперь требует вход, текущая сессия без
+    /// пользователя больше ничего не может. Показываем страницу входа той же открытой базы.
+    fn ask_login(&self) {
+        let Some(main) = self.main.upgrade() else {
+            return;
+        };
+        let name = {
+            let mut session = self.session.borrow_mut();
+            session.stage = Some(LoginKind::LocalUser);
+            session.name.clone()
+        };
+        configure_login(&main, LoginKind::LocalUser, &name, "");
+        main.set_hint("В базе появился администратор: войдите под ним.".into());
+        show_page(&main, PAGE_LOGIN);
+    }
+
+    fn reload(&self, window: &AppWindow) {
+        self.run(
+            window,
+            |_| Ok(()),
+            |window, result| window.set_user_message(result.err().unwrap_or_default().into()),
+        );
+    }
+}
+
+/// Подключает «Пользователи и роли» к окну `window`.
+fn wire_users(window: &AppWindow, users: &UsersUi) {
+    window.on_user_toggle({
+        let (window, users) = (window.as_weak(), users.clone());
+        move |row| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some((login, active)) = index(row).and_then(|i| {
+                users
+                    .directory
+                    .borrow()
+                    .get(i)
+                    .map(|u| (u.login.clone(), u.active))
+            }) else {
+                return;
+            };
+            users.run(
+                &window,
+                move |engine| engine.admin_set_user_active(&login, !active),
+                |window, result| window.set_user_message(result.err().unwrap_or_default().into()),
+            );
+        }
+    });
+
+    window.on_user_add_confirmed({
+        let (window, users) = (window.as_weak(), users.clone());
+        move || {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some(role) =
+                index(window.get_nu_role()).and_then(|i| window.get_roles().row_data(i))
+            else {
+                window.set_user_error("Выберите роль.".into());
+                return;
+            };
+            // В базе без пользователей первый добавленный включает вход: если он не
+            // администратор, управлять пользователями станет некому.
+            let first = !users.session.borrow().logged_in;
+            if first && role != ADMIN_ROLE {
+                window.set_user_error(
+                    format!(
+                        "Первым добавьте администратора (роль «{ADMIN_ROLE}»): после этого база будет спрашивать вход."
+                    )
+                    .into(),
+                );
+                return;
+            }
+            let login = window.get_nu_login().trim().to_owned();
+            let name = window.get_nu_name().trim().to_owned();
+            let user = NewUser {
+                display_name: if name.is_empty() { login.clone() } else { name },
+                login,
+                role: role.to_string(),
+                password: window.get_nu_password().to_string(),
+            };
+            window.set_user_error("".into());
+            let after = users.clone();
+            users.run(
+                &window,
+                move |engine| engine.admin_add_user(&user),
+                move |window, result| match result {
+                    Err(message) => window.set_user_error(message.into()),
+                    Ok(()) => {
+                        window.set_user_message("".into());
+                        window.set_nu_login("".into());
+                        window.set_nu_name("".into());
+                        window.set_nu_role(0);
+                        window.set_nu_password("".into());
+                        window.set_nu_repeat("".into());
+                        window.set_adding_user(false);
+                        if first {
+                            after.ask_login();
+                        }
+                    }
+                },
+            );
+        }
+    });
 }
 
 fn quit_on_close() -> slint::CloseRequestResponse {
@@ -714,17 +1127,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn server_always_asks_login() {
-        assert_eq!(login_kind(true, 0), LoginKind::Server);
-        assert_eq!(login_kind(true, 2), LoginKind::Server);
-        assert_eq!(login_kind(true, 4), LoginKind::ServerFirstRun);
+    fn initials_take_two_first_letters() {
+        assert_eq!(initials("Артём Кержанцев"), "АК");
+        assert_eq!(initials("admin"), "A");
+        assert_eq!(initials("иван петров сидорович"), "ИП");
+        assert_eq!(initials("  "), "");
     }
 
     #[test]
-    fn local_depends_on_protection() {
-        assert_eq!(login_kind(false, 1), LoginKind::LocalUser);
-        assert_eq!(login_kind(false, 2), LoginKind::LocalPassword);
-        assert_eq!(login_kind(false, 3), LoginKind::LocalPassword);
-        assert_eq!(login_kind(false, 0), LoginKind::None);
+    fn new_local_base_is_file_in_folder() {
+        let db = new_database(false, "Склад", "/data/Ostov/", "");
+        assert_eq!(db.name, "Склад.sqlite");
+        assert_eq!(db.path, "/data/Ostov/Склад.sqlite");
+        assert!(!db.server);
+    }
+
+    #[test]
+    fn short_home_needs_separator() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let home = home.trim_end_matches('/');
+        if home.is_empty() {
+            return;
+        }
+        assert_eq!(
+            short_home(&format!("{home}/Ostov/a.sqlite")),
+            "~/Ostov/a.sqlite"
+        );
+        let neighbour = format!("{home}2/a.sqlite");
+        assert_eq!(short_home(&neighbour), neighbour);
+    }
+
+    #[test]
+    fn base_without_users_is_admin() {
+        assert!(is_admin(None));
+        let user = |roles: &[&str]| SessionInfo {
+            login: "u".into(),
+            display_name: "".into(),
+            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+        };
+        assert!(is_admin(Some(&user(&["admin"]))));
+        assert!(!is_admin(Some(&user(&["storekeeper"]))));
     }
 }

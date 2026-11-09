@@ -1,0 +1,41 @@
+import { Theme } from "../theme.slint";
+import { WindowControls } from "window-controls.slint";
+
+// Тонкая панель окна для страниц без своей шапки (выбор базы, вход, окно документа):
+// заголовок, пустое место двигает окно, справа кнопки окна.
+export component WindowBar inherits Rectangle {
+    in property <string> title;
+    in property <bool> maximized;
+    callback minimize();
+    callback toggle-maximize();
+    callback close-window();
+
+    background: Theme.surface;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+    WindowMoveArea {
+        TouchArea {
+            double-clicked => { root.toggle-maximize(); }
+        }
+        Text {
+            x: Theme.space-12;
+            text: root.title;
+            font-size: Theme.font-caption;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+    }
+    WindowControls {
+        x: parent.width - 3 * 46px;
+        width: 3 * 46px;
+        height: parent.height;
+        maximized: root.maximized;
+        minimize => { root.minimize(); }
+        toggle-maximize => { root.toggle-maximize(); }
+        close-window => { root.close-window(); }
+    }
+}

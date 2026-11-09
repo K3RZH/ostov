@@ -10,6 +10,11 @@ description = "Ostov: приложение на Slint: ErpGrid, формы, те
 workspace = true
 
 [dependencies]
+ostov-api = { path = "../ostov-api" }
+# Только чтобы взять LocalConnector (режим 1); дальше интерфейс работает через трейт Engine.
+ostov-core = { path = "../ostov-core" }
+# Встроенная конфигурация «Склад» (ostov_meta::demo), пока нет выбора папки конфигурации.
+ostov-meta = { path = "../ostov-meta" }
 slint = "1.18.1"
 # Системное окно выбора папки (на Linux через xdg-portal, в GNOME родное окно).
 rfd = "0.17.2"
