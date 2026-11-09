@@ -152,6 +152,12 @@ impl pb::LoginReply {
             display_name: session.display_name,
             roles: session.roles,
             token,
+            system: Some(pb::SystemRights {
+                closed_period: session.system.closed_period,
+                set_closing_date: session.system.set_closing_date,
+                admin: session.system.admin,
+                update_config: session.system.update_config,
+            }),
         }
     }
 }
@@ -162,6 +168,15 @@ pub fn session_from_pb(r: pb::LoginReply) -> (api::SessionInfo, String) {
         login: r.login,
         display_name: r.display_name,
         roles: r.roles,
+        system: r
+            .system
+            .map(|s| api::SystemRights {
+                closed_period: s.closed_period,
+                set_closing_date: s.set_closing_date,
+                admin: s.admin,
+                update_config: s.update_config,
+            })
+            .unwrap_or_default(),
     };
     (session, r.token)
 }
@@ -297,7 +312,24 @@ impl From<api::Meta> for pb::Meta {
                     rights: Some(o.rights.into()),
                 })
                 .collect(),
-            roles: m.roles,
+            roles: m
+                .roles
+                .into_iter()
+                .map(|r| pb::Role {
+                    name: r.name,
+                    title: r.title,
+                })
+                .collect(),
+            registers: m
+                .registers
+                .into_iter()
+                .map(|r| pb::RegisterMeta {
+                    name: r.name,
+                    title: r.title,
+                    dimensions: r.dimensions.into_iter().map(Into::into).collect(),
+                    resources: r.resources.into_iter().map(Into::into).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -333,10 +365,27 @@ impl TryFrom<pb::Meta> for api::Meta {
                 rights: o.rights.map(Into::into).unwrap_or_default(),
             });
         }
+        let mut registers = Vec::with_capacity(m.registers.len());
+        for r in m.registers {
+            registers.push(api::RegisterMeta {
+                name: r.name,
+                title: r.title,
+                dimensions: defs_from_pb(r.dimensions)?,
+                resources: defs_from_pb(r.resources)?,
+            });
+        }
         Ok(Self {
             menu: m.menu.into_iter().map(Into::into).collect(),
             objects,
-            roles: m.roles,
+            registers,
+            roles: m
+                .roles
+                .into_iter()
+                .map(|r| api::RoleInfo {
+                    name: r.name,
+                    title: r.title,
+                })
+                .collect(),
         })
     }
 }
@@ -354,22 +403,26 @@ impl From<api::ListQuery> for pb::ListQuery {
             deleted: q.deleted,
             after_key: q.after_key,
             size: q.size,
+            filter: fields_to_pb(q.filter).values,
         }
     }
 }
 
-impl From<pb::ListQuery> for api::ListQuery {
-    fn from(q: pb::ListQuery) -> Self {
-        Self {
+impl TryFrom<pb::ListQuery> for api::ListQuery {
+    type Error = EngineError;
+
+    fn try_from(q: pb::ListQuery) -> Result<Self> {
+        Ok(Self {
             object: q.object,
             order: q.order,
             descending: q.descending,
             search: q.search,
             posted: q.posted,
             deleted: q.deleted,
+            filter: fields_from_pb(Some(pb::Fields { values: q.filter }))?,
             after_key: q.after_key,
             size: q.size,
-        }
+        })
     }
 }
 

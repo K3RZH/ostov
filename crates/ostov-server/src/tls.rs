@@ -3,7 +3,7 @@
 //! файл `server.crt` администратор раздаёт на рабочие места (ADR-021).
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 pub const CERT_FILE: &str = "server.crt";
@@ -39,8 +39,17 @@ impl Tls {
             key_pem: made.signing_key.serialize_pem(),
         };
         fs::create_dir_all(dir)?;
-        fs::write(&key, &tls.key_pem)?;
+        write_key(&key, &tls.key_pem)?;
         fs::write(&cert, &tls.cert_pem)?;
         Ok(tls)
     }
+}
+
+/// Закрытый ключ читает только владелец (на Linux права 600).
+fn write_key(path: &Path, pem: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(pem.as_bytes())
 }

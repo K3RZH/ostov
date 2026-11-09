@@ -142,7 +142,7 @@ fn receipt_is_saved_posted_and_listed() {
 
     let page = engine.list(&query("receipt", 10)).unwrap();
     assert_eq!(page.total, Some(1));
-    assert_eq!(page.rows[0].values["posted"], Value::Int(1));
+    assert_eq!(page.rows[0].values["posted"], Value::Bool(true));
     assert_eq!(page.rows[0].values["number"], Value::Int(1));
     assert_eq!(page.rows[0].values["warehouse"], titled(main, "Основной"));
 
@@ -346,11 +346,11 @@ fn demo_base_has_data_to_scroll() {
         .collect();
     let posted = all
         .iter()
-        .filter(|r| r.values["posted"] == Value::Int(1))
+        .filter(|r| r.values["posted"] == Value::Bool(true))
         .count();
     let deleted = all
         .iter()
-        .filter(|r| r.values["deleted"] == Value::Int(1))
+        .filter(|r| r.values["deleted"] == Value::Bool(true))
         .count();
     assert_eq!(all.len(), 300);
     assert_eq!(deleted, 10);
@@ -1159,7 +1159,7 @@ fn list_rows_carry_version_and_filter_by_status() {
             }
         }
     };
-    let flag = |r: &Row, name: &str| r.values[name] == Value::Int(1);
+    let flag = |r: &Row, name: &str| r.values[name] == Value::Bool(true);
 
     // Пометка на удаление по версии прямо из строки списка, без лишнего get.
     let first = all(ListQuery {
@@ -1321,6 +1321,7 @@ fn first_admin_turns_login_on() {
     let session = engine.create_first_admin("Boss", ADMIN_PASSWORD).unwrap();
     assert_eq!(session.login, "boss");
     assert_eq!(session.roles, vec!["admin".to_owned()]);
+    assert!(session.system.admin);
     assert_eq!(
         engine
             .create_first_admin("boss2", ADMIN_PASSWORD)
@@ -2016,4 +2017,225 @@ fn batch_is_all_or_nothing() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden);
     assert_eq!(err.message, "Запись 1: Нет права на создание «Товары».");
+}
+
+#[test]
+fn failed_first_admin_leaves_no_base() {
+    let base = Base::new("short-password");
+    let admin = ostov_api::NewAdmin {
+        login: "boss".into(),
+        password: "short".into(),
+    };
+    let err = LocalConnector::default()
+        .create_local(&base.path, None, Some(&admin))
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(!std::path::Path::new(&base.path).exists());
+    // Файла нет — можно повторить с нормальным паролем.
+    let admin = ostov_api::NewAdmin {
+        password: ADMIN_PASSWORD.into(),
+        ..admin
+    };
+    LocalConnector::default()
+        .create_local(&base.path, None, Some(&admin))
+        .unwrap();
+}
+
+#[test]
+fn first_user_must_be_admin() {
+    let base = Base::new("first-keeper");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let keeper = ostov_api::NewUser {
+        login: "keeper".into(),
+        display_name: "Кладовщик".into(),
+        role: "storekeeper".into(),
+        password: KEEPER_PASSWORD.into(),
+    };
+    assert_eq!(
+        engine.admin_add_user(&keeper).unwrap_err().code,
+        ErrorCode::Validation
+    );
+    assert!(!engine.hello().unwrap().login_required);
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine.admin_add_user(&keeper).unwrap();
+    let session = engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert!(!session.system.admin);
+}
+
+#[test]
+fn passwords_hidden_in_debug() {
+    let admin = ostov_api::NewAdmin {
+        login: "boss".into(),
+        password: ADMIN_PASSWORD.into(),
+    };
+    let user = ostov_api::NewUser {
+        login: "keeper".into(),
+        display_name: "Кладовщик".into(),
+        role: "storekeeper".into(),
+        password: KEEPER_PASSWORD.into(),
+    };
+    assert!(!format!("{admin:?}").contains(ADMIN_PASSWORD));
+    assert!(!format!("{user:?}").contains(KEEPER_PASSWORD));
+}
+
+#[test]
+fn checking_base_does_not_write() {
+    let base = Base::new("check");
+    {
+        let engine = base.create();
+        add(&*engine, "goods", "Мука");
+    }
+    let before = std::fs::read(&base.path).unwrap();
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "warehouse");
+    assert_eq!(info.config_title, "Склад");
+    assert!(!info.login_required);
+    assert!(!info.file_password);
+    assert_eq!(std::fs::read(&base.path).unwrap(), before);
+
+    let other = base.dir.join("other.db").to_string_lossy().into_owned();
+    std::fs::write(&other, b"").unwrap();
+    let err = LocalConnector::default().check_local(&other).err().unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+    assert_eq!(std::fs::read(&other).unwrap(), b"");
+    let missing = format!("{}.missing", base.path);
+    let err = LocalConnector::default()
+        .check_local(&missing)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn base_of_other_configuration_is_not_touched() {
+    let base = Base::new("other-config");
+    let mut model = super::warehouse_model();
+    model.name = "recipes".into();
+    model.title = "Рецептуры".into();
+    model.documents.clear();
+    model.registers.clear();
+    model.menu.clear();
+    drop(
+        LocalConnector::new(model)
+            .create_local(&base.path, None, None)
+            .unwrap(),
+    );
+    let before = std::fs::read(&base.path).unwrap();
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "recipes");
+    assert_eq!(info.config_title, "Рецептуры");
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+    assert_eq!(std::fs::read(&base.path).unwrap(), before);
+}
+
+#[test]
+fn exact_filter_by_fields() {
+    let base = Base::new("filter");
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    add(&*engine, "goods", "Мука в/с");
+    add(&*engine, "goods", "мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let kitchen = add(&*engine, "warehouses", "Кухня");
+    let supplier = add(&*engine, "suppliers", "Мельница");
+    for warehouse in [main, main, kitchen] {
+        let doc = receipt(warehouse, supplier, &[(flour, 1000, 100)]);
+        engine.save("receipt", &doc, PostAction::Write).unwrap();
+    }
+    let with = |object: &str, filter: &[(&str, Value)]| ListQuery {
+        filter: fields(filter),
+        ..query(object, 10)
+    };
+
+    // Текст — точно, но без учёта регистра: «Мука в/с» не попадает.
+    let page = engine
+        .list(&with("goods", &[("name", text("МУКА"))]))
+        .unwrap();
+    assert_eq!(page.total, Some(2));
+    let page = engine
+        .list(&with("receipt", &[("warehouse", refer(main))]))
+        .unwrap();
+    assert_eq!(page.total, Some(2));
+    let both = with(
+        "receipt",
+        &[("warehouse", refer(kitchen)), ("supplier", refer(supplier))],
+    );
+    assert_eq!(engine.list(&both).unwrap().total, Some(1));
+    let empty = with("receipt", &[("warehouse", Value::Null)]);
+    assert_eq!(engine.list(&empty).unwrap().total, Some(0));
+
+    // Отбор живёт в токене: seek видит те же строки.
+    let page = engine
+        .list(&with("receipt", &[("warehouse", refer(main))]))
+        .unwrap();
+    let jump = engine.seek(&page.token, 1, 10).unwrap();
+    assert_eq!(jump.rows.len(), 1);
+    assert_eq!(jump.total, Some(2));
+
+    let err = engine.list(&with("goods", &[("color", text("красный"))]));
+    assert_eq!(err.unwrap_err().code, ErrorCode::Validation);
+    let err = engine.list(&with("receipt", &[("warehouse", text("Основной"))]));
+    assert_eq!(err.unwrap_err().code, ErrorCode::Validation);
+}
+
+#[test]
+fn meta_has_registers_in_config_order() {
+    let base = Base::new("meta-registers");
+    let meta = base.create().get_meta().unwrap();
+    let [stock] = meta.registers.as_slice() else {
+        panic!("ожидался один регистр: {:?}", meta.registers);
+    };
+    assert_eq!(stock.name, "stock");
+    let names = |defs: &[ostov_api::FieldDef]| -> Vec<String> {
+        defs.iter().map(|d| d.name.clone()).collect()
+    };
+    assert_eq!(names(&stock.dimensions), ["warehouse", "goods"]);
+    assert_eq!(names(&stock.resources), ["qty"]);
+}
+
+#[test]
+fn old_base_with_title_instead_of_name_opens() {
+    let base = Base::new("old-config");
+    drop(base.create());
+    {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+        ostov_store::Driver::execute(&mut db, "DELETE FROM ostov_base WHERE key = 'title'", &[])
+            .unwrap();
+        ostov_store::Driver::execute(
+            &mut db,
+            "UPDATE ostov_base SET value = 'Склад' WHERE key = 'config'",
+            &[],
+        )
+        .unwrap();
+    }
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(
+        (info.config_name.as_str(), info.config_title.as_str()),
+        ("Склад", "Склад")
+    );
+    drop(
+        LocalConnector::default()
+            .open_local(&base.path, None)
+            .unwrap(),
+    );
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "warehouse");
+
+    // Новое название той же конфигурации базу не отрезает.
+    let mut model = super::warehouse_model();
+    model.title = "Склад и кухня".into();
+    drop(
+        LocalConnector::new(model)
+            .open_local(&base.path, None)
+            .unwrap(),
+    );
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_title, "Склад и кухня");
 }

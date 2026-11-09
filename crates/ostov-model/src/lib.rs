@@ -128,6 +128,7 @@ pub struct Config {
 
 /// Имя встроенной роли со всеми правами. В YAML её не описывают.
 pub const ADMIN_ROLE: &str = "admin";
+pub const ADMIN_TITLE: &str = "Администратор";
 
 /// Роль пользователя: права на справочники и документы и системные права.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +181,25 @@ pub struct Meta {
     pub menu: Vec<MenuItem>,
     pub objects: Vec<ObjectMeta>,
     /// Роли для экрана «Пользователи и роли»: из конфигурации и встроенная `admin`.
-    pub roles: Vec<String>,
+    pub roles: Vec<RoleInfo>,
+    /// Регистры: по ним строятся отчёты `<имя>_balance` и `<имя>_turnover`.
+    pub registers: Vec<RegisterMeta>,
+}
+
+/// Регистр для отчётов: измерения и ресурсы в порядке конфигурации.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterMeta {
+    pub name: String,
+    pub title: String,
+    pub dimensions: Vec<FieldDef>,
+    pub resources: Vec<FieldDef>,
+}
+
+/// Роль в списке выбора: имя для команд и заголовок для окна.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleInfo {
+    pub name: String,
+    pub title: String,
 }
 
 /// Объект, который открывается в интерфейсе: справочник или документ.
@@ -255,8 +274,24 @@ impl Meta {
             roles: config
                 .roles
                 .iter()
-                .map(|role| role.name.clone())
-                .chain([ADMIN_ROLE.to_owned()])
+                .map(|role| RoleInfo {
+                    name: role.name.clone(),
+                    title: role.title.clone(),
+                })
+                .chain([RoleInfo {
+                    name: ADMIN_ROLE.to_owned(),
+                    title: ADMIN_TITLE.to_owned(),
+                }])
+                .collect(),
+            registers: config
+                .registers
+                .iter()
+                .map(|r| RegisterMeta {
+                    name: r.name.clone(),
+                    title: r.title.clone(),
+                    dimensions: r.dimensions.clone(),
+                    resources: r.resources.clone(),
+                })
                 .collect(),
         }
     }

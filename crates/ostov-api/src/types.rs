@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 // ---------------------------------------------------------------- значения
 
@@ -43,11 +44,26 @@ pub struct SessionInfo {
     pub login: String,
     pub display_name: String,
     pub roles: Vec<String>,
+    /// Системные права роли: по `system.admin` интерфейс показывает «Администрирование».
+    pub system: SystemRights,
+}
+
+/// Что видно в файле базы без записи в него: для «Добавить существующую».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseInfo {
+    /// Имя конфигурации (`name` манифеста), под которую создана база.
+    pub config_name: String,
+    /// Её название для людей.
+    pub config_title: String,
+    pub file_password: bool,
+    /// В базе есть пользователи: после открытия нужен вход.
+    pub login_required: bool,
 }
 
 /// Метаданные — те же типы, что строит `ostov-meta` из конфигурации: одно описание на всех.
 pub use ostov_model::{
-    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, Rights, TablePartDef,
+    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, RegisterMeta, Rights, RoleInfo,
+    SystemRights, TablePartDef,
 };
 
 // ---------------------------------------------------------------- списки
@@ -56,6 +72,7 @@ pub use ostov_model::{
 pub struct Row {
     pub id: i64,
     /// Поля строки плюс служебные: у документов `number`, `posted`, у всех `deleted` и `version`.
+    /// `posted` и `deleted` — `Value::Bool`.
     pub values: Fields,
 }
 
@@ -72,6 +89,9 @@ pub struct ListQuery {
     pub posted: Option<bool>,
     /// Отбор: только помеченные на удаление или только непомеченные.
     pub deleted: Option<bool>,
+    /// Точный отбор: поле → значение, условия через «и». Текст — без учёта регистра,
+    /// `Null` — пустое поле, ссылка — по id.
+    pub filter: Fields,
     /// Ключ из прошлой страницы; `None` — с начала.
     pub after_key: Option<String>,
     /// Сколько строк, от 1 до 1000 (СТ-51).
@@ -153,12 +173,23 @@ pub struct UserInfo {
 }
 
 /// Пароль идёт только по защищённому каналу, хэш считает ядро.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewUser {
     pub login: String,
     pub display_name: String,
     pub role: String,
     pub password: String,
+}
+
+impl fmt::Debug for NewUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewUser")
+            .field("login", &self.login)
+            .field("display_name", &self.display_name)
+            .field("role", &self.role)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

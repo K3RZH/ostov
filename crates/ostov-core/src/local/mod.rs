@@ -18,8 +18,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
-    BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage,
-    NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
+    BaseInfo, BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo,
+    ListPage, NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
@@ -34,7 +34,8 @@ use crate::closing::ClosedPeriodPass;
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
-    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction, posting,
+    Catalog, Document, Element, FieldDef, FieldKind, FieldValue, ListQuery, ListSource,
+    in_transaction, posting,
 };
 
 pub struct LocalEngine {
@@ -169,7 +170,7 @@ impl LocalEngine {
             .into_iter()
             .map(|r| Row {
                 id: r.id,
-                values: fields_to_api(&r.fields),
+                values: row_to_api(&r.fields),
             })
             .collect();
         let mut values: Vec<&mut ostov_api::Fields> =
@@ -221,6 +222,19 @@ impl LocalEngine {
     }
 }
 
+/// Строка списка для интерфейса: служебные `posted` и `deleted` — флажки, а не 0/1.
+fn row_to_api(fields: &crate::Fields) -> ostov_api::Fields {
+    let mut values = fields_to_api(fields);
+    for flag in ["posted", "deleted"] {
+        if let Some(value) = values.get_mut(flag)
+            && let ostov_api::Value::Int(n) = *value
+        {
+            *value = ostov_api::Value::Bool(n != 0);
+        }
+    }
+    values
+}
+
 fn broken() -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
@@ -232,24 +246,28 @@ fn window(size: u32) -> usize {
     usize::try_from(size).unwrap_or(usize::MAX)
 }
 
-// Токен списка — объект, сортировка и поиск; по нему `seek` находит вехи.
+// Токен списка — объект, сортировка, отборы и поиск; по нему `seek` находит вехи.
 const SEP: char = '\u{1f}';
+// Внутри отбора: между полями и между именем и значением.
+const FILTER_SEP: char = '\u{1e}';
+const PAIR_SEP: char = '\u{1d}';
 
-fn token(object: &str, q: &ListQuery) -> String {
-    format!(
-        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
+fn token(object: &str, q: &ListQuery) -> EngineResult<String> {
+    Ok(format!(
+        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
         q.order.as_deref().unwrap_or(""),
         u8::from(q.descending),
         flag(q.posted),
         flag(q.deleted),
+        encode_filter(&q.filter)?,
         q.search.as_deref().unwrap_or("")
-    )
+    ))
 }
 
 fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
-    let parts: Vec<&str> = token.splitn(6, SEP).collect();
-    let [object, order, descending, posted, deleted, search] = parts.as_slice() else {
-        return Err(invalid("испорченный токен списка".into()));
+    let parts: Vec<&str> = token.splitn(7, SEP).collect();
+    let [object, order, descending, posted, deleted, filter, search] = parts.as_slice() else {
+        return Err(bad_token());
     };
     let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
     Ok((
@@ -260,8 +278,60 @@ fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
             search: some(search),
             posted: unflag(posted),
             deleted: unflag(deleted),
+            filter: decode_filter(filter)?,
         },
     ))
+}
+
+fn bad_token() -> EngineError {
+    invalid("испорченный токен списка".into())
+}
+
+fn encode_filter(filter: &crate::Fields) -> EngineResult<String> {
+    let mut parts = Vec::with_capacity(filter.len());
+    for (name, value) in filter {
+        let value = match value {
+            FieldValue::Null => "n".to_owned(),
+            FieldValue::Int(n) => format!("i{n}"),
+            FieldValue::Ref(id) => format!("r{id}"),
+            FieldValue::Decimal(d) => format!("m{}/{}", d.units(), d.scale()),
+            FieldValue::Date(d) => format!("d{d}"),
+            FieldValue::Text(t) => format!("t{t}"),
+        };
+        let service = [SEP, FILTER_SEP, PAIR_SEP];
+        if name.contains(service) || value.contains(service) {
+            return Err(invalid(format!(
+                "в отборе по полю {name} служебные символы"
+            )));
+        }
+        parts.push(format!("{name}{PAIR_SEP}{value}"));
+    }
+    Ok(parts.join(&FILTER_SEP.to_string()))
+}
+
+fn decode_filter(text: &str) -> EngineResult<crate::Fields> {
+    let mut filter = crate::Fields::new();
+    for part in text.split(FILTER_SEP).filter(|p| !p.is_empty()) {
+        let (name, value) = part.split_once(PAIR_SEP).ok_or_else(bad_token)?;
+        let (kind, rest) = value.split_at_checked(1).ok_or_else(bad_token)?;
+        let int = |s: &str| s.parse::<i64>().map_err(|_| bad_token());
+        let value = match kind {
+            "n" => FieldValue::Null,
+            "i" => FieldValue::Int(int(rest)?),
+            "r" => FieldValue::Ref(int(rest)?),
+            "d" => FieldValue::Date(rest.to_owned()),
+            "t" => FieldValue::Text(rest.to_owned()),
+            "m" => {
+                let (units, scale) = rest.split_once('/').ok_or_else(bad_token)?;
+                let scale = scale.parse::<u8>().map_err(|_| bad_token())?;
+                let decimal = ostov_store::Decimal::new(int(units)?, scale);
+                FieldValue::Decimal(decimal.map_err(|_| bad_token())?)
+            }
+            _ => return Err(bad_token()),
+        };
+        filter.insert(name.to_owned(), value);
+    }
+    Ok(filter)
 }
 
 fn flag(value: Option<bool>) -> &'static str {
@@ -316,7 +386,9 @@ impl LocalEngine {
             search: q.search.clone(),
             posted: q.posted,
             deleted: q.deleted,
+            filter: fields_from_api(&q.filter)?,
         };
+        let token = token(&q.object, &query)?;
         let mut db = self.db();
         let page = list_titled(
             &mut **db,
@@ -327,7 +399,7 @@ impl LocalEngine {
             &self.titles,
         )
         .map_err(error)?;
-        self.page(&mut **db, source, token(&q.object, &query), page)
+        self.page(&mut **db, source, token, page)
     }
 
     fn run_seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
@@ -1107,23 +1179,29 @@ impl LocalConnector {
 const BASE_TABLE: &str = "ostov_base";
 
 impl Connector for LocalConnector {
+    fn check_local(&self, path: &str) -> EngineResult<BaseInfo> {
+        if !Path::new(path).exists() {
+            return Err(not_found(path));
+        }
+        let mut db = SqliteDriver::open_read_only(path).map_err(|e| error(e.into()))?;
+        let (config_name, config_title) = base_config(&mut db, path)?;
+        let login_required = ostov_sec::has_users(&mut db).unwrap_or(false);
+        Ok(BaseInfo {
+            config_name,
+            config_title,
+            file_password: false,
+            login_required,
+        })
+    }
+
     fn open_local(&self, path: &str, file_password: Option<&str>) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         if !Path::new(path).exists() {
-            return Err(EngineError::new(
-                ErrorCode::NotFound,
-                format!("файла базы {path} нет"),
-            ));
+            return Err(not_found(path));
         }
         let lock = lock_base(path)?;
         let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
-        let sql = format!("SELECT value FROM {BASE_TABLE} WHERE key = 'config'");
-        if db.query(&sql, &[]).is_err() {
-            return Err(EngineError::new(
-                ErrorCode::Incompatible,
-                format!("{path} — не база Ostov"),
-            ));
-        }
+        base_config(&mut db, path)?;
         let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
@@ -1140,10 +1218,91 @@ impl Connector for LocalConnector {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
         let engine = LocalEngine::new(Box::new(db), config).locked(lock);
-        if let Some(admin) = admin {
-            engine.create_first_admin(&admin.login, &admin.password)?;
+        if let Some(admin) = admin
+            && let Err(e) = engine.create_first_admin(&admin.login, &admin.password)
+        {
+            // База без администратора никому не нужна: убираем файл, чтобы можно было повторить.
+            drop(engine);
+            remove_base(path);
+            return Err(e);
         }
         Ok(Arc::new(engine))
+    }
+}
+
+fn not_found(path: &str) -> EngineError {
+    EngineError::new(ErrorCode::NotFound, format!("файла базы {path} нет"))
+}
+
+/// Имя и название конфигурации из служебной таблицы; нет таблицы — файл не база Ostov.
+fn base_config(db: &mut SqliteDriver, path: &str) -> EngineResult<(String, String)> {
+    match stored_config(db) {
+        Ok(Some(found)) => Ok(found),
+        _ => Err(EngineError::new(
+            ErrorCode::Incompatible,
+            format!("{path} — не база Ostov"),
+        )),
+    }
+}
+
+/// Старые базы хранили в `config` название, а не имя, и строки `title` у них нет.
+fn stored_config(db: &mut dyn Driver) -> Result<Option<(String, String)>, crate::CoreError> {
+    let sql = format!("SELECT key, value FROM {BASE_TABLE} WHERE key IN ('config', 'title')");
+    let (mut name, mut title) = (None, None);
+    for row in db.query(&sql, &[])? {
+        match row.as_slice() {
+            [Value::Text(key), Value::Text(value)] if key == "config" => name = Some(value.clone()),
+            [Value::Text(key), Value::Text(value)] if key == "title" => title = Some(value.clone()),
+            _ => {}
+        }
+    }
+    Ok(name.map(|name| {
+        let title = title.unwrap_or_else(|| name.clone());
+        (name, title)
+    }))
+}
+
+/// База должна быть этой конфигурации; старой базе дописываем имя и название.
+fn check_config(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    let Some((stored, title)) = stored_config(db)? else {
+        return Err(crate::CoreError::Incompatible("это не база Ostov".into()));
+    };
+    if stored != config.id && stored != config.name {
+        return Err(crate::CoreError::Incompatible(format!(
+            "база конфигурации «{title}», а открыта «{}»",
+            config.name
+        )));
+    }
+    record_config(db, config)
+}
+
+fn record_config(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    db.execute(
+        &format!("DELETE FROM {BASE_TABLE} WHERE key IN ('config', 'title')"),
+        &[],
+    )?;
+    let insert = format!(
+        "INSERT INTO {BASE_TABLE} (key, value) VALUES ({}, {})",
+        db.dialect().placeholder(1),
+        db.dialect().placeholder(2)
+    );
+    for (key, value) in [("config", &config.id), ("title", &config.name)] {
+        db.execute(
+            &insert,
+            &[Value::Text(key.into()), Value::Text(value.clone())],
+        )?;
+    }
+    Ok(())
+}
+
+fn remove_base(path: &str) {
+    for file in [
+        path.to_owned(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+        format!("{path}.lock"),
+    ] {
+        let _ = std::fs::remove_file(file);
     }
 }
 
@@ -1162,15 +1321,11 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
 
 /// Служебные таблицы и таблицы конфигурации в пустой базе.
 fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
-    let insert = format!(
-        "INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', {})",
-        db.dialect().placeholder(1)
-    );
     db.execute(
         &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
         &[],
     )?;
-    db.execute(&insert, &[Value::Text(config.name.clone())])?;
+    record_config(db, config)?;
     config.create_tables(db)?;
     settings::create_table(db)?;
     ostov_sec::create_tables(db)?;
@@ -1180,6 +1335,7 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    check_config(db, config)?;
     crate::closing::create_table(db)?;
     settings::create_table(db)?;
     ostov_sec::create_tables(db)?;

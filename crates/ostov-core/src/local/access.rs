@@ -197,6 +197,14 @@ impl LocalEngine {
 
     pub(super) fn run_admin_add_user(&self, user: &ostov_api::NewUser) -> EngineResult<()> {
         self.need_system(|s| s.admin, "администрирование")?;
+        // Иначе после первого пользователя войти можно, а управлять пользователями — никому.
+        let first = !self.access().users;
+        if first && !ostov_sec::system_rights(&self.config.roles, &user.role).admin {
+            return Err(EngineError::new(
+                ErrorCode::Validation,
+                "Первым пользователем должен быть администратор: выберите роль с правом администрирования.",
+            ));
+        }
         self.add_user(&ostov_sec::NewUser {
             login: user.login.clone(),
             display_name: user.display_name.clone(),
@@ -270,6 +278,7 @@ impl LocalEngine {
             login: user.login.clone(),
             display_name: user.display_name.clone(),
             roles: vec![user.role.clone()],
+            system: ostov_sec::system_rights(&self.config.roles, &user.role),
         };
         self.access().user = Some(user);
         self.forget_lists();

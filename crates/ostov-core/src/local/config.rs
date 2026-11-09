@@ -26,6 +26,8 @@ pub struct Config {
     pub roles: Vec<ostov_model::RoleDef>,
     /// Что интерфейс получает по `GetMeta`: объекты с заголовками, меню, права.
     pub meta: Meta,
+    /// Имя конфигурации (`name` манифеста): по нему база узнаёт свою конфигурацию.
+    pub id: String,
     /// Название для людей (`title` манифеста): его показывает `hello()`.
     pub name: String,
     pub version: String,
@@ -131,6 +133,7 @@ impl Config {
         Ok(Self {
             roles: model.roles.clone(),
             meta: Meta::new(model),
+            id: model.name.clone(),
             name: model.title.clone(),
             version: model.version.clone(),
             catalogs,

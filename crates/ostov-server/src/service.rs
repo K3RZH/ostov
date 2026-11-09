@@ -98,7 +98,8 @@ impl Remote for Service {
     }
 
     async fn list(&self, req: Request<pb::ListQuery>) -> Reply<pb::ListPage> {
-        self.with(req, |e, q| Ok(e.list(&q.into())?.into())).await
+        self.with(req, |e, q| Ok(e.list(&q.try_into()?)?.into()))
+            .await
     }
 
     async fn seek(&self, req: Request<pb::SeekRequest>) -> Reply<pb::ListPage> {

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use ostov_store::{Driver, Value};
 
-use crate::object::{FieldDef, FieldKind, Fields, read_fields};
+use crate::object::{FieldDef, FieldKind, Fields, read_fields, to_value};
 use crate::{Catalog, CoreError, DocumentKind};
 use cursor::Cursor;
 pub use milestones::{MILESTONE_STEP, Milestones};
@@ -65,6 +65,8 @@ pub struct ListQuery {
     pub posted: Option<bool>,
     /// Только помеченные на удаление или только непомеченные.
     pub deleted: Option<bool>,
+    /// Точный отбор по полям; текст без учёта регистра.
+    pub filter: Fields,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +134,8 @@ struct Plan {
     search_number: Option<i64>,
     posted: Option<bool>,
     deleted: Option<bool>,
+    /// Номер поля в `fields` и значение для сравнения (текст уже в нижнем регистре).
+    filter: Vec<(usize, Value)>,
     titles: TitleColumns,
 }
 
@@ -157,6 +161,21 @@ impl Plan {
                 source.table()
             )));
         }
+        let mut filter = Vec::with_capacity(query.filter.len());
+        for (name, value) in &query.filter {
+            let found = fields.iter().enumerate().find(|(_, f)| &f.name == name);
+            let Some((i, def)) = found else {
+                return Err(CoreError::Invalid(format!(
+                    "в {} нет поля {name} для отбора",
+                    source.table()
+                )));
+            };
+            let value = match to_value(def, value)? {
+                Value::Text(text) => Value::Text(text.to_lowercase()),
+                other => other,
+            };
+            filter.push((i, value));
+        }
         let raw = query
             .search
             .as_deref()
@@ -171,6 +190,7 @@ impl Plan {
             search_number: raw.and_then(|s| s.parse().ok()),
             posted: query.posted,
             deleted: query.deleted,
+            filter,
             titles: titles.clone(),
         })
     }
@@ -359,6 +379,27 @@ impl Plan {
                     d.placeholder(params.len())
                 ));
             }
+        }
+        for (i, value) in &self.filter {
+            let Some(field) = self.fields.get(*i) else {
+                continue;
+            };
+            let col = format!(
+                "{}.{}",
+                d.quote_ident(&self.table),
+                d.quote_ident(&field.name)
+            );
+            if *value == Value::Null {
+                parts.push(format!("{col} IS NULL"));
+                continue;
+            }
+            params.push(value.clone());
+            let col = if field.kind == FieldKind::Text {
+                d.lower(&col)
+            } else {
+                col
+            };
+            parts.push(format!("{col} = {}", d.placeholder(params.len())));
         }
         (!parts.is_empty()).then(|| parts.join(" AND "))
     }
