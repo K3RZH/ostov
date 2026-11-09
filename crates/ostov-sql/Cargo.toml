@@ -1,0 +1,24 @@
+[package]
+name = "ostov-sql"
+description = "SQL через платформу Ostov: разбор SELECT, белый список, имена метаданных, права, диалект"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ostov-model = { path = "../ostov-model" }
+# Только Dialect и Value: драйверы не нужны.
+ostov-store = { path = "../ostov-store", default-features = false }
+# Разбор SQL. Фича visitor по ТЗ; сам обход дерева явный, в translate.rs.
+sqlparser = { version = "=0.63.0", features = ["visitor"] }
+
+[dev-dependencies]
+# Тесты на живой базе «Склада».
+ostov-core = { path = "../ostov-core" }
+ostov-api = { path = "../ostov-api" }
+ostov-meta = { path = "../ostov-meta" }
+ostov-store = { path = "../ostov-store", features = ["sqlite", "postgres"] }
