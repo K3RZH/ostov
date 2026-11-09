@@ -1,6 +1,6 @@
 //! Снимок окна в PPM для проверки вида без экрана:
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
-//! Экраны: showcase, main, settings, start, start-empty, create-local, create-server, add-file, add-server,
+//! Экраны: showcase, main, settings, start, start-error, start-empty, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error.
 
 use std::io::Write;
@@ -45,6 +45,31 @@ fn app_window(page: i32) -> Result<ostov_ui::AppWindow, Box<dyn std::error::Erro
     Ok(window)
 }
 
+/// Недавние базы для снимка стартовой страницы (в приложении список читается из файла).
+fn sample_recent() -> Vec<ostov_ui::RecentDb> {
+    let row = |name: &str, path: &str, server: bool| ostov_ui::RecentDb {
+        name: name.into(),
+        path: path.into(),
+        when: "".into(),
+        server,
+        protection: 0,
+    };
+    vec![
+        row("Склад.sqlite", "~/Ostov/Склад.sqlite", false),
+        row("Кафе, общая база", "server.local:7700", true),
+        row("Бар-2025.sqlite", "~/Документы/Бар-2025.sqlite", false),
+    ]
+}
+
+/// Демо-база для снимков: свой файл во временной папке (не трогает базу приложения).
+fn snapshot_engine() -> Result<std::sync::Arc<dyn ostov_api::Engine>, Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join("ostov-snapshot-demo.sqlite");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
+    let text = path.to_str().ok_or("путь не в UTF-8")?;
+    Ok(ostov_core::LocalConnector::default().create_demo(text, 2000)?)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let dark = args.next().is_some_and(|theme| theme == "тёмная");
@@ -52,6 +77,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let screen = args.next().unwrap_or_else(|| "showcase".to_owned());
 
     match screen.as_str() {
+        "pickers" => {
+            // Календарь в трёх режимах и меню строки: всплывающие панели отдельным окном.
+            let window = ostov_ui::PreviewWindow::new()?;
+            save(&window, dark, &path)
+        }
         "main" => {
             let window = app_window(2)?;
             let mut shell = ostov_ui::shell::Shell::demo();
@@ -69,16 +99,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ostov_ui::app::refresh(&window, &shell);
             ostov_ui::app::refresh_users(&window, &ostov_ui::users::Directory::demo());
             window.set_roles(ModelRc::new(VecModel::from(
-                ostov_ui::users::ROLES
-                    .iter()
-                    .map(|role| (*role).into())
-                    .collect::<Vec<slint::SharedString>>(),
+                ["admin", "storekeeper"]
+                    .map(slint::SharedString::from)
+                    .to_vec(),
             )));
             window.set_adding_user(screen == "user-dialog");
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
-        "receipts" | "receipts-large" | "receipt-form" | "tabs-many" => {
+        "main-meta" => {
+            // Меню из встроенной конфигурации «Склад», как его строит приложение.
+            let window = app_window(2)?;
+            let meta =
+                ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+            let shell = std::rc::Rc::new(std::cell::RefCell::new(
+                ostov_ui::shell::Shell::from_meta(&meta, true),
+            ));
+            let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            receipts.attach_blocking(snapshot_engine()?);
+            let node = shell.borrow().node_for_object("receipt");
+            if let Some(node) = node {
+                shell.borrow_mut().click(node);
+            }
+            receipts.after(&window, &shell.borrow());
+            ostov_ui::app::refresh(&window, &shell.borrow());
+            window.set_base_name("Склад".into());
+            window.set_mode_text("Режим: локально".into());
+            window.set_user_text("Администратор".into());
+            window.set_user_initials("А".into());
+            save(&window, dark, &path)
+        }
+        "receipts" | "receipts-large" | "receipts-marks" | "receipts-sorted"
+        | "receipts-notice" | "doc-window" | "doc-dock" | "doc-close" | "receipt-form"
+        | "receipt-form-error" | "tabs-many" => {
             use std::cell::RefCell;
             use std::rc::Rc;
 
@@ -86,10 +139,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let window = app_window(2)?;
             let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::demo()));
             let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            receipts.attach_blocking(snapshot_engine()?);
             {
                 let mut shell = shell.borrow_mut();
                 shell.click(2);
                 shell.click(3);
+            }
+            if screen == "receipts-notice" {
+                // Ошибка ядра под списком (например, пометка проведённого документа).
+                window
+                    .global::<ostov_ui::ReceiptsData>()
+                    .set_notice("Сначала отмените проведение документа".into());
             }
             if screen == "receipts-large" {
                 window
@@ -97,8 +157,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .set_font_scale(16.0 / 14.0);
                 window.global::<ostov_ui::Theme>().set_row_height(40.0);
             }
-            if screen == "receipt-form" {
+            if screen == "receipts-marks" {
+                // Свои вехи на трёх строках: отметки на полосе прокрутки.
+                for row in [100, 700, 1500] {
+                    window
+                        .global::<ostov_ui::ReceiptsData>()
+                        .invoke_action(row, "milestone".into());
+                }
+            }
+            if screen == "receipts-sorted" {
+                // Сортировка по складу и узкая колонка: значок сортировки и черта у обрезанных ячеек.
+                use slint::Model;
+                let data = window.global::<ostov_ui::ReceiptsData>();
+                data.invoke_sort(3);
+                data.invoke_sort(3);
+                let columns = data.get_columns();
+                if let Some(mut column) = columns.row_data(3) {
+                    column.width = 72.0;
+                    columns.set_row_data(3, column);
+                }
+            }
+            if matches!(screen.as_str(), "doc-window" | "doc-dock" | "doc-close") {
+                // Документ вынесен из вкладки в отдельное окно: снимаем его окно.
                 window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
+                let windows = ostov_ui::windows::Windows::new(&receipts);
+                let tab = shell.borrow().active_tab();
+                windows.detach_from_main(&window, &shell, tab);
+                let doc_window = windows
+                    .debug_state()
+                    .0
+                    .first()
+                    .and_then(|id| windows.host(*id))
+                    .ok_or("окно документа не создано")?;
+                if screen == "doc-window" {
+                    return save(&doc_window, dark, &path);
+                }
+                // Возврат в главное окно (меню вкладки) или закрытие кнопкой формы: проверка, что
+                // вкладки и документ в порядке.
+                if screen == "doc-dock" {
+                    doc_window.invoke_tab_returned(0);
+                } else {
+                    doc_window
+                        .global::<ostov_ui::ReceiptsData>()
+                        .invoke_form_close();
+                }
+                let titles: Vec<String> = shell
+                    .borrow()
+                    .tabs()
+                    .iter()
+                    .map(|t| {
+                        format!(
+                            "{}{}",
+                            t.title,
+                            if t.preview {
+                                " (предпросмотр)"
+                            } else {
+                                ""
+                            }
+                        )
+                    })
+                    .collect();
+                println!(
+                    "вкладки: {titles:?}, активная {}",
+                    shell.borrow().active_tab()
+                );
+                println!(
+                    "форма главного окна: {}",
+                    window.global::<ostov_ui::ReceiptsData>().get_form_title()
+                );
+                return save(&window, dark, &path);
+            }
+            if screen == "receipt-form" || screen == "receipt-form-error" {
+                window.global::<ostov_ui::ReceiptsData>().invoke_open(2);
+            }
+            if screen == "receipt-form-error" {
+                // Конфликт версий: сообщение над формой и кнопка «Перечитать».
+                let data = window.global::<ostov_ui::ReceiptsData>();
+                data.set_form_error(
+                    "Документ изменён другим пользователем. Нажмите «Перечитать»: правки в форме пропадут."
+                        .into(),
+                );
+                data.set_form_conflict(true);
             }
             if screen == "tabs-many" {
                 // Много закреплённых вкладок: панель должна сжимать и прокручивать.
@@ -115,6 +254,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_base_name("Кафе-2026".into());
             save(&window, dark, &path)
         }
+        "tab-host" => {
+            // Вкладка вынесена в отдельное окно с панелью вкладок.
+            use std::cell::RefCell;
+            use std::rc::Rc;
+            let window = app_window(2)?;
+            let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::demo()));
+            {
+                let mut shell = shell.borrow_mut();
+                shell.click(2);
+                shell.click(4);
+                shell.click(6);
+            }
+            let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            let windows = ostov_ui::windows::Windows::new(&receipts);
+            windows.detach_from_main(&window, &shell, 1);
+            let mut result = Ok(());
+            windows.each(|host| result = save(host, dark, &path));
+            result
+        }
         "settings" => {
             let window = app_window(2)?;
             window.set_settings_open(true);
@@ -128,7 +286,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_add_server(screen == "add-server");
             save(&window, dark, &path)
         }
-        "start" => save(&app_window(0)?, dark, &path),
+        "start" | "start-error" => {
+            let window = app_window(0)?;
+            window.set_recent(ModelRc::new(VecModel::from(sample_recent())));
+            if screen == "start-error" {
+                window.set_start_error(
+                    "Файл базы «~/Ostov/Склад.sqlite» уже открыт другой программой.".into(),
+                );
+            }
+            save(&window, dark, &path)
+        }
         "start-empty" => {
             let window = app_window(0)?;
             window.set_recent(ModelRc::new(VecModel::default()));

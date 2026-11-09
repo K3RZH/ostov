@@ -1,0 +1,468 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { WheelList } from "wheel-list.slint";
+
+// Календарные вычисления: чистые функции без состояния.
+global DateMath {
+    out property <[string]> months: ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+    out property <[string]> weekdays: ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+    pure public function days-in(year: int, month: int) -> int {
+        if (month == 2) {
+            return (Math.mod(year, 4) == 0 && Math.mod(year, 100) != 0) || Math.mod(year, 400) == 0 ? 29 : 28;
+        }
+        return month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31;
+    }
+
+    // Номер дня недели первого числа месяца, 0 = понедельник (формула Сакамото).
+    pure public function first-weekday(year: int, month: int) -> int {
+        return Math.round(Math.mod(Math.mod(
+            (month < 3 ? year - 1 : year) + Math.floor((month < 3 ? year - 1 : year) / 4)
+            - Math.floor((month < 3 ? year - 1 : year) / 100) + Math.floor((month < 3 ? year - 1 : year) / 400)
+            + [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4][month - 1] + 1, 7) + 6, 7));
+    }
+
+    pure public function two(n: int) -> string {
+        return n < 10 ? "0" + n : "" + n;
+    }
+}
+
+// Ячейка дня в календаре.
+component DayCell inherits Rectangle {
+    in property <int> number;
+    in property <bool> inside;
+    in property <bool> selected;
+    callback clicked();
+
+    if root.inside : Rectangle {
+        width: 32px;
+        height: 32px;
+        border-radius: Shape.control-radius;
+        background: root.selected ? Theme.accent : touch.has-hover ? Theme.accent-soft : transparent;
+        Text {
+            text: root.number;
+            font-size: Theme.font-body;
+            font-weight: root.selected ? 600 : 400;
+            color: root.selected ? Theme.on-accent : Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        touch := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Панель выбора под полем: шапка и тело одной высоты (292 px) в трёх режимах. Вынесена из
+// всплывающего окна, чтобы её можно было показать и проверить отдельно.
+export component DatePanel inherits Rectangle {
+    in property <int> year-min: 1990;
+    in property <int> year-max: 2060;
+    in-out property <int> day: 1;
+    in-out property <int> month: 1;
+    in-out property <int> year: 2026;
+    // Что сейчас выбирают: 0 день, 1 месяц, 2 год.
+    in-out property <int> mode: 0;
+    // Порядок заполнения: что выбрали первым и вторым (-1: ещё нет). Порядок определяет начало:
+    // день → месяц → год, год → месяц → день, месяц → день → год; после третьей части окно
+    // закрывается.
+    in-out property <int> first: -1;
+    in-out property <int> second: -1;
+    callback edited();
+    // Все три части выбраны: владелец закрывает панель.
+    callback completed();
+
+    // Часть `part` (0 день, 1 месяц, 2 год) выбрана окончательно (клик по дню, выбор месяца или года).
+    function part-picked(part: int) {
+        if (root.first == -1) {
+            root.first = part;
+            // После дня и после года идёт месяц, после месяца день.
+            root.mode = part == 1 ? 0 : 1;
+        } else if (root.second == -1 && part != root.first) {
+            root.second = part;
+            // Остаётся третья часть (0 + 1 + 2 = 3).
+            root.mode = 3 - root.first - part;
+        } else if (part != root.first && part != root.second) {
+            root.completed();
+        }
+    }
+
+    border-radius: Shape.control-radius;
+    border-width: 1px;
+    border-color: Theme.border-strong;
+    background: Theme.surface;
+
+    // Месяц и год меняют число дней: день не должен выйти за конец месяца.
+    function set-month(new-year: int, new-month: int) {
+        root.year = new-year;
+        root.month = new-month;
+        root.day = min(root.day, DateMath.days-in(new-year, new-month));
+        root.edited();
+    }
+    function shift-month(delta: int) {
+        if (root.month + delta < 1) {
+            if (root.year > root.year-min) { root.set-month(root.year - 1, 12); }
+        } else if (root.month + delta > 12) {
+            if (root.year < root.year-max) { root.set-month(root.year + 1, 1); }
+        } else {
+            root.set-month(root.year, root.month + delta);
+        }
+    }
+
+
+    // Шапка: стрелки листают месяц (только в режиме дней), число, название месяца и год
+    // переключают режим, не закрывая окно; повторное нажатие на месяц или год возвращает к дням.
+    HorizontalLayout {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: 32px;
+        spacing: Theme.space-4;
+        Rectangle {
+            width: 32px;
+            background: prev.has-hover && root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            if root.mode == 0 : Icon {
+                name: "chevron-left";
+                tint: Theme.text;
+                width: 16px;
+                height: 16px;
+            }
+            prev := TouchArea {
+                enabled: root.mode == 0;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.shift-month(-1); }
+            }
+        }
+        Rectangle {
+            width: 40px;
+            background: day-touch.has-hover || root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: DateMath.two(root.day);
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 0 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            day-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = 0; }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            background: month-touch.has-hover || root.mode == 1 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: DateMath.months[root.month - 1];
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 1 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            month-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = root.mode == 1 ? 0 : 1; }
+            }
+        }
+        Rectangle {
+            width: 64px;
+            background: year-touch.has-hover || root.mode == 2 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            Text {
+                text: root.year;
+                font-size: Theme.font-body;
+                font-weight: 600;
+                color: root.mode == 2 ? Theme.accent-text : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            year-touch := TouchArea {
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.mode = root.mode == 2 ? 0 : 2; }
+            }
+        }
+        Rectangle {
+            width: 32px;
+            background: next.has-hover && root.mode == 0 ? Theme.accent-soft : transparent;
+            border-radius: Shape.control-radius;
+            if root.mode == 0 : Icon {
+                name: "chevron-right";
+                tint: Theme.text;
+                width: 16px;
+                height: 16px;
+            }
+            next := TouchArea {
+                enabled: root.mode == 0;
+                mouse-cursor: MouseCursor.pointer;
+                clicked => { root.shift-month(1); }
+            }
+        }
+    }
+
+    // Тело: календарь дней или колесо месяцев или годов, одной высоты (232 px).
+    body := Rectangle {
+        x: 8px;
+        y: 48px;
+        width: parent.width - 16px;
+        height: 232px;
+        clip: true;
+
+        if root.mode == 0 : Rectangle {
+            HorizontalLayout {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: 28px;
+                for name in DateMath.weekdays : Text {
+                    text: name;
+                    font-size: Theme.font-caption;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+            // Сетка 6 недель по 7 дней; ячейки вне месяца не показываются.
+            for k in 42 : DayCell {
+                x: Math.mod(k, 7) * (parent.width / 7);
+                y: 28px + Math.floor(k / 7) * 34px;
+                width: parent.width / 7;
+                height: 34px;
+                number: k - DateMath.first-weekday(root.year, root.month) + 1;
+                inside: self.number >= 1 && self.number <= DateMath.days-in(root.year, root.month);
+                selected: self.number == root.day;
+                clicked => {
+                    root.day = self.number;
+                    root.edited();
+                    root.part-picked(0);
+                }
+            }
+        }
+
+        if root.mode == 1 : WheelList {
+            items: DateMath.months;
+            index: root.month - 1;
+            moved(target) => { root.set-month(root.year, target + 1); }
+            picked(target) => {
+                root.set-month(root.year, target + 1);
+                root.part-picked(1);
+            }
+        }
+
+        if root.mode == 2 : WheelList {
+            count: root.year-max - root.year-min + 1;
+            first: root.year-min;
+            index: root.year - root.year-min;
+            moved(target) => { root.set-month(root.year-min + target, root.month); }
+            picked(target) => {
+                root.set-month(root.year-min + target, root.month);
+                root.part-picked(2);
+            }
+        }
+    }
+}
+
+// Маска и разбор даты, введённой одной строкой, считает Rust (src/date_input.rs): в Slint нет
+// работы с подстроками. `parts` отдаёт [день, месяц, год] для полной существующей даты, иначе пусто.
+export global DateInput {
+    pure callback mask(string) -> string;
+    pure callback parts(string) -> [int];
+    // Текст поля после нажатия клавиши (цифра, Backspace) при открытом календаре.
+    pure callback apply-key(string, string) -> string;
+}
+
+// Поле даты. Дата вводится одной строкой «дд.мм.гггг» (цифры, точки ставятся сами). Календарь
+// открывает иконка или двойной клик по полю; пока он открыт, ввод в поле продолжает работать и
+// календарь подстраивается. В календаре день это обычная сетка (месяц листается стрелками),
+// месяц и год это вертикальные списки; между ними можно переключаться, не закрывая меню.
+// Значения лежат числами: строку «дд.мм.гггг» собирает владелец.
+export component DateField inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <int> year-min: 1990;
+    in property <int> year-max: 2060;
+    in-out property <int> day: 1;
+    in-out property <int> month: 1;
+    in-out property <int> year: 2026;
+    callback edited();
+
+    private property <int> mode: 0;
+    private property <string> text: root.current();
+    // Календарь открылся от набора: набранное не сбрасывается, когда поле теряет фокус.
+    private property <bool> keep-text;
+    private property <int> seq-first: -1;
+    private property <int> seq-second: -1;
+
+    spacing: Theme.space-4;
+
+    pure function current() -> string {
+        DateMath.two(root.day) + "." + DateMath.two(root.month) + "." + root.year
+    }
+    function show-current() {
+        root.text = root.current();
+    }
+    // Полная существующая дата сразу попадает в поле и в календарь. `true`: дата принята.
+    function commit-text() -> bool {
+        let parts = DateInput.parts(root.text);
+        if (parts.length == 3 && parts[2] >= root.year-min && parts[2] <= root.year-max) {
+            root.day = parts[0];
+            root.month = parts[1];
+            root.year = parts[2];
+            root.edited();
+            return true;
+        }
+        return false;
+    }
+    // Календарь идёт за набором: после дня показывает месяцы, после месяца годы, а когда дата
+    // введена целиком, закрывается.
+    function typed-progress() {
+        let count = root.text.character-count;
+        let digits = count <= 2 ? count : count <= 5 ? count - 1 : count - 2;
+        root.seq-first = digits >= 2 ? 0 : -1;
+        root.seq-second = digits >= 4 ? 1 : -1;
+        root.mode = digits >= 4 ? 2 : digits >= 2 ? 1 : 0;
+        if (digits >= 8 && root.commit-text()) {
+            popup.close();
+        }
+    }
+    function open-calendar() {
+        root.mode = 0;
+        root.seq-first = -1;
+        root.seq-second = -1;
+        popup.show();
+    }
+    changed day => { root.show-current(); }
+    changed month => { root.show-current(); }
+    changed year => { root.show-current(); }
+
+    if root.label != "" : Text {
+        text: root.label;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: root.enabled ? Theme.text : Theme.disabled-text;
+    }
+
+    field := Rectangle {
+        height: Theme.control-md;
+        border-radius: Shape.control-radius;
+        border-width: 1px;
+        border-color: !root.enabled ? transparent : input.has-focus ? Theme.accent : Theme.border-strong;
+        background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+        HorizontalLayout {
+            padding-left: Theme.space-12;
+            padding-right: Theme.space-8;
+            spacing: Theme.space-8;
+            input := TextInput {
+                text <=> root.text;
+                enabled: root.enabled;
+                single-line: true;
+                font-size: Theme.font-body;
+                color: root.enabled ? Theme.text : Theme.disabled-text;
+                vertical-alignment: center;
+                selection-background-color: Theme.accent;
+                horizontal-stretch: 1;
+                edited => {
+                    let masked = DateInput.mask(self.text);
+                    if (masked != self.text) {
+                        self.text = masked;
+                        // После точек курсор остаётся в конце строки.
+                        self.set-selection-offsets(self.text.character-count, self.text.character-count);
+                    }
+                    root.commit-text();
+                    // Ввод сразу открывает календарь: дальше цифры идут через него.
+                    root.keep-text = true;
+                    root.open-calendar();
+                    root.typed-progress();
+                }
+                accepted => { root.show-current(); }
+                changed has-focus => {
+                    if (self.has-focus) {
+                        self.select-all();
+                    } else if (root.keep-text) {
+                        root.keep-text = false;
+                    } else {
+                        // Недописанный или несуществующий ввод возвращается к текущей дате.
+                        root.show-current();
+                    }
+                }
+            }
+            // Иконка календаря: без подсветки, внутри границ поля.
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    Icon {
+                        name: "calendar";
+                        tint: Theme.text-muted;
+                        width: 16px;
+                        height: 16px;
+                    }
+                }
+            }
+        }
+
+        // Двойной клик по полю открывает календарь; один клик ставит курсор в поле.
+        TouchArea {
+            x: 0px;
+            y: 0px;
+            width: parent.width - 32px;
+            height: parent.height;
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.text;
+            clicked => { input.focus(); }
+            double-clicked => { root.open-calendar(); }
+        }
+        // Иконка календаря открывает календарь одним щелчком.
+        TouchArea {
+            x: parent.width - 32px;
+            y: 0px;
+            width: 32px;
+            height: parent.height;
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.open-calendar(); }
+        }
+
+        popup := PopupWindow {
+            x: 0px;
+            y: field.height + 2px;
+            width: 272px;
+            height: 292px;
+            close-policy: PopupClosePolicy.close-on-click-outside;
+
+            // Календарь забирает клавиатуру у поля: набор цифр и Backspace пересылаются в поле,
+            // Enter и Escape закрывают календарь.
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if (event.text == Key.Return || event.text == Key.Escape) {
+                        popup.close();
+                        return accept;
+                    }
+                    root.text = DateInput.apply-key(root.text, event.text);
+                    root.commit-text();
+                    root.typed-progress();
+                    accept
+                }
+            }
+            DatePanel {
+                year-min: root.year-min;
+                year-max: root.year-max;
+                day <=> root.day;
+                month <=> root.month;
+                year <=> root.year;
+                mode <=> root.mode;
+                first <=> root.seq-first;
+                second <=> root.seq-second;
+                edited => { root.edited(); }
+                completed => { popup.close(); }
+            }
+        }
+    }
+}

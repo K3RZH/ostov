@@ -3,17 +3,27 @@
 //! Дизайн: docs/Дизайн-документ.md §11. Требования: ИТ-01…04, ИТ-07.
 //! Статус: тема (токены), кнопка и витрина компонентов.
 
-slint::include_modules!();
+// Код генерирует Slint: unwrap и expect в нём не наши, поэтому lint на внешних данных
+// отключён только для этого модуля, остальной код проверяется как обычно.
+mod generated {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    slint::include_modules!();
+}
+pub use generated::*;
 
 pub mod app;
+pub mod date_input;
 pub mod engine;
 pub mod grid;
-pub mod login;
+pub mod local_base;
 pub mod receipts;
 pub mod receipts_ui;
+pub mod recent;
 pub mod settings;
 pub mod shell;
 pub mod users;
+pub mod windows;
+pub mod workspace;
 
 /// Имя крейта (проверка, что каркас собран).
 pub const NAME: &str = env!("CARGO_PKG_NAME");

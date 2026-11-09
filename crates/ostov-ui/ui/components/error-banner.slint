@@ -1,0 +1,33 @@
+import { Theme, Shape } from "../theme.slint";
+
+// Плашка с текстом ошибки ядра: показывается, только когда текст не пустой.
+export component ErrorBanner inherits Rectangle {
+    in property <string> text;
+
+    visible: root.text != "";
+    height: root.text == "" ? 0px : banner.preferred-height;
+    border-radius: Shape.control-radius;
+    border-width: 1px;
+    border-color: Theme.danger;
+    background: Theme.danger-soft;
+
+    banner := HorizontalLayout {
+        padding: Theme.space-12;
+        spacing: Theme.space-8;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                source: @image-url("../../assets/icons/error.svg");
+                colorize: Theme.danger;
+                width: 16px;
+                height: 16px;
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: Theme.font-body;
+            color: Theme.danger;
+            wrap: word-wrap;
+        }
+    }
+}

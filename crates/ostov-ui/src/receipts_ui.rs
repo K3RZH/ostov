@@ -5,15 +5,24 @@
 //! вкладки на экране; при переключении они сохраняются в `DocState` и загружаются из него.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
+
+use ostov_api::{
+    Engine, EngineError, EngineResult, ErrorCode, Fields, ListQuery, ObjectData, PostAction, Row,
+    Saved, Value,
+};
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
+use crate::engine::call_in_background;
 use crate::grid;
-use crate::receipts::{self, COLUMNS, Column, Line, Receipt};
-use crate::shell::{RECEIPTS_NODE, Shell};
-use crate::{AppWindow, GridColumn, GridRow, ReceiptsData};
+use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt, Sorting};
+use crate::shell::Shell;
+use crate::windows::Windows;
+use crate::workspace::{DocTabs, TabList, WindowId, WindowRef, Workspace};
+use crate::{AppWindow, DocLink, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
 
 /// Ширины колонок списка в px: гибкая только «Поставщик», её ширина здесь минимум.
 /// Дальше ширины меняет пользователь перетаскиванием (это делает сама таблица).
@@ -22,6 +31,22 @@ const SUPPLIER: usize = 2;
 const AMOUNT: usize = 4;
 const STATUS: usize = 5;
 const NEW_DOC_DATE: (u16, u8, u8) = (2026, 10, 29);
+
+/// Объект списка в ядре и поля сортировки по колонкам (порядок как у `receipts::COLUMNS`).
+/// Ссылочные колонки ядро сортирует по названию.
+const OBJECT: &str = "receipt";
+const COLUMN_FIELDS: [&str; 6] = [
+    "number",
+    "date",
+    "supplier",
+    "warehouse",
+    "amount",
+    "posted",
+];
+/// Строк в одном запросе к ядру (оно отдаёт не больше 1000).
+const PAGE_SIZE: u32 = 500;
+/// Сколько строк грузим целиком, пока нет подгрузки окнами по прокрутке и прыжков `seek`.
+const MAX_ROWS: usize = 20_000;
 
 /// Содержимое документа, которое пользователь может изменить.
 #[derive(Clone, PartialEq, Eq)]
@@ -33,8 +58,13 @@ struct Content {
 }
 
 struct DocState {
+    /// Идентификатор в ядре; у ещё не записанного документа 0.
+    id: i64,
+    /// Версия объекта в ядре: запись с устаревшей версией ядро отклонит.
+    version: i64,
     number: u32,
     posted: bool,
+    deleted: bool,
     /// Документ уже есть в списке (новый попадёт туда при записи).
     saved: bool,
     content: Content,
@@ -44,35 +74,57 @@ struct DocState {
 }
 
 impl DocState {
-    fn from_receipt(receipt: &Receipt) -> Self {
-        let content = Content {
-            supplier: receipt.supplier.clone(),
-            warehouse: receipt.warehouse.clone(),
-            date: receipts::date_text(receipt.date),
-            lines: receipt
-                .lines
-                .clone()
-                .unwrap_or_else(|| receipts::lines(receipt)),
+    /// Документ из ядра; без номера ядро документ не отдаёт.
+    fn from_object(data: &ObjectData, catalogs: &Catalogs) -> Option<Self> {
+        let title = |name: &str| match data.fields.get(name) {
+            Some(Value::Ref {
+                title: Some(title), ..
+            }) => title.clone(),
+            _ => String::new(),
         };
-        Self {
-            number: receipt.number,
-            posted: receipt.posted,
+        let content = Content {
+            supplier: title("supplier"),
+            warehouse: title("warehouse"),
+            date: match data.fields.get("date") {
+                Some(Value::Date(text)) => parse_iso_date(text).map(receipts::date_text),
+                _ => None,
+            }
+            .unwrap_or_default(),
+            lines: data
+                .tables
+                .get("lines")
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| line_from_fields(row, catalogs))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        Some(Self {
+            id: data.id?,
+            version: data.version,
+            number: u32::try_from(data.number?).ok()?,
+            posted: data.posted,
+            deleted: data.deleted,
             saved: true,
             baseline: content.clone(),
             content,
-        }
+        })
     }
 
-    fn new_document(number: u32) -> Self {
+    fn new_document(number: u32, warehouse: String) -> Self {
         let content = Content {
             supplier: String::new(),
-            warehouse: receipts::WAREHOUSES[0].to_owned(),
+            warehouse,
             date: receipts::date_text(NEW_DOC_DATE),
             lines: Vec::new(),
         };
         Self {
+            id: 0,
+            version: 0,
             number,
             posted: false,
+            deleted: false,
             saved: false,
             baseline: content.clone(),
             content,
@@ -98,27 +150,721 @@ impl DocState {
 
 struct State {
     all: Vec<Receipt>,
-    /// Колонка и признак «по убыванию».
-    sort: Option<(usize, bool)>,
+    /// Сортировка по колонкам; порядок ключей это приоритет.
+    sorting: Sorting,
     query: String,
+    /// Ядро, из которого читается список (пока не подключено: список пуст).
+    engine: Option<Arc<dyn Engine>>,
+    /// Номер запроса списка: ответ на устаревший запрос (успели сменить сортировку или поиск)
+    /// отбрасывается.
+    generation: u64,
+    /// Сколько строк в списке по текущему запросу (для подписи «Показано N из M»).
+    total_all: usize,
     next_number: u32,
     docs: HashMap<u32, DocState>,
-    /// Документ, поля которого сейчас в форме на экране.
+    /// Состояние формы окна, которому сейчас служит обработчик (см. `form_state`).
+    form: FormCtx,
+    /// Главное окно: все окна показывают один и тот же список.
+    main: slint::Weak<AppWindow>,
+    /// Дополнительные окна с вкладками и состояние их форм.
+    hosts: HashMap<WindowId, HostWindow>,
+    /// Какие документы открыты во вкладках какого окна: документ живёт, пока открыт хотя бы в одном.
+    tab_docs: HashMap<WindowRef, HashSet<u32>>,
+    /// Номера документов со своей вехой пользователя (в списке они не зависят от сортировки).
+    marks: HashSet<u32>,
+    /// Сколько показывать сообщение об ошибке действия над списком.
+    notice_timer: slint::Timer,
+    catalogs: Catalogs,
+}
+
+/// Справочники из ядра: `id` нужен для записи ссылок, название для выпадающих списков.
+#[derive(Default)]
+struct Catalogs {
+    warehouses: Vec<(i64, String)>,
+    suppliers: Vec<(i64, String)>,
+    /// Номенклатура: `id`, название и единица измерения.
+    goods: Vec<(i64, String, String)>,
+}
+
+impl Catalogs {
+    fn warehouse_names(&self) -> Vec<String> {
+        self.warehouses
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    fn supplier_names(&self) -> Vec<String> {
+        self.suppliers
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    fn goods_names(&self) -> Vec<String> {
+        self.goods.iter().map(|(_, name, _)| name.clone()).collect()
+    }
+
+    fn warehouse_id(&self, name: &str) -> Option<i64> {
+        id_of(&self.warehouses, name)
+    }
+
+    fn supplier_id(&self, name: &str) -> Option<i64> {
+        id_of(&self.suppliers, name)
+    }
+
+    fn goods_id(&self, name: &str) -> Option<i64> {
+        self.goods
+            .iter()
+            .find(|(_, good, _)| good == name)
+            .map(|(id, _, _)| *id)
+    }
+
+    /// Единица измерения товара по справочнику (нет в справочнике: «шт»).
+    fn unit_of(&self, name: &str) -> &str {
+        self.goods
+            .iter()
+            .find(|(_, good, _)| good == name)
+            .map_or("шт", |(_, _, unit)| unit.as_str())
+    }
+}
+
+fn id_of(items: &[(i64, String)], name: &str) -> Option<i64> {
+    items
+        .iter()
+        .find(|(_, item)| item == name)
+        .map(|(id, _)| *id)
+}
+
+/// Все элементы справочника ядра по названию: страницами, пока ядро отдаёт следующий ключ.
+fn read_catalog(engine: &dyn Engine, object: &str) -> EngineResult<Vec<Row>> {
+    let mut rows = Vec::new();
+    let mut after_key = None;
+    loop {
+        let page = engine.list(&ListQuery {
+            object: object.to_owned(),
+            order: Some("name".to_owned()),
+            descending: false,
+            search: None,
+            posted: None,
+            deleted: None,
+            after_key: after_key.take(),
+            size: PAGE_SIZE,
+        })?;
+        rows.extend(page.rows);
+        match page.next_key {
+            Some(key) => after_key = Some(key),
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Строка табличной части из ядра; без товара строка не показывается.
+fn line_from_fields(row: &Fields, catalogs: &Catalogs) -> Option<Line> {
+    let Some(Value::Ref {
+        title: Some(name), ..
+    }) = row.get("goods")
+    else {
+        return None;
+    };
+    let decimal = |field: &str, target: u8| match row.get(field) {
+        Some(Value::Decimal { units, scale }) => rescale(*units, *scale, target),
+        _ => 0,
+    };
+    Some(Line {
+        unit: catalogs.unit_of(name).to_owned(),
+        name: name.clone(),
+        quantity_milli: decimal("qty", 3),
+        price: decimal("price", 2),
+        amount: decimal("amount", 2),
+    })
+}
+
+/// Документ интерфейса в объект ядра. Ошибка: текст для человека (поле, которое не разобрать).
+fn to_object(doc: &DocState, catalogs: &Catalogs) -> Result<ObjectData, String> {
+    let (year, month, day) =
+        receipts::parse_date(&doc.content.date).ok_or("Дата: введите в виде дд.мм.гггг.")?;
+    let reference = |name: &str, id: Option<i64>, what: &str| -> Result<Value, String> {
+        if name.is_empty() {
+            return Ok(Value::Null);
+        }
+        id.map(|id| Value::Ref { id, title: None })
+            .ok_or_else(|| format!("{what} «{name}» нет в справочнике."))
+    };
+    let mut fields = Fields::new();
+    fields.insert(
+        "date".to_owned(),
+        Value::Date(format!("{year:04}-{month:02}-{day:02}")),
+    );
+    fields.insert(
+        "supplier".to_owned(),
+        reference(
+            &doc.content.supplier,
+            catalogs.supplier_id(&doc.content.supplier),
+            "Поставщика",
+        )?,
+    );
+    fields.insert(
+        "warehouse".to_owned(),
+        reference(
+            &doc.content.warehouse,
+            catalogs.warehouse_id(&doc.content.warehouse),
+            "Склада",
+        )?,
+    );
+    let mut lines = Vec::new();
+    for line in &doc.content.lines {
+        let mut row = Fields::new();
+        row.insert(
+            "goods".to_owned(),
+            reference(&line.name, catalogs.goods_id(&line.name), "Товара")?,
+        );
+        row.insert(
+            "qty".to_owned(),
+            Value::Decimal {
+                units: line.quantity_milli,
+                scale: 3,
+            },
+        );
+        row.insert(
+            "price".to_owned(),
+            Value::Decimal {
+                units: line.price,
+                scale: 2,
+            },
+        );
+        lines.push(row);
+    }
+    Ok(ObjectData {
+        id: (doc.id != 0).then_some(doc.id),
+        version: doc.version,
+        number: doc.saved.then_some(i64::from(doc.number)),
+        posted: doc.posted,
+        deleted: doc.deleted,
+        fields,
+        tables: [("lines".to_owned(), lines)].into(),
+    })
+}
+
+/// Строка списка по документу, прочитанному из ядра.
+fn receipt_from_object(doc: &DocState, data: &ObjectData) -> Receipt {
+    Receipt {
+        id: doc.id,
+        number: doc.number,
+        date: parse_iso_date(match data.fields.get("date") {
+            Some(Value::Date(text)) => text,
+            _ => "",
+        })
+        .unwrap_or_default(),
+        supplier: doc.content.supplier.clone(),
+        warehouse: doc.content.warehouse.clone(),
+        amount: match data.fields.get("amount") {
+            Some(Value::Decimal { units, scale }) => kopecks(*units, *scale),
+            _ => doc.total(),
+        },
+        posted: doc.posted,
+        deleted: doc.deleted,
+    }
+}
+
+fn no_engine() -> EngineError {
+    EngineError::new(ErrorCode::Unavailable, "Нет подключения к ядру.")
+}
+
+/// Читает документ из ядра.
+fn fetch_doc(state: &State, id: i64) -> EngineResult<DocState> {
+    let engine = state.engine.as_ref().ok_or_else(no_engine)?;
+    let data = engine.get(OBJECT, id)?;
+    DocState::from_object(&data, &state.catalogs)
+        .ok_or_else(|| EngineError::new(ErrorCode::Internal, "Ядро вернуло документ без номера."))
+}
+
+/// Номер последнего документа в ядре: следующий новый получит номер на единицу больше.
+fn last_number(engine: &dyn Engine) -> EngineResult<u32> {
+    let page = engine.list(&ListQuery {
+        object: OBJECT.to_owned(),
+        order: Some("number".to_owned()),
+        descending: true,
+        search: None,
+        posted: None,
+        deleted: None,
+        after_key: None,
+        size: 1,
+    })?;
+    Ok(page
+        .rows
+        .first()
+        .and_then(|row| match row.values.get("number") {
+            Some(Value::Int(number)) => u32::try_from(*number).ok(),
+            _ => None,
+        })
+        .unwrap_or(0))
+}
+
+/// Записывает новый элемент справочника в ядро, возвращает его `id`.
+fn create_catalog_item(
+    engine: &dyn Engine,
+    catalog: Catalog,
+    name: &str,
+    unit: &str,
+) -> EngineResult<i64> {
+    let mut fields = Fields::new();
+    fields.insert("name".to_owned(), Value::Text(name.to_owned()));
+    if catalog == Catalog::Goods {
+        fields.insert("unit".to_owned(), Value::Text(unit.to_owned()));
+    }
+    let item = ObjectData {
+        fields,
+        ..ObjectData::default()
+    };
+    Ok(engine.save(catalog.object(), &item, PostAction::Write)?.id)
+}
+
+fn load_catalogs(engine: &dyn Engine) -> EngineResult<Catalogs> {
+    let text = |row: &Row, field: &str| match row.values.get(field) {
+        Some(Value::Text(text)) => text.clone(),
+        _ => String::new(),
+    };
+    let named = |object: &str| -> EngineResult<Vec<(i64, String)>> {
+        Ok(read_catalog(engine, object)?
+            .iter()
+            .map(|row| (row.id, text(row, "name")))
+            .collect())
+    };
+    Ok(Catalogs {
+        warehouses: named("warehouses")?,
+        suppliers: named("suppliers")?,
+        goods: read_catalog(engine, "goods")?
+            .iter()
+            .map(|row| (row.id, text(row, "name"), text(row, "unit")))
+            .collect(),
+    })
+}
+
+/// Что помнит форма документа между действиями: открытый в ней документ, правимая строка,
+/// справочник, в который добавляют элемент. У каждого окна формы своё.
+#[derive(Default)]
+struct FormCtx {
+    /// Документ, поля которого сейчас в форме.
     loaded: Option<u32>,
     /// Какая строка правится в окне строки (`None`: добавляется новая).
     editing_line: Option<usize>,
+    /// Справочник, в который добавляют элемент (кнопка «+ Добавить» в выпадающем списке).
+    catalog_kind: Option<Catalog>,
+}
+
+/// Окно формы и списка.
+type Target = WindowRef;
+
+/// Дополнительное окно: само окно и состояние его формы.
+struct HostWindow {
+    window: AppWindow,
+    form: FormCtx,
+}
+
+/// Вкладки окна, которому служит обработчик: у главного окна они в `Shell`, у дополнительного
+/// в `Windows`.
+#[derive(Clone)]
+struct Tabs {
+    target: Target,
+    shell: Rc<RefCell<Shell>>,
+    windows: Rc<RefCell<Option<Windows>>>,
+}
+
+impl Tabs {
+    fn with<R>(&self, f: impl FnOnce(&mut dyn DocTabs) -> R) -> Option<R> {
+        match self.target {
+            WindowRef::Main => Some(f(&mut *self.shell.borrow_mut())),
+            WindowRef::Extra(id) => self
+                .windows
+                .borrow()
+                .as_ref()?
+                .with_list(id, |list| f(list)),
+        }
+    }
+
+    fn windows(&self) -> Option<Windows> {
+        self.windows.borrow().clone()
+    }
+
+    /// Показывает изменения вкладок на экране.
+    fn refresh(&self, main: &AppWindow) {
+        match self.target {
+            WindowRef::Main => crate::app::refresh(main, &self.shell.borrow()),
+            WindowRef::Extra(id) => {
+                if let Some(windows) = self.windows() {
+                    windows.refresh_host(id);
+                }
+            }
+        }
+    }
+
+    /// Закрывает активную вкладку окна (форма закрыта кнопкой).
+    fn close_active(&self, main: &AppWindow, state: &RefCell<State>) {
+        match self.target {
+            WindowRef::Main => {
+                let mut shell = self.shell.borrow_mut();
+                close_active(main, &mut state.borrow_mut(), &mut shell);
+                crate::app::refresh(main, &shell);
+            }
+            WindowRef::Extra(id) => {
+                if let Some(windows) = self.windows() {
+                    windows.close_active_tab(main, &self.shell, id);
+                }
+            }
+        }
+    }
+}
+
+/// Доступ к состоянию с формой нужного окна: у дополнительного окна контекст формы подменяется на
+/// его собственный и возвращается назад, когда охрана освобождается (в том числе при раннем
+/// `return` в обработчике). Так одни и те же функции работают с любой формой.
+struct FormGuard<'a> {
+    state: std::cell::RefMut<'a, State>,
+    /// Номер окна и контекст главной формы, пока тот подменён.
+    swapped: Option<(WindowId, FormCtx)>,
+}
+
+impl std::ops::Deref for FormGuard<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for FormGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.state
+    }
+}
+
+impl Drop for FormGuard<'_> {
+    fn drop(&mut self) {
+        if let Some((id, main)) = self.swapped.take() {
+            let host_form = std::mem::replace(&mut self.state.form, main);
+            // Окно могли закрыть внутри обработчика: тогда его контекст некуда возвращать.
+            if let Some(host) = self.state.hosts.get_mut(&id) {
+                host.form = host_form;
+            }
+        }
+    }
+}
+
+fn form_state(state: &RefCell<State>, target: Target) -> FormGuard<'_> {
+    let mut guard = state.borrow_mut();
+    let swapped = match target {
+        WindowRef::Main => None,
+        WindowRef::Extra(id) => {
+            let host_form = guard
+                .hosts
+                .get_mut(&id)
+                .map(|h| std::mem::take(&mut h.form))
+                .unwrap_or_default();
+            Some((id, std::mem::replace(&mut guard.form, host_form)))
+        }
+    };
+    FormGuard {
+        state: guard,
+        swapped,
+    }
+}
+
+/// Справочники, на которые ссылаются поля формы.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Catalog {
+    Warehouse,
+    Supplier,
+    Goods,
+}
+
+impl Catalog {
+    fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Warehouse),
+            1 => Some(Self::Supplier),
+            2 => Some(Self::Goods),
+            _ => None,
+        }
+    }
+
+    /// Имя объекта в ядре.
+    fn object(self) -> &'static str {
+        match self {
+            Self::Warehouse => "warehouses",
+            Self::Supplier => "suppliers",
+            Self::Goods => "goods",
+        }
+    }
+
+    fn dialog_title(self) -> &'static str {
+        match self {
+            Self::Warehouse => "Новый склад",
+            Self::Supplier => "Новый поставщик",
+            Self::Goods => "Новая номенклатура",
+        }
+    }
+}
+
+/// Все окна: список и справочники показаны в каждом.
+fn all_windows(state: &State) -> Vec<AppWindow> {
+    let mut windows: Vec<AppWindow> = state.main.upgrade().into_iter().collect();
+    windows.extend(state.hosts.values().map(|h| h.window.clone_strong()));
+    windows
 }
 
 impl State {
-    fn visible(&self) -> Vec<&Receipt> {
-        receipts::filter(&self.all, &self.query)
+    /// Окно, в котором документ открыт во вкладке.
+    fn owner_of(&self, number: u32) -> Option<Target> {
+        self.tab_docs
+            .iter()
+            .find(|(_, docs)| docs.contains(&number))
+            .map(|(target, _)| *target)
     }
+
+    /// Показанные строки: и порядок, и поиск делает ядро.
+    fn visible(&self) -> Vec<&Receipt> {
+        self.all.iter().collect()
+    }
+
+    /// Запрос списка по текущей сортировке и тексту поиска.
+    fn request(&self) -> ListRequest {
+        // Ядро сортирует по одному полю (первому по приоритету); остальные ключи применяются
+        // к загруженным строкам здесь (`fetch_receipts`).
+        let first = self.sorting.keys().first();
+        ListRequest {
+            order: first.map(|(column, _)| COLUMN_FIELDS[*column].to_owned()),
+            descending: first.is_some_and(|(_, descending)| *descending),
+            search: Some(self.query.trim().to_owned()).filter(|text| !text.is_empty()),
+            sorting: self.sorting.clone(),
+        }
+    }
+}
+
+/// Параметры запроса списка (то, что уходит в `ListQuery`).
+#[derive(Clone, Default)]
+struct ListRequest {
+    order: Option<String>,
+    descending: bool,
+    search: Option<String>,
+    /// Все ключи сортировки; при двух и больше строки досортировываются здесь.
+    sorting: Sorting,
+}
+
+/// Число из десятичного значения ядра в копейках (деньги в ядре: 2 знака; другое
+/// приводится, лишние знаки отбрасываются).
+fn kopecks(units: i64, scale: u8) -> i64 {
+    rescale(units, scale, 2)
+}
+
+/// Десятичное значение ядра в целые доли с `target` знаками после запятой (лишние отбрасываются).
+fn rescale(units: i64, scale: u8, target: u8) -> i64 {
+    let factor = |digits: u8| 10i64.checked_pow(u32::from(digits)).unwrap_or(i64::MAX);
+    match scale.cmp(&target) {
+        std::cmp::Ordering::Equal => units,
+        std::cmp::Ordering::Less => units.saturating_mul(factor(target - scale)),
+        std::cmp::Ordering::Greater => units / factor(scale - target),
+    }
+}
+
+/// Дата ядра `ГГГГ-ММ-ДД` в (год, месяц, день).
+fn parse_iso_date(text: &str) -> Option<(u16, u8, u8)> {
+    let mut parts = text.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((year, month, day))
+}
+
+/// Строка списка ядра в строку списка интерфейса; без номера строка не показывается.
+fn receipt_from_row(row: &Row) -> Option<Receipt> {
+    let int = |name: &str| match row.values.get(name) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    };
+    let title = |name: &str| match row.values.get(name) {
+        Some(Value::Ref {
+            title: Some(title), ..
+        }) => title.clone(),
+        Some(Value::Ref { id, .. }) => id.to_string(),
+        _ => String::new(),
+    };
+    Some(Receipt {
+        id: row.id,
+        number: u32::try_from(int("number")?).ok()?,
+        date: match row.values.get("date") {
+            Some(Value::Date(text)) => parse_iso_date(text).unwrap_or_default(),
+            _ => (0, 0, 0),
+        },
+        supplier: title("supplier"),
+        warehouse: title("warehouse"),
+        amount: match row.values.get("amount") {
+            Some(Value::Decimal { units, scale }) => kopecks(*units, *scale),
+            _ => 0,
+        },
+        posted: int("posted").unwrap_or(0) != 0,
+        deleted: int("deleted").unwrap_or(0) != 0,
+    })
+}
+
+/// Читает список из ядра страницами по `PAGE_SIZE`; возвращает строки и общее число.
+fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(Vec<Receipt>, u64)> {
+    let mut receipts = Vec::new();
+    let mut total = 0;
+    let mut after_key = None;
+    loop {
+        let page = engine.list(&ListQuery {
+            object: OBJECT.to_owned(),
+            order: request.order.clone(),
+            descending: request.descending,
+            search: request.search.clone(),
+            posted: None,
+            deleted: None,
+            after_key: after_key.take(),
+            size: PAGE_SIZE,
+        })?;
+        if let Some(count) = page.total {
+            total = count;
+        }
+        receipts.extend(page.rows.iter().filter_map(receipt_from_row));
+        match page.next_key {
+            Some(key) if receipts.len() < MAX_ROWS => after_key = Some(key),
+            _ => break,
+        }
+    }
+    if request.sorting.keys().len() > 1 {
+        receipts.sort_by(|a, b| request.sorting.compare(a, b));
+    }
+    Ok((receipts, total))
+}
+
+/// Ставит или снимает пометку удаления; версию берём свежей: действие идёт по строке списка.
+fn mark_deleted(engine: &dyn Engine, id: i64, deleted: bool) -> EngineResult<Saved> {
+    let version = engine.get(OBJECT, id)?.version;
+    engine.mark_deleted(OBJECT, id, version, deleted)
+}
+
+/// «Провести» или «Отменить проведение» строки списка: команда уходит в ядро.
+fn post_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32, post: bool) {
+    let (Some(engine), Some(receipt)) = (
+        state.engine.clone(),
+        state.all.iter().find(|r| r.number == number),
+    ) else {
+        return;
+    };
+    let id = receipt.id;
+    let state_rc = state_rc.clone();
+    call_in_background(
+        move || {
+            if post {
+                engine.post(OBJECT, id)
+            } else {
+                engine.unpost(OBJECT, id)
+            }
+        },
+        move |result| {
+            let mut state = state_rc.borrow_mut();
+            match result {
+                Ok(saved) => {
+                    show_notice(&state, "");
+                    set_posted(&mut state, number, post);
+                    if let Some(doc) = state.docs.get_mut(&number) {
+                        doc.version = saved.version;
+                    }
+                    if let Some(index) = state.all.iter().position(|r| r.number == number) {
+                        update_row(&state, index);
+                    }
+                }
+                Err(error) => show_notice(&state, &notice_text(number, &error.message)),
+            }
+        },
+    );
+}
+
+/// Текст ошибки действия над документом списка: с номером, чтобы было ясно, к чему она.
+fn notice_text(number: u32, message: &str) -> String {
+    format!("Документ № {number}: {message}")
+}
+
+/// Документы из предупреждения в виде ссылок для Slint.
+fn doc_links(refs: &[DocRef]) -> ModelRc<DocLink> {
+    ModelRc::new(VecModel::from(
+        refs.iter()
+            .map(|doc| DocLink {
+                title: doc.title().into(),
+                kind: doc.object().into(),
+                number: i32::try_from(doc.number).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// Сообщение над списком; само пропадает через несколько секунд. Документы, которые названы в
+/// тексте ядра, показываются ссылками.
+fn show_notice(state: &State, text: &str) {
+    let windows = all_windows(state);
+    let (shown, refs) = receipts::split_blockers(text);
+    for window in &windows {
+        let data = window.global::<ReceiptsData>();
+        data.set_notice(shown.as_str().into());
+        data.set_notice_links(doc_links(&refs));
+    }
+    if text.is_empty() {
+        state.notice_timer.stop();
+        return;
+    }
+    let windows: Vec<_> = windows.iter().map(ComponentHandle::as_weak).collect();
+    state.notice_timer.start(
+        slint::TimerMode::SingleShot,
+        std::time::Duration::from_secs(12),
+        move || {
+            for window in windows.iter().filter_map(slint::Weak::upgrade) {
+                let data = window.global::<ReceiptsData>();
+                data.set_notice("".into());
+                data.set_notice_links(doc_links(&[]));
+            }
+        },
+    );
+}
+
+/// «Удалить» или «Восстановить» строку списка: команда уходит в ядро, строка меняется на месте.
+fn mark_deleted_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32) {
+    let (Some(engine), Some(receipt)) = (
+        state.engine.clone(),
+        state.all.iter().find(|r| r.number == number),
+    ) else {
+        return;
+    };
+    let (id, deleted) = (receipt.id, !receipt.deleted);
+    let state_rc = state_rc.clone();
+    call_in_background(
+        move || mark_deleted(&*engine, id, deleted),
+        move |result| {
+            let mut state = state_rc.borrow_mut();
+            match result {
+                Ok(saved) => {
+                    show_notice(&state, "");
+                    if let Some(doc) = state.docs.values_mut().find(|doc| doc.id == id) {
+                        doc.version = saved.version;
+                        doc.deleted = deleted;
+                    }
+                    if let Some(index) = state.all.iter().position(|r| r.id == id) {
+                        state.all[index].deleted = deleted;
+                        update_row(&state, index);
+                    }
+                }
+                Err(error) => show_notice(&state, &notice_text(number, &error.message)),
+            }
+        },
+    );
 }
 
 /// Точка входа для оболочки: перед и после любого действия с вкладками.
 #[derive(Clone)]
 pub struct ReceiptsUi {
     state: Rc<RefCell<State>>,
+    shell: Rc<RefCell<Shell>>,
+    windows: Rc<RefCell<Option<Windows>>>,
 }
 
 impl ReceiptsUi {
@@ -128,20 +874,274 @@ impl ReceiptsUi {
         before(app, &mut self.state.borrow_mut(), shell);
     }
 
+    /// Общая оболочка: дерево навигации и вкладки главного окна.
+    pub fn shell(&self) -> Rc<RefCell<Shell>> {
+        self.shell.clone()
+    }
+
+    /// Код окон сообщает о себе: формам дополнительных окон нужны их вкладки.
+    pub fn bind_windows(&self, windows: &Windows) {
+        *self.windows.borrow_mut() = Some(windows.clone());
+    }
+
+    /// Подключает список и форму к новому дополнительному окну.
+    pub fn host_opened(&self, window: &AppWindow, id: WindowId) {
+        let data = window.global::<ReceiptsData>();
+        data.set_columns(ModelRc::new(VecModel::from(list_columns())));
+        {
+            let state = self.state.borrow();
+            data.set_query(state.query.as_str().into());
+            publish_catalogs(window, &state);
+            publish_list(window, &state);
+        }
+        let main = self.state.borrow().main.clone();
+        let tabs = Tabs {
+            target: WindowRef::Extra(id),
+            shell: self.shell.clone(),
+            windows: self.windows.clone(),
+        };
+        wire_list(window, &main, &self.state, &tabs);
+        wire_form(window, main, &self.state, &tabs);
+        self.state.borrow_mut().hosts.insert(
+            id,
+            HostWindow {
+                window: window.clone_strong(),
+                form: FormCtx::default(),
+            },
+        );
+    }
+
+    /// Дополнительное окно закрылось. Документы здесь не забываются: его вкладка могла переехать
+    /// в другое окно, и новое место станет известно только в `sync`.
+    pub fn host_closed(&self, id: WindowId) {
+        let mut state = self.state.borrow_mut();
+        state.hosts.remove(&id);
+        state.tab_docs.remove(&WindowRef::Extra(id));
+    }
+
+    /// Окно закрыли вместе с вкладками: забывает документы, которые больше нигде не открыты.
+    pub fn forget_closed_docs(&self) {
+        forget_closed(&mut self.state.borrow_mut());
+    }
+
+    /// Поля форм всех окон попадают в документы. Вызывать, пока окна ещё на экране.
+    pub fn store_forms(&self, main: &AppWindow) {
+        store_form(main, &mut self.state.borrow_mut());
+        let hosts: Vec<(WindowId, AppWindow)> = self
+            .state
+            .borrow()
+            .hosts
+            .iter()
+            .map(|(id, host)| (*id, host.window.clone_strong()))
+            .collect();
+        for (id, window) in hosts {
+            store_form(&window, &mut form_state(&self.state, WindowRef::Extra(id)));
+        }
+    }
+
+    /// Вкладки переехали между окнами: каждая форма показывает активный документ своего окна.
+    pub fn sync(&self, main: &AppWindow, shell: &mut Shell, workspace: &mut Workspace) {
+        let ids = workspace.extra_ids();
+        {
+            let mut state = self.state.borrow_mut();
+            state.tab_docs.clear();
+            state.tab_docs.insert(WindowRef::Main, shell.documents());
+            for id in &ids {
+                if let Some(list) = workspace.list(*id) {
+                    state
+                        .tab_docs
+                        .insert(WindowRef::Extra(*id), list.documents());
+                }
+            }
+            forget_closed(&mut state);
+            mark_modified(&state, shell);
+            for id in &ids {
+                if let Some(list) = workspace.list_mut(*id) {
+                    mark_modified(&state, list);
+                }
+            }
+            after(main, &mut state, shell, WindowRef::Main);
+        }
+        for id in ids {
+            let target = WindowRef::Extra(id);
+            let window = self
+                .state
+                .borrow()
+                .hosts
+                .get(&id)
+                .map(|host| host.window.clone_strong());
+            if let (Some(window), Some(list)) = (window, workspace.list(id)) {
+                after(&window, &mut form_state(&self.state, target), list, target);
+            }
+        }
+    }
+
+    /// Перед сменой вкладки в дополнительном окне.
+    pub fn before_host(&self, id: WindowId, list: &mut TabList) {
+        let window = self.host_window(id);
+        if let Some(window) = window {
+            before(
+                &window,
+                &mut form_state(&self.state, WindowRef::Extra(id)),
+                list,
+            );
+        }
+    }
+
+    /// После смены вкладки в дополнительном окне.
+    pub fn after_host(&self, id: WindowId, list: &TabList) {
+        let target = WindowRef::Extra(id);
+        if let Some(window) = self.host_window(id) {
+            after(&window, &mut form_state(&self.state, target), list, target);
+        }
+    }
+
+    fn host_window(&self, id: WindowId) -> Option<AppWindow> {
+        self.state
+            .borrow()
+            .hosts
+            .get(&id)
+            .map(|host| host.window.clone_strong())
+    }
+
+    /// Подключено ли ядро.
+    pub fn is_attached(&self) -> bool {
+        self.state.borrow().engine.is_some()
+    }
+
+    /// Отключает ядро при возврате к выбору базы: файл базы освобождается, а строки прошлой
+    /// базы не мелькают в следующей.
+    pub fn detach(&self) {
+        let mut state = self.state.borrow_mut();
+        state.engine = None;
+        state.all.clear();
+        state.catalogs = Default::default();
+    }
+
+    /// Показывает ошибку подключения вместо списка.
+    pub fn show_error(&self, message: &str) {
+        for window in all_windows(&self.state.borrow()) {
+            let data = window.global::<ReceiptsData>();
+            data.set_list_loading(false);
+            data.set_list_error(message.into());
+        }
+    }
+
+    /// Подключает ядро и читает список в фоне.
+    pub fn attach(&self, engine: Arc<dyn Engine>) {
+        self.connect(engine);
+        reload(&self.state, false);
+    }
+
+    /// Запоминает ядро и читает справочники (их мало, поэтому на месте).
+    fn connect(&self, engine: Arc<dyn Engine>) {
+        let mut state = self.state.borrow_mut();
+        state.catalogs = load_catalogs(&*engine).unwrap_or_default();
+        state.engine = Some(engine);
+        publish_all(&state);
+    }
+
+    /// То же, но ждёт ответа на месте (снимки экранов и проверки).
+    pub fn attach_blocking(&self, engine: Arc<dyn Engine>) {
+        self.connect(engine);
+        reload(&self.state, true);
+    }
+
     /// Вызывать ПОСЛЕ действия с вкладками: забывает закрытые документы и загружает форму
     /// документа, чья вкладка стала активной.
     pub fn after(&self, app: &AppWindow, shell: &Shell) {
-        after(app, &mut self.state.borrow_mut(), shell);
+        after(app, &mut self.state.borrow_mut(), shell, WindowRef::Main);
     }
 }
 
-fn texts(items: &[&str]) -> ModelRc<SharedString> {
+fn strings(items: &[String]) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(
-        items
-            .iter()
-            .map(|s| (*s).into())
-            .collect::<Vec<SharedString>>(),
+        items.iter().map(SharedString::from).collect::<Vec<_>>(),
     ))
+}
+
+/// Пункт меню: по умолчанию доступен, без черты и без красного.
+fn item(id: &str, label: &str, icon: &str) -> MenuAction {
+    MenuAction {
+        id: id.into(),
+        label: label.into(),
+        icon: icon.into(),
+        danger: false,
+        enabled: true,
+        divider: false,
+    }
+}
+
+/// Меню строки списка: что доступно, зависит от состояния документа.
+fn list_menu(receipt: &Receipt, milestone: bool) -> Vec<MenuAction> {
+    let (post_id, post_label, post_icon) = if receipt.posted {
+        ("unpost", "Отменить проведение", "undo")
+    } else {
+        ("post", "Провести", "check")
+    };
+    vec![
+        item("edit", "Редактировать", "edit"),
+        MenuAction {
+            enabled: !receipt.deleted,
+            ..item(post_id, post_label, post_icon)
+        },
+        // Сначала пометка на удаление (проведённый документ ядро не помечает: сначала отмена
+        // проведения), потом, у помеченного, снятие пометки или окончательное удаление.
+        // Окончательного удаления в ядре нет (решение СТ-30): пункт показан, но недоступен.
+        if receipt.deleted {
+            MenuAction {
+                divider: true,
+                ..item("delete", "Снять пометку удаления", "undo")
+            }
+        } else {
+            MenuAction {
+                divider: true,
+                danger: true,
+                enabled: !receipt.posted,
+                ..item("delete", "Пометить на удаление", "trash")
+            }
+        },
+        MenuAction {
+            danger: true,
+            enabled: false,
+            ..item("purge", "Удалить", "trash")
+        },
+        MenuAction {
+            divider: true,
+            ..item(
+                "milestone",
+                if milestone {
+                    "Убрать веху"
+                } else {
+                    "Добавить веху"
+                },
+                "minus",
+            )
+        },
+    ]
+}
+
+/// Меню строки табличной части: правка, вставка копии, порядок, удаление.
+fn line_menu(index: usize, count: usize) -> Vec<MenuAction> {
+    vec![
+        item("edit", "Изменить", "edit"),
+        item("add", "Добавить", "plus"),
+        item("copy", "Дублировать", "copy"),
+        MenuAction {
+            divider: true,
+            enabled: index > 0,
+            ..item("up", "Переместить выше", "arrow-up")
+        },
+        MenuAction {
+            enabled: index + 1 < count,
+            ..item("down", "Переместить ниже", "arrow-down")
+        },
+        MenuAction {
+            divider: true,
+            danger: true,
+            ..item("delete", "Удалить", "trash")
+        },
+    ]
 }
 
 fn grid_row(cells: Vec<String>, muted: bool) -> GridRow {
@@ -153,6 +1153,7 @@ fn grid_row(cells: Vec<String>, muted: bool) -> GridRow {
                 .collect::<Vec<_>>(),
         )),
         muted,
+        milestone: false,
     }
 }
 
@@ -259,23 +1260,104 @@ fn milestone_step(rows: usize) -> i32 {
     }
 }
 
-fn refresh_list(app: &AppWindow, state: &State) {
-    let data = app.global::<ReceiptsData>();
-    let rows: Vec<GridRow> = state
-        .visible()
+/// Вехи показанного списка: номер строки (с нуля) и поставщик как наименование.
+fn mark_positions(visible: &[&Receipt], marks: &HashSet<u32>) -> Vec<GridMark> {
+    visible
         .iter()
-        .map(|receipt| grid_row(receipt.cells(), false))
+        .enumerate()
+        .filter(|(_, receipt)| marks.contains(&receipt.number))
+        .filter_map(|(i, receipt)| {
+            Some(GridMark {
+                row: i32::try_from(i).ok()?,
+                label: receipt.supplier.as_str().into(),
+            })
+        })
+        .collect()
+}
+
+/// Перечитывает список из ядра по текущей сортировке и поиску. Устаревший ответ (параметры
+/// успели сменить) отбрасывается. `blocking`: ждать ответа на месте.
+fn reload(state: &Rc<RefCell<State>>, blocking: bool) {
+    let (engine, request, generation) = {
+        let mut state = state.borrow_mut();
+        let Some(engine) = state.engine.clone() else {
+            return;
+        };
+        state.generation += 1;
+        for window in all_windows(&state) {
+            window.global::<ReceiptsData>().set_list_loading(true);
+        }
+        (engine, state.request(), state.generation)
+    };
+    let apply = {
+        let state = state.clone();
+        move |result: EngineResult<(Vec<Receipt>, u64)>| {
+            let mut state = state.borrow_mut();
+            if state.generation == generation {
+                apply_list(&mut state, result);
+            }
+        }
+    };
+    if blocking {
+        apply(fetch_receipts(&*engine, &request));
+    } else {
+        call_in_background(move || fetch_receipts(&*engine, &request), apply);
+    }
+}
+
+/// Кладёт ответ ядра в список или показывает ошибку.
+fn apply_list(state: &mut State, result: EngineResult<(Vec<Receipt>, u64)>) {
+    let error = match result {
+        Ok((rows, total)) => {
+            state.total_all = usize::try_from(total).unwrap_or(usize::MAX);
+            let next = rows.iter().map(|r| r.number).max().map_or(1, |n| n + 1);
+            state.next_number = state.next_number.max(next);
+            state.all = rows;
+            SharedString::new()
+        }
+        Err(error) => {
+            state.all.clear();
+            error.message.as_str().into()
+        }
+    };
+    for window in all_windows(state) {
+        let data = window.global::<ReceiptsData>();
+        data.set_list_loading(false);
+        data.set_list_error(error.clone());
+        data.set_selected_row(-1);
+    }
+    refresh_list(state);
+}
+
+/// Показывает список во всех окнах.
+fn refresh_list(state: &State) {
+    for window in all_windows(state) {
+        publish_list(&window, state);
+    }
+}
+
+fn publish_list(app: &AppWindow, state: &State) {
+    let data = app.global::<ReceiptsData>();
+    let visible = state.visible();
+    let rows: Vec<GridRow> = visible
+        .iter()
+        .map(|receipt| GridRow {
+            milestone: state.marks.contains(&receipt.number),
+            ..grid_row(receipt.cells(), receipt.deleted)
+        })
         .collect();
+    let marks = mark_positions(&visible, &state.marks);
+    data.set_marks(ModelRc::new(VecModel::from(marks)));
     data.set_milestone_step(milestone_step(rows.len()));
     data.set_rows(ModelRc::new(VecModel::from(rows)));
-    data.set_total(i32::try_from(state.all.len()).unwrap_or(i32::MAX));
-    match state.sort {
-        Some((column, descending)) => {
-            data.set_sort_column(i32::try_from(column).unwrap_or(-1));
-            data.set_sort_desc(descending);
-        }
-        None => data.set_sort_column(-1),
-    }
+    data.set_total(i32::try_from(state.total_all).unwrap_or(i32::MAX));
+    let columns = 0..COLUMNS.len();
+    let ints = |values: Vec<i32>| ModelRc::new(VecModel::from(values));
+    data.set_sort_dirs(ints(
+        columns.clone().map(|c| state.sorting.dir(c)).collect(),
+    ));
+    data.set_sort_priorities(ints(columns.map(|c| state.sorting.priority(c)).collect()));
+    data.set_sort_count(i32::try_from(state.sorting.keys().len()).unwrap_or(0));
 }
 
 /// Показывает строки и итоги документа, открытого в форме.
@@ -292,7 +1374,7 @@ fn render_lines(app: &AppWindow, doc: &DocState) {
                     (i + 1).to_string(),
                     line.name.clone(),
                     line.unit.clone(),
-                    receipts::quantity(line.quantity_tenths),
+                    receipts::quantity(line.quantity_milli),
                     receipts::money(line.price),
                     receipts::money(line.amount),
                 ],
@@ -305,15 +1387,66 @@ fn render_lines(app: &AppWindow, doc: &DocState) {
     data.set_form_total(receipts::money(doc.total()).into());
 }
 
+/// Дата из полей формы (день, месяц, год).
+fn form_date(data: &ReceiptsData<'_>) -> String {
+    let part = |value: i32| u16::try_from(value).unwrap_or(1);
+    receipts::date_text((
+        part(data.get_form_year()),
+        u8::try_from(data.get_form_month()).unwrap_or(1),
+        u8::try_from(data.get_form_day()).unwrap_or(1),
+    ))
+}
+
 /// Сохраняет поля формы на экране в состояние её документа.
 fn store_form(app: &AppWindow, state: &mut State) {
-    let Some(number) = state.loaded else { return };
+    let Some(number) = state.form.loaded else {
+        return;
+    };
     let data = app.global::<ReceiptsData>();
     if let Some(doc) = state.docs.get_mut(&number) {
         doc.content.supplier = data.get_form_supplier().to_string();
         doc.content.warehouse = data.get_form_warehouse().to_string();
-        doc.content.date = data.get_form_date().to_string();
+        doc.content.date = form_date(&data);
+        show_status(app, doc);
     }
+}
+
+/// Статус документа на форме: «Проведён, изменён» значит, что после проведения в документ внесли
+/// правки и его надо провести заново; «Записан» значит, что документ записан без проведения.
+fn show_status(app: &AppWindow, doc: &DocState) {
+    let modified = doc.is_modified();
+    let (text, kind) = match (doc.saved, doc.posted, modified) {
+        (false, _, _) => ("Черновик", 2),
+        (true, true, true) => ("Проведён, изменён", 4),
+        (true, true, false) => ("Проведён", 1),
+        (true, false, true) => ("Записан, изменён", 4),
+        (true, false, false) => ("Записан", 3),
+    };
+    let data = app.global::<ReceiptsData>();
+    data.set_form_status(text.into());
+    data.set_form_status_kind(kind);
+    data.set_form_posted(doc.posted);
+}
+
+/// Показывает документ в форме окна `app` (поля, строки, заголовок окна).
+fn fill_form(app: &AppWindow, doc: &DocState) {
+    let data = app.global::<ReceiptsData>();
+    data.set_form_title(doc.title().into());
+    data.set_form_error("".into());
+    data.set_form_conflict(false);
+    show_status(app, doc);
+    data.set_form_number(doc.number.to_string().into());
+    let (year, month, day) = receipts::parse_date(&doc.content.date).unwrap_or(NEW_DOC_DATE);
+    data.set_form_year(i32::from(year));
+    data.set_form_month(i32::from(month));
+    data.set_form_day(i32::from(day));
+    data.set_form_warehouse(doc.content.warehouse.as_str().into());
+    data.set_form_supplier(doc.content.supplier.as_str().into());
+    data.set_line_columns(ModelRc::new(VecModel::from(line_columns())));
+    data.set_line_selected(-1);
+    data.set_line_open(false);
+    app.set_doc_title(doc.title().into());
+    render_lines(app, doc);
 }
 
 /// Загружает документ в форму на экране.
@@ -321,48 +1454,134 @@ fn load_doc(app: &AppWindow, state: &mut State, number: u32) {
     let Some(doc) = state.docs.get(&number) else {
         return;
     };
-    let data = app.global::<ReceiptsData>();
-    data.set_form_title(doc.title().into());
-    data.set_form_posted(doc.posted);
-    data.set_form_number(doc.number.to_string().into());
-    data.set_form_date(doc.content.date.as_str().into());
-    data.set_form_warehouse(doc.content.warehouse.as_str().into());
-    data.set_form_supplier(doc.content.supplier.as_str().into());
-    data.set_line_columns(ModelRc::new(VecModel::from(line_columns())));
-    data.set_line_selected(-1);
-    data.set_line_open(false);
-    render_lines(app, doc);
-    state.loaded = Some(number);
+    fill_form(app, doc);
+    state.form.loaded = Some(number);
 }
 
-fn before(app: &AppWindow, state: &mut State, shell: &mut Shell) {
+/// Значения выпадающих списков (справочники) в окне `app`.
+fn publish_catalogs(app: &AppWindow, state: &State) {
+    let data = app.global::<ReceiptsData>();
+    data.set_warehouses(strings(&state.catalogs.warehouse_names()));
+    data.set_suppliers(strings(&state.catalogs.supplier_names()));
+    data.set_goods(strings(&state.catalogs.goods_names()));
+}
+
+/// То же во всех окнах: главном и дополнительных.
+fn publish_all(state: &State) {
+    for window in all_windows(state) {
+        publish_catalogs(&window, state);
+    }
+}
+
+fn before(app: &AppWindow, state: &mut State, tabs: &mut dyn DocTabs) {
     store_form(app, state);
-    if let Some(number) = state.loaded {
+    if let Some(number) = state.form.loaded {
         let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
-        if let Some(tab) = shell.doc_tab(number).filter(|_| modified) {
-            shell.set_modified(tab, true);
+        if let Some(tab) = tabs.tab_of_doc(number).filter(|_| modified) {
+            tabs.set_tab_modified(tab, true);
         }
     }
 }
 
-fn after(app: &AppWindow, state: &mut State, shell: &Shell) {
-    state
-        .docs
-        .retain(|number, _| shell.doc_tab(*number).is_some());
-    match shell.active_doc().filter(|n| state.docs.contains_key(n)) {
-        Some(number) if state.loaded != Some(number) => load_doc(app, state, number),
-        Some(_) => {}
-        None => state.loaded = None,
+/// Забывает документы, которые не открыты ни в одном окне.
+fn forget_closed(state: &mut State) {
+    let State { docs, tab_docs, .. } = state;
+    docs.retain(|number, _| tab_docs.values().any(|open| open.contains(number)));
+}
+
+/// Вкладка показывает, изменён ли её документ: вкладка могла приехать из другого окна.
+fn mark_modified(state: &State, tabs: &mut dyn DocTabs) {
+    for number in tabs.documents() {
+        let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
+        if let Some(tab) = tabs.tab_of_doc(number) {
+            tabs.set_tab_modified(tab, modified);
+        }
     }
 }
 
-/// Открывает документ в своей вкладке (создаёт его состояние, если вкладки ещё нет).
-fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) {
-    before(app, state, shell);
+fn after(app: &AppWindow, state: &mut State, tabs: &dyn DocTabs, target: Target) {
+    state.tab_docs.insert(target, tabs.documents());
+    forget_closed(state);
+    match tabs
+        .active_document()
+        .filter(|n| state.docs.contains_key(n))
+    {
+        Some(number) if state.form.loaded != Some(number) => load_doc(app, state, number),
+        Some(_) => {}
+        None => state.form.loaded = None,
+    }
+}
+
+/// Обновляет одну строку списка на месте (подписи, статус, приглушение, веху).
+fn update_row(state: &State, index: usize) {
+    use slint::Model;
+    let visible = state.visible();
+    let Some(receipt) = visible.get(index) else {
+        return;
+    };
+    let row = GridRow {
+        milestone: state.marks.contains(&receipt.number),
+        ..grid_row(receipt.cells(), receipt.deleted)
+    };
+    for window in all_windows(state) {
+        let rows = window.global::<ReceiptsData>().get_rows();
+        if index < rows.row_count() {
+            rows.set_row_data(index, row.clone());
+        }
+    }
+}
+
+/// Проводит документ из списка или отменяет проведение; открытый документ получает тот же статус.
+fn set_posted(state: &mut State, number: u32, posted: bool) {
+    if let Some(receipt) = state.all.iter_mut().find(|r| r.number == number) {
+        receipt.posted = posted;
+    }
+    if let Some(doc) = state.docs.get_mut(&number) {
+        doc.posted = posted;
+    }
+    let Some(doc) = state.docs.get(&number) else {
+        return;
+    };
+    if state.form.loaded == Some(number)
+        && let Some(main) = state.main.upgrade()
+    {
+        show_status(&main, doc);
+    }
+    for host in state.hosts.values() {
+        if host.form.loaded == Some(number) {
+            show_status(&host.window, doc);
+        }
+    }
+}
+
+/// Открывает документ в своей вкладке окна `target` (создаёт его состояние, если вкладки ещё нет).
+/// `(node, number)`: пункт навигации поступлений и номер документа.
+fn open_doc(
+    app: &AppWindow,
+    state: &mut State,
+    tabs: &mut dyn DocTabs,
+    (node, number): (usize, u32),
+    target: Target,
+) {
+    before(app, state, tabs);
     if !state.docs.contains_key(&number) {
-        let doc = match state.all.iter().find(|r| r.number == number) {
-            Some(receipt) => DocState::from_receipt(receipt),
-            None => DocState::new_document(number),
+        let doc = match state.all.iter().find(|r| r.number == number).map(|r| r.id) {
+            Some(id) => match fetch_doc(state, id) {
+                Ok(doc) => doc,
+                Err(error) => {
+                    show_notice(state, &error.message);
+                    return;
+                }
+            },
+            None => DocState::new_document(
+                number,
+                state
+                    .catalogs
+                    .warehouses
+                    .first()
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_default(),
+            ),
         };
         state.docs.insert(number, doc);
     }
@@ -371,71 +1590,214 @@ fn open_doc(app: &AppWindow, state: &mut State, shell: &mut Shell, number: u32) 
         .get(&number)
         .map(DocState::title)
         .unwrap_or_default();
-    shell.open_doc(RECEIPTS_NODE, number, title, "receipt");
-    after(app, state, shell);
-    crate::app::refresh(app, shell);
+    tabs.open_document(node, number, title, "receipt");
+    after(app, state, tabs, target);
 }
 
-/// Записывает открытый документ в список (новый добавляет); `post` ещё и проводит.
-fn save_loaded(app: &AppWindow, state: &mut State, shell: &mut Shell, post: bool) {
-    store_form(app, state);
-    let Some(number) = state.loaded else { return };
-    let State { all, docs, .. } = &mut *state;
-    let Some(doc) = docs.get_mut(&number) else {
+/// Открывает документ из списка окна `tabs`. Уже открытый в другом окне документ показывается там:
+/// одна правка не должна идти в двух формах сразу.
+///
+/// `new_tab`: документ открывается именно новой вкладкой (из ссылки в предупреждении): текущая
+/// вкладка закрепляется, чтобы её не заменили, и новая тоже.
+fn open_from_list(
+    app: &AppWindow,
+    main: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+    number: u32,
+    new_tab: bool,
+) {
+    let owner = state.borrow().owner_of(number);
+    if let Some(owner) = owner.filter(|owner| *owner != tabs.target) {
+        if let Some(windows) = tabs.windows() {
+            windows.show_doc(main, &tabs.shell, owner, number);
+        }
+        return;
+    }
+    // Пункта поступлений может не быть в меню (нет прав или его нет в конфигурации).
+    let Some(node) = tabs.shell.borrow().node_for_object(OBJECT) else {
         return;
     };
-    let date = receipts::parse_date(&doc.content.date);
-    let lines = doc.content.lines.clone();
-    let amount = doc.total();
-    doc.posted |= post;
-    if let Some(receipt) = all.iter_mut().find(|r| r.number == number) {
-        receipt.supplier = doc.content.supplier.clone();
-        receipt.warehouse = doc.content.warehouse.clone();
-        if let Some(date) = date {
-            receipt.date = date;
+    tabs.with(|list| {
+        if new_tab {
+            list.pin_index(list.active_index());
         }
-        receipt.amount = amount;
-        receipt.lines = Some(lines);
-        receipt.posted = doc.posted;
-    } else {
-        all.insert(
-            0,
-            Receipt {
-                number,
-                date: date.unwrap_or(NEW_DOC_DATE),
-                supplier: doc.content.supplier.clone(),
-                warehouse: doc.content.warehouse.clone(),
-                amount,
-                posted: doc.posted,
-                lines: Some(lines),
-            },
+        open_doc(
+            app,
+            &mut form_state(state, tabs.target),
+            list,
+            (node, number),
+            tabs.target,
         );
-    }
-    doc.saved = true;
-    doc.baseline = doc.content.clone();
-    let title = doc.title();
-    if let Some(tab) = shell.doc_tab(number) {
-        shell.set_modified(tab, false);
-    }
-    shell.set_doc_title(number, title);
+        if new_tab {
+            list.pin_index(list.active_index());
+        }
+    });
+    tabs.refresh(main);
 }
 
-/// Закрывает вкладку активного документа.
+/// Нажатие на документ в предупреждении. Поступления открываются своей формой в новой вкладке;
+/// формы других документов (например, расхода) в интерфейсе пока нет, поэтому открывается их
+/// раздел.
+fn open_link(
+    app: &AppWindow,
+    main: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+    kind: &str,
+    number: u32,
+) {
+    if kind == "receipt" {
+        let known = {
+            let state = state.borrow();
+            state.docs.contains_key(&number) || state.all.iter().any(|r| r.number == number)
+        };
+        if known {
+            open_from_list(app, main, state, tabs, number, true);
+        } else {
+            show_notice(
+                &state.borrow(),
+                &format!("Поступление №{number} не найдено в списке."),
+            );
+        }
+        return;
+    }
+    let node = tabs.shell.borrow().node_for_object(kind);
+    let (Some(node), Some(windows)) = (node, tabs.windows()) else {
+        return;
+    };
+    match tabs.target {
+        WindowRef::Main => {
+            {
+                let mut shell = tabs.shell.borrow_mut();
+                shell.click(node);
+                let active = shell.active_tab();
+                shell.pin_tab(active);
+            }
+            windows.refresh_all(main);
+        }
+        WindowRef::Extra(id) => windows.open_node(main, &tabs.shell, id, node),
+    }
+}
+
+/// Записывает открытый документ в ядро (`action`: просто записать, провести или снять проведение
+/// одной транзакцией) и перечитывает его: суммы и номер считает ядро.
+fn save_loaded(
+    app: &AppWindow,
+    state: &mut State,
+    tabs: &mut dyn DocTabs,
+    action: PostAction,
+) -> EngineResult<()> {
+    store_form(app, state);
+    let Some(number) = state.form.loaded else {
+        return Ok(());
+    };
+    let Some(doc) = state.docs.get(&number) else {
+        return Ok(());
+    };
+    let engine = state.engine.clone().ok_or_else(no_engine)?;
+    let data = to_object(doc, &state.catalogs)
+        .map_err(|text| EngineError::new(ErrorCode::Validation, text))?;
+    let saved = engine.save(OBJECT, &data, action)?;
+    let fresh = engine.get(OBJECT, saved.id)?;
+    let loaded = DocState::from_object(&fresh, &state.catalogs).ok_or_else(|| {
+        EngineError::new(ErrorCode::Internal, "Ядро вернуло документ без номера.")
+    })?;
+    let row = receipt_from_object(&loaded, &fresh);
+
+    // Новому документу ядро могло дать номер, отличный от временного: вкладка следует за ним.
+    let mut key = number;
+    if loaded.number != number {
+        if let Some(doc) = state.docs.remove(&number) {
+            state.docs.insert(loaded.number, doc);
+        }
+        state.form.loaded = Some(loaded.number);
+        tabs.renumber(number, loaded.number);
+        key = loaded.number;
+    }
+    state.next_number = state.next_number.max(loaded.number + 1);
+    let title = loaded.title();
+    state.docs.insert(key, loaded);
+    match state
+        .all
+        .iter()
+        .position(|r| r.id == row.id || r.number == number)
+    {
+        Some(index) => state.all[index] = row,
+        None => {
+            state.all.insert(0, row);
+            state.total_all += 1;
+        }
+    }
+    if let Some(tab) = tabs.tab_of_doc(key) {
+        tabs.set_tab_modified(tab, false);
+    }
+    tabs.set_title_of_doc(key, title);
+    Ok(())
+}
+
+/// Показывает результат записи над формой: ошибка ядра или пусто.
+fn show_form_result(app: &AppWindow, result: &EngineResult<()>) {
+    let data = app.global::<ReceiptsData>();
+    match result {
+        Ok(()) => {
+            data.set_form_error("".into());
+            data.set_form_error_links(doc_links(&[]));
+            data.set_form_conflict(false);
+        }
+        Err(error) if error.code == ErrorCode::VersionConflict => {
+            data.set_form_error(
+                "Документ изменён другим пользователем. Нажмите «Перечитать»: правки в форме пропадут."
+                    .into(),
+            );
+            data.set_form_conflict(true);
+        }
+        Err(error) => {
+            let (shown, refs) = receipts::split_blockers(&error.message);
+            data.set_form_error(shown.as_str().into());
+            data.set_form_error_links(doc_links(&refs));
+            data.set_form_conflict(false);
+        }
+    }
+}
+
+/// Закрывает вкладку активного документа главного окна.
 fn close_active(app: &AppWindow, state: &mut State, shell: &mut Shell) {
     let active = shell.active_tab();
     shell.close_tab(active);
-    after(app, state, shell);
+    after(app, state, shell, WindowRef::Main);
+}
+
+/// Меняет состав табличной части открытого документа. `edit` возвращает `None`, если менять
+/// нечего, иначе `Some(строка для выделения)`. После изменения вкладка закрепляется сразу.
+fn change_lines(
+    app: &AppWindow,
+    state: &mut State,
+    tabs: &mut dyn DocTabs,
+    edit: impl FnOnce(&mut Vec<Line>) -> Option<Option<usize>>,
+) {
+    let data = app.global::<ReceiptsData>();
+    let Some(doc) = state.form.loaded.and_then(|n| state.docs.get_mut(&n)) else {
+        return;
+    };
+    let Some(select) = edit(&mut doc.content.lines) else {
+        return;
+    };
+    render_lines(app, doc);
+    data.set_line_selected(select.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1));
+    before(app, state, tabs);
 }
 
 /// Открывает окно строки: пустое для новой или с данными для правки.
 fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     let data = app.global::<ReceiptsData>();
     let line = state
+        .form
         .loaded
         .and_then(|n| state.docs.get(&n))
         .zip(index)
         .and_then(|(doc, i)| doc.content.lines.get(i).cloned());
-    state.editing_line = index.filter(|_| line.is_some());
+    state.form.editing_line = index.filter(|_| line.is_some());
     data.set_line_title(
         if line.is_some() {
             "Изменить товар"
@@ -447,7 +1809,7 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     data.set_line_name(line.as_ref().map_or("", |l| l.name.as_str()).into());
     data.set_line_quantity(
         line.as_ref()
-            .map_or(String::new(), |l| receipts::quantity(l.quantity_tenths))
+            .map_or(String::new(), |l| receipts::quantity(l.quantity_milli))
             .into(),
     );
     data.set_line_price(
@@ -461,49 +1823,105 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
 
 /// Подключает список и документы поступлений к окну.
 pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
-    let all = receipts::demo(2000);
-    let next_number = all.iter().map(|r| r.number).max().unwrap_or(0) + 1;
     let state = Rc::new(RefCell::new(State {
-        all,
-        sort: None,
+        all: Vec::new(),
+        sorting: Sorting::default(),
         query: String::new(),
-        next_number,
+        engine: None,
+        generation: 0,
+        total_all: 0,
+        next_number: 1,
         docs: HashMap::new(),
-        loaded: None,
-        editing_line: None,
+        form: FormCtx::default(),
+        main: app.as_weak(),
+        hosts: HashMap::new(),
+        tab_docs: HashMap::new(),
+        marks: HashSet::new(),
+        notice_timer: slint::Timer::default(),
+        catalogs: Catalogs::default(),
     }));
     let data = app.global::<ReceiptsData>();
     data.set_columns(ModelRc::new(VecModel::from(list_columns())));
-    data.set_warehouses(texts(&receipts::WAREHOUSES));
-    data.set_suppliers(texts(&receipts::SUPPLIERS));
-    data.set_goods(texts(
-        &receipts::GOODS
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>(),
-    ));
-    refresh_list(app, &state.borrow());
+    publish_catalogs(app, &state.borrow());
+    refresh_list(&state.borrow());
+    let windows = Rc::new(RefCell::new(None));
+    let tabs = Tabs {
+        target: WindowRef::Main,
+        shell: shell.clone(),
+        windows: windows.clone(),
+    };
+    wire_list(app, &app.as_weak(), &state, &tabs);
+    wire_form(app, app.as_weak(), &state, &tabs);
 
+    ReceiptsUi {
+        state,
+        shell,
+        windows,
+    }
+}
+
+/// Подключает действия списка к окну `app`. Список общий: сортировка и поиск действуют во всех
+/// окнах, а новый документ открывается в этом же окне.
+fn wire_list(
+    app: &AppWindow,
+    main: &slint::Weak<AppWindow>,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+) {
+    let data = app.global::<ReceiptsData>();
+
+    // Щелчок по заголовку: нет → по возрастанию → по убыванию → нет; колонка встаёт в конец
+    // очереди приоритета. Меню заголовка задаёт направление и приоритет прямо.
     data.on_sort({
-        let (app, state) = (app.as_weak(), state.clone());
+        let state = state.clone();
         move |column| {
-            let Some(app) = app.upgrade() else { return };
             let Some(column) = usize::try_from(column).ok().filter(|c| *c < COLUMNS.len()) else {
                 return;
             };
-            let mut state = state.borrow_mut();
-            let descending = matches!(state.sort, Some((current, false)) if current == column);
-            state.sort = Some((column, descending));
-            let kind: Column = COLUMNS[column];
-            receipts::sort(&mut state.all, kind, descending);
-            app.global::<ReceiptsData>().set_selected_row(-1);
-            refresh_list(&app, &state);
+            state.borrow_mut().sorting.click(column);
+            reload(&state, false);
+        }
+    });
+    // Документ из предупреждения (в полосе над списком или над формой) открывается новой вкладкой.
+    data.on_open_link({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move |kind, number| {
+            let (Some(app), Some(main), Ok(number)) =
+                (app.upgrade(), main.upgrade(), u32::try_from(number))
+            else {
+                return;
+            };
+            open_link(&app, &main, &state, &tabs, kind.as_str(), number);
+        }
+    });
+    data.on_dismiss_notice({
+        let state = state.clone();
+        move || show_notice(&state.borrow(), "")
+    });
+    data.on_sort_action({
+        let state = state.clone();
+        move |column, id| {
+            let Some(column) = usize::try_from(column).ok().filter(|c| *c < COLUMNS.len()) else {
+                return;
+            };
+            {
+                let sorting = &mut state.borrow_mut().sorting;
+                match id.as_str() {
+                    "asc" => sorting.set(column, false),
+                    "desc" => sorting.set(column, true),
+                    "clear" => sorting.clear(column),
+                    "clear-all" => sorting.clear_all(),
+                    "earlier" => sorting.shift(column, true),
+                    "later" => sorting.shift(column, false),
+                    _ => return,
+                }
+            }
+            reload(&state, false);
         }
     });
 
     // Ширины колонок меняются на каждом движении ручки (живое перетаскивание).
     let list_snapshot: Snapshot = Rc::default();
-    let lines_snapshot: Snapshot = Rc::default();
 
     data.on_resize_begin_list({
         let (app, snapshot) = (app.as_weak(), list_snapshot.clone());
@@ -526,6 +1944,132 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         let snapshot = list_snapshot;
         move || *snapshot.borrow_mut() = None
     });
+
+    // Поиск уходит в ядро; пока человек печатает, запрос ждёт паузы.
+    data.on_query_changed({
+        let (app, state) = (app.as_weak(), state.clone());
+        let pause = slint::Timer::default();
+        move |query| {
+            let Some(window) = app.upgrade() else { return };
+            state.borrow_mut().query = query.to_string();
+            window.global::<ReceiptsData>().set_selected_row(-1);
+            // Текст поиска один на все окна, как и сам список.
+            for other in all_windows(&state.borrow()) {
+                other.global::<ReceiptsData>().set_query(query.clone());
+            }
+            let state = state.clone();
+            pause.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(250),
+                move || reload(&state, false),
+            );
+        }
+    });
+
+    // Меню строки списка: пункты зависят от состояния документа.
+    data.on_menu_opening({
+        let (app, state) = (app.as_weak(), state.clone());
+        move |row| {
+            let Some(app) = app.upgrade() else { return };
+            let state = state.borrow();
+            let actions = usize::try_from(row)
+                .ok()
+                .and_then(|i| state.visible().get(i).copied())
+                .map(|receipt| list_menu(receipt, state.marks.contains(&receipt.number)))
+                .unwrap_or_default();
+            app.global::<ReceiptsData>()
+                .set_menu_actions(ModelRc::new(VecModel::from(actions)));
+        }
+    });
+
+    // Действия меню строки. Строка меняется на месте: прокрутка и выбор остаются как были.
+    data.on_action({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move |row, id| {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let Some(index) = usize::try_from(row).ok() else {
+                return;
+            };
+            let Some(number) = state.borrow().visible().get(index).map(|r| r.number) else {
+                return;
+            };
+            match id.as_str() {
+                "edit" => open_from_list(&app, &main, &state, &tabs, number, false),
+                "post" | "unpost" => {
+                    post_in_core(&state, &state.borrow(), number, id == "post");
+                    return;
+                }
+                "delete" => {
+                    mark_deleted_in_core(&state, &state.borrow(), number);
+                    return;
+                }
+                "milestone" => {
+                    let mut state = state.borrow_mut();
+                    if !state.marks.remove(&number) {
+                        state.marks.insert(number);
+                    }
+                    for window in all_windows(&state) {
+                        let marks = mark_positions(&state.visible(), &state.marks);
+                        window
+                            .global::<ReceiptsData>()
+                            .set_marks(ModelRc::new(VecModel::from(marks)));
+                    }
+                }
+                _ => return,
+            }
+            update_row(&state.borrow(), index);
+        }
+    });
+
+    data.on_open({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move |row| {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let picked = usize::try_from(row)
+                .ok()
+                .and_then(|i| state.borrow().visible().get(i).map(|r| r.number));
+            if let Some(number) = picked {
+                open_from_list(&app, &main, &state, &tabs, number, false);
+            }
+        }
+    });
+
+    data.on_create({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move || {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let number = {
+                let mut state = state.borrow_mut();
+                let number = state
+                    .engine
+                    .as_ref()
+                    .and_then(|engine| last_number(&**engine).ok())
+                    .map_or(state.next_number, |last| (last + 1).max(state.next_number));
+                state.next_number = number + 1;
+                number
+            };
+            open_from_list(&app, &main, &state, &tabs, number, false);
+        }
+    });
+}
+
+/// Подключает действия формы документа (кнопки, строки, справочники) к окну `app`. `main` это
+/// главное окно, `tabs` вкладки окна `app`.
+fn wire_form(
+    app: &AppWindow,
+    main: slint::Weak<AppWindow>,
+    state: &Rc<RefCell<State>>,
+    tabs: &Tabs,
+) {
+    let target = tabs.target;
+    let data = app.global::<ReceiptsData>();
+    let lines_snapshot: Snapshot = Rc::default();
 
     data.on_resize_begin_lines({
         let (app, snapshot) = (app.as_weak(), lines_snapshot.clone());
@@ -551,80 +2095,99 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         move || *snapshot.borrow_mut() = None
     });
 
-    data.on_query_changed({
-        let (app, state) = (app.as_weak(), state.clone());
-        move |query| {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            state.query = query.to_string();
-            app.global::<ReceiptsData>().set_selected_row(-1);
-            refresh_list(&app, &state);
-        }
-    });
-
-    data.on_open({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
-        move |row| {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            let picked = usize::try_from(row)
-                .ok()
-                .and_then(|i| state.visible().get(i).map(|r| r.number));
-            if let Some(number) = picked {
-                open_doc(&app, &mut state, &mut shell.borrow_mut(), number);
-            }
-        }
-    });
-
-    data.on_create({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
-        move || {
-            let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            let number = state.next_number;
-            state.next_number += 1;
-            open_doc(&app, &mut state, &mut shell.borrow_mut(), number);
-        }
-    });
-
+    // Действия формы. Список обновляется во всех окнах, вкладки в окне этой формы.
     data.on_form_save({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
-            let (mut state, mut shell) = (state.borrow_mut(), shell.borrow_mut());
-            save_loaded(&app, &mut state, &mut shell, false);
-            if let Some(number) = state.loaded {
-                load_doc(&app, &mut state, number);
-            }
-            refresh_list(&app, &state);
-            crate::app::refresh(&app, &shell);
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let result = tabs
+                .with(|list| {
+                    let mut state = form_state(&state, target);
+                    let result = save_loaded(&app, &mut state, list, PostAction::Write);
+                    if result.is_ok()
+                        && let Some(number) = state.form.loaded
+                    {
+                        load_doc(&app, &mut state, number);
+                    }
+                    result
+                })
+                .unwrap_or(Ok(()));
+            show_form_result(&app, &result);
+            refresh_list(&state.borrow());
+            tabs.refresh(&main);
         }
     });
 
     data.on_form_post({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move |close| {
-            let Some(app) = app.upgrade() else { return };
-            let (mut state, mut shell) = (state.borrow_mut(), shell.borrow_mut());
-            save_loaded(&app, &mut state, &mut shell, true);
-            if close {
-                close_active(&app, &mut state, &mut shell);
-            } else if let Some(number) = state.loaded {
-                load_doc(&app, &mut state, number);
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let result = tabs
+                .with(|list| {
+                    let mut state = form_state(&state, target);
+                    let result = save_loaded(&app, &mut state, list, PostAction::Post);
+                    if result.is_ok()
+                        && !close
+                        && let Some(number) = state.form.loaded
+                    {
+                        load_doc(&app, &mut state, number);
+                    }
+                    result
+                })
+                .unwrap_or(Ok(()));
+            show_form_result(&app, &result);
+            refresh_list(&state.borrow());
+            if close && result.is_ok() {
+                tabs.close_active(&main, &state);
             }
-            refresh_list(&app, &state);
-            crate::app::refresh(&app, &shell);
+            tabs.refresh(&main);
+        }
+    });
+
+    // Поле формы изменили: правки попадают в документ, статус и точка на вкладке обновляются.
+    data.on_form_edited({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move || {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            tabs.with(|list| before(&app, &mut form_state(&state, target), list));
+            tabs.refresh(&main);
+        }
+    });
+
+    // «Перечитать» при конфликте версий: форма берёт документ из ядра заново.
+    data.on_form_reload({
+        let (app, state) = (app.as_weak(), state.clone());
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            let mut state = form_state(&state, target);
+            let Some(number) = state.form.loaded else {
+                return;
+            };
+            let Some(id) = state.docs.get(&number).map(|doc| doc.id) else {
+                return;
+            };
+            let result = fetch_doc(&state, id).map(|doc| {
+                state.docs.insert(number, doc);
+                load_doc(&app, &mut state, number);
+            });
+            show_form_result(&app, &result);
         }
     });
 
     data.on_form_close({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
-            let (mut state, mut shell) = (state.borrow_mut(), shell.borrow_mut());
-            before(&app, &mut state, &mut shell);
-            close_active(&app, &mut state, &mut shell);
-            crate::app::refresh(&app, &shell);
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            tabs.with(|list| before(&app, &mut form_state(&state, target), list));
+            tabs.close_active(&main, &state);
         }
     });
 
@@ -632,7 +2195,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         let (app, state) = (app.as_weak(), state.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            open_line_dialog(&app, &mut state.borrow_mut(), None);
+            open_line_dialog(&app, &mut form_state(&state, target), None);
         }
     });
 
@@ -640,29 +2203,181 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         let (app, state) = (app.as_weak(), state.clone());
         move |row| {
             let Some(app) = app.upgrade() else { return };
-            open_line_dialog(&app, &mut state.borrow_mut(), usize::try_from(row).ok());
+            open_line_dialog(
+                &app,
+                &mut form_state(&state, target),
+                usize::try_from(row).ok(),
+            );
         }
     });
 
     data.on_line_delete({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move || {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let selected = app.global::<ReceiptsData>().get_line_selected();
+            if let Ok(index) = usize::try_from(selected) {
+                tabs.with(|list| {
+                    change_lines(&app, &mut form_state(&state, target), list, |lines| {
+                        (index < lines.len()).then(|| {
+                            lines.remove(index);
+                            None
+                        })
+                    });
+                });
+                tabs.refresh(&main);
+            }
+        }
+    });
+
+    // Меню строки табличной части.
+    data.on_line_menu_opening({
+        let (app, state) = (app.as_weak(), state.clone());
+        move |row| {
+            let Some(app) = app.upgrade() else { return };
+            let state = form_state(&state, target);
+            let count = state
+                .form
+                .loaded
+                .and_then(|n| state.docs.get(&n))
+                .map_or(0, |doc| doc.content.lines.len());
+            let actions = usize::try_from(row)
+                .ok()
+                .filter(|i| *i < count)
+                .map(|i| line_menu(i, count))
+                .unwrap_or_default();
+            app.global::<ReceiptsData>()
+                .set_line_menu_actions(ModelRc::new(VecModel::from(actions)));
+        }
+    });
+
+    data.on_line_action({
+        let (app, main, state, tabs) = (app.as_weak(), main.clone(), state.clone(), tabs.clone());
+        move |row, id| {
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
+            let Some(index) = usize::try_from(row).ok() else {
+                return;
+            };
+            tabs.with(|list| {
+                let mut state = form_state(&state, target);
+                match id.as_str() {
+                    "edit" => open_line_dialog(&app, &mut state, Some(index)),
+                    "add" => open_line_dialog(&app, &mut state, None),
+                    // Каждое изменение состава возвращает, какую строку выделить после него.
+                    "copy" => change_lines(&app, &mut state, list, |lines| {
+                        let line = lines.get(index)?.clone();
+                        lines.insert(index + 1, line);
+                        Some(Some(index + 1))
+                    }),
+                    "up" => change_lines(&app, &mut state, list, |lines| {
+                        (index > 0 && index < lines.len()).then(|| {
+                            lines.swap(index, index - 1);
+                            Some(index - 1)
+                        })
+                    }),
+                    "down" => change_lines(&app, &mut state, list, |lines| {
+                        (index + 1 < lines.len()).then(|| {
+                            lines.swap(index, index + 1);
+                            Some(index + 1)
+                        })
+                    }),
+                    "delete" => change_lines(&app, &mut state, list, |lines| {
+                        (index < lines.len()).then(|| {
+                            lines.remove(index);
+                            None
+                        })
+                    }),
+                    _ => {}
+                }
+            });
+            tabs.refresh(&main);
+        }
+    });
+
+    // «+ Добавить» в выпадающем списке: окно нового элемента справочника.
+    data.on_catalog_add({
+        let (app, state) = (app.as_weak(), state.clone());
+        move |kind| {
+            let Some(app) = app.upgrade() else { return };
+            let Some(catalog) = Catalog::from_index(kind) else {
+                return;
+            };
+            form_state(&state, target).form.catalog_kind = Some(catalog);
+            let data = app.global::<ReceiptsData>();
+            data.set_catalog_title(catalog.dialog_title().into());
+            data.set_catalog_has_unit(catalog == Catalog::Goods);
+            data.set_catalog_name("".into());
+            data.set_catalog_unit("шт".into());
+            data.set_catalog_error("".into());
+            data.set_catalog_open(true);
+        }
+    });
+
+    data.on_catalog_confirm({
+        let (app, state) = (app.as_weak(), state.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            let mut state = state.borrow_mut();
-            let selected = app.global::<ReceiptsData>().get_line_selected();
-            if let Some(doc) = state.loaded.and_then(|n| state.docs.get_mut(&n)) {
-                if let Some(index) = usize::try_from(selected)
-                    .ok()
-                    .filter(|i| *i < doc.content.lines.len())
-                {
-                    doc.content.lines.remove(index);
-                }
-                render_lines(&app, doc);
+            let mut state = form_state(&state, target);
+            let Some(catalog) = state.form.catalog_kind else {
+                return;
+            };
+            let data = app.global::<ReceiptsData>();
+            let name = data.get_catalog_name().trim().to_owned();
+            let unit = data.get_catalog_unit().trim().to_owned();
+            let existing = match catalog {
+                Catalog::Warehouse => state.catalogs.warehouse_names(),
+                Catalog::Supplier => state.catalogs.supplier_names(),
+                Catalog::Goods => state.catalogs.goods_names(),
+            };
+            let error = if name.is_empty() {
+                "Введите наименование."
+            } else if catalog == Catalog::Goods && unit.is_empty() {
+                "Укажите единицу измерения."
+            } else if existing
+                .iter()
+                .any(|n| n.to_lowercase() == name.to_lowercase())
+            {
+                "Такой элемент уже есть в справочнике."
+            } else {
+                ""
+            };
+            if !error.is_empty() {
+                data.set_catalog_error(error.into());
+                return;
             }
-            app.global::<ReceiptsData>().set_line_selected(-1);
-            // Состав документа изменился: вкладка закрепляется сразу, а не при следующем открытии.
-            before(&app, &mut state, &mut shell.borrow_mut());
-            crate::app::refresh(&app, &shell.borrow());
+            let Some(engine) = state.engine.clone() else {
+                data.set_catalog_error("Нет подключения к ядру.".into());
+                return;
+            };
+            let id = match create_catalog_item(&*engine, catalog, &name, &unit) {
+                Ok(id) => id,
+                Err(error) => {
+                    data.set_catalog_error(error.message.as_str().into());
+                    return;
+                }
+            };
+            // Новый элемент появляется в списке и сразу выбирается в поле, из которого его добавляли.
+            match catalog {
+                Catalog::Warehouse => {
+                    state.catalogs.warehouses.push((id, name.clone()));
+                    data.set_form_warehouse(name.into());
+                }
+                Catalog::Supplier => {
+                    state.catalogs.suppliers.push((id, name.clone()));
+                    data.set_form_supplier(name.into());
+                }
+                Catalog::Goods => {
+                    state.catalogs.goods.push((id, name.clone(), unit));
+                    data.set_line_name(name.into());
+                }
+            }
+            publish_all(&state);
+            state.form.catalog_kind = None;
+            data.set_catalog_open(false);
         }
     });
 
@@ -671,7 +2386,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         let app = app.as_weak();
         move |text| {
             let Some(app) = app.upgrade() else { return };
-            let clean = receipts::clean_decimal(&text, 1);
+            let clean = receipts::clean_decimal(&text, 3);
             if clean != text.as_str() {
                 app.global::<ReceiptsData>().set_line_quantity(clean.into());
             }
@@ -689,17 +2404,19 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
     });
 
     data.on_line_confirm({
-        let (app, state, shell) = (app.as_weak(), state.clone(), shell.clone());
+        let (app, state, tabs) = (app.as_weak(), state.clone(), tabs.clone());
         move || {
-            let Some(app) = app.upgrade() else { return };
+            let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
+                return;
+            };
             let data = app.global::<ReceiptsData>();
             let name = data.get_line_name().to_string();
-            let quantity = receipts::parse_decimal(&data.get_line_quantity(), 1).filter(|q| *q > 0);
+            let quantity = receipts::parse_decimal(&data.get_line_quantity(), 3).filter(|q| *q > 0);
             let price = receipts::parse_decimal(&data.get_line_price(), 2);
             let error = match (name.is_empty(), quantity, price) {
                 (true, _, _) => "Выберите товар из справочника.",
                 (_, None, _) => {
-                    "Количество: число больше нуля, не больше одного знака после запятой."
+                    "Количество: число больше нуля, не больше трёх знаков после запятой."
                 }
                 (_, _, None) => "Цена: число, не больше двух знаков после запятой.",
                 _ => "",
@@ -711,21 +2428,175 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
             let (Some(quantity), Some(price)) = (quantity, price) else {
                 return;
             };
-            let line = Line::new(&name, quantity, price);
-            let mut state = state.borrow_mut();
-            let editing = state.editing_line;
-            if let Some(doc) = state.loaded.and_then(|n| state.docs.get_mut(&n)) {
-                match editing.filter(|i| *i < doc.content.lines.len()) {
-                    Some(index) => doc.content.lines[index] = line,
-                    None => doc.content.lines.push(line),
-                }
-                render_lines(&app, doc);
-            }
-            data.set_line_open(false);
-            before(&app, &mut state, &mut shell.borrow_mut());
-            crate::app::refresh(&app, &shell.borrow());
+            tabs.with(|list| {
+                let mut state = form_state(&state, target);
+                let unit = state.catalogs.unit_of(&name).to_owned();
+                let line = Line::new(&name, &unit, quantity, price);
+                let editing = state.form.editing_line;
+                data.set_line_open(false);
+                change_lines(&app, &mut state, list, |lines| {
+                    match editing.filter(|i| *i < lines.len()) {
+                        Some(index) => lines[index] = line,
+                        None => lines.push(line),
+                    }
+                    Some(None)
+                });
+            });
+            tabs.refresh(&main);
         }
     });
+}
 
-    ReceiptsUi { state }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn money_is_converted_to_kopecks() {
+        assert_eq!(kopecks(1250, 2), 1250);
+        assert_eq!(kopecks(12, 0), 1200);
+        assert_eq!(kopecks(12_345, 3), 1234);
+    }
+
+    #[test]
+    fn iso_date_is_parsed() {
+        assert_eq!(parse_iso_date("2026-10-18"), Some((2026, 10, 18)));
+        assert_eq!(parse_iso_date("18.10.2026"), None);
+    }
+
+    /// Документ из настоящего ядра: чтение, запись, конфликт версий, новый документ с проведением.
+    #[test]
+    fn document_goes_through_the_core() {
+        let path = std::env::temp_dir().join(format!("ostov-ui-doc-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let engine = ostov_core::LocalConnector::default()
+            .create_demo(path.to_str().unwrap_or_default(), 50)
+            .unwrap();
+        let catalogs = load_catalogs(&*engine).unwrap();
+        assert!(!catalogs.suppliers.is_empty() && !catalogs.warehouses.is_empty());
+        assert!(!catalogs.goods.is_empty());
+
+        let (all, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        let draft = all.iter().find(|r| !r.posted && !r.deleted).unwrap();
+        let data = engine.get(OBJECT, draft.id).unwrap();
+        let doc = DocState::from_object(&data, &catalogs).unwrap();
+        assert_eq!(doc.number, draft.number);
+        assert!(!doc.content.lines.is_empty());
+        assert_eq!(doc.total(), draft.amount);
+
+        // Туда и обратно: запись проходит, повторная запись со старой версией отклоняется.
+        let back = to_object(&doc, &catalogs).unwrap();
+        let saved = engine.save(OBJECT, &back, PostAction::Write).unwrap();
+        assert!(saved.version > data.version);
+        let conflict = engine.save(OBJECT, &back, PostAction::Write).unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::VersionConflict);
+
+        // Новый документ: номер даёт ядро, суммы считает ядро, проведение одной записью.
+        let number = last_number(&*engine).unwrap() + 1;
+        let mut new = DocState::new_document(number, catalogs.warehouses[0].1.clone());
+        new.content.supplier = catalogs.suppliers[0].1.clone();
+        let (_, name, unit) = &catalogs.goods[0];
+        new.content.lines.push(Line::new(name, unit, 2500, 10_000));
+        let created = engine
+            .save(
+                OBJECT,
+                &to_object(&new, &catalogs).unwrap(),
+                PostAction::Post,
+            )
+            .unwrap();
+        assert_eq!(created.number, Some(i64::from(number)));
+        let fresh = engine.get(OBJECT, created.id).unwrap();
+        let loaded = DocState::from_object(&fresh, &catalogs).unwrap();
+        assert!(loaded.posted);
+        assert_eq!(loaded.content.lines[0].quantity_milli, 2500);
+        assert_eq!(loaded.content.lines[0].amount, 25_000);
+        assert_eq!(receipt_from_object(&loaded, &fresh).amount, 25_000);
+
+        // Незнакомый поставщик до ядра не доходит.
+        new.content.supplier = "Нет такого".to_owned();
+        assert!(to_object(&new, &catalogs).is_err());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
+    }
+
+    /// Список из настоящего ядра: все строки пришли, порядок и поиск делает ядро.
+    #[test]
+    fn list_comes_from_the_core() {
+        let path =
+            std::env::temp_dir().join(format!("ostov-ui-test-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let text = path.to_str().unwrap_or_default();
+        let engine = ostov_core::LocalConnector::default()
+            .create_demo(text, 50)
+            .unwrap();
+
+        let (all, total) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        assert_eq!((all.len(), total), (50, 50));
+        assert!(
+            all.iter()
+                .all(|r| r.id > 0 && !r.supplier.is_empty() && r.amount > 0)
+        );
+
+        let descending = ListRequest {
+            order: Some("number".to_owned()),
+            descending: true,
+            ..ListRequest::default()
+        };
+        let (rows, _) = fetch_receipts(&*engine, &descending).unwrap();
+        assert!(rows.windows(2).all(|pair| pair[0].number > pair[1].number));
+
+        for (field, name) in [
+            (
+                "supplier",
+                (|r: &Receipt| r.supplier.clone()) as fn(&Receipt) -> String,
+            ),
+            ("warehouse", |r: &Receipt| r.warehouse.clone()),
+        ] {
+            let request = ListRequest {
+                order: Some(field.to_owned()),
+                ..ListRequest::default()
+            };
+            let (rows, _) = fetch_receipts(&*engine, &request).unwrap();
+            assert!(rows.windows(2).all(|pair| name(&pair[0]) <= name(&pair[1])));
+        }
+
+        let supplier = all[0].supplier.clone();
+        let by_supplier = ListRequest {
+            search: Some(supplier.to_uppercase()),
+            ..ListRequest::default()
+        };
+        let (found, total) = fetch_receipts(&*engine, &by_supplier).unwrap();
+        assert!(!found.is_empty() && found.len() as u64 == total);
+        assert!(
+            found
+                .iter()
+                .all(|r| r.supplier.to_lowercase() == supplier.to_lowercase())
+        );
+
+        let number = all[0].number;
+        let by_number = ListRequest {
+            search: Some(number.to_string()),
+            ..ListRequest::default()
+        };
+        let (found, _) = fetch_receipts(&*engine, &by_number).unwrap();
+        assert!(found.iter().any(|r| r.number == number));
+
+        let posted = all.iter().find(|r| r.posted).unwrap();
+        let error = mark_deleted(&*engine, posted.id, true).unwrap_err();
+        assert_eq!(error.code, ostov_api::ErrorCode::Validation);
+
+        let draft = all.iter().find(|r| !r.posted && !r.deleted).unwrap();
+        mark_deleted(&*engine, draft.id, true).unwrap();
+        let (rows, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        assert!(rows.iter().any(|r| r.id == draft.id && r.deleted));
+        mark_deleted(&*engine, draft.id, false).unwrap();
+        let (rows, _) = fetch_receipts(&*engine, &ListRequest::default()).unwrap();
+        assert!(rows.iter().any(|r| r.id == draft.id && !r.deleted));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
+    }
 }

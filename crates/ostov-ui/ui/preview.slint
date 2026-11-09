@@ -1,0 +1,34 @@
+import { Theme } from "theme.slint";
+import { DatePanel } from "components/date-field.slint";
+import { MenuAction, MenuMetrics, MenuPanel } from "components/context-menu.slint";
+
+// Окно для проверки всплывающих панелей по снимкам (они не рисуются в снимке самого экрана):
+// календарь в трёх режимах и контекстное меню строки. Только для examples/snapshot.
+export component PreviewWindow inherits Window {
+    width: 1000px;
+    height: 340px;
+    background: Theme.bg;
+
+    HorizontalLayout {
+        padding: 24px;
+        spacing: 24px;
+        alignment: start;
+        DatePanel { width: 272px; height: 292px; day: 5; month: 10; year: 2026; mode: 0; }
+        DatePanel { width: 272px; height: 292px; day: 5; month: 10; year: 2026; mode: 1; }
+        DatePanel { width: 272px; height: 292px; day: 5; month: 10; year: 2026; mode: 2; }
+        VerticalLayout {
+            alignment: start;
+            MenuPanel {
+                width: MenuMetrics.width;
+                height: MenuMetrics.height(5);
+                actions: [
+                    { id: "edit", label: "Редактировать", icon: "edit", danger: false, enabled: true, divider: false },
+                    { id: "post", label: "Провести", icon: "check", danger: false, enabled: true, divider: false },
+                    { id: "mark", label: "Пометить на удаление", icon: "ban", danger: false, enabled: true, divider: true },
+                    { id: "delete", label: "Удалить…", icon: "trash", danger: true, enabled: false, divider: false },
+                    { id: "milestone", label: "Добавить веху", icon: "minus", danger: false, enabled: true, divider: true },
+                ];
+            }
+        }
+    }
+}

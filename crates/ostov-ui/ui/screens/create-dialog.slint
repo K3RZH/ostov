@@ -3,6 +3,7 @@ import { Button, ButtonKind } from "../components/button.slint";
 import { TextField } from "../components/text-field.slint";
 import { Checkbox } from "../components/choice.slint";
 import { ScrollView } from "std-widgets.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
 
 export component ModeOption inherits Rectangle {
     in property <string> title;
@@ -68,6 +69,9 @@ export component CreateDialog inherits Rectangle {
     in-out property <string> password-repeat;
     in-out property <bool> protect-password;
     in-out property <bool> protect-users;
+    // Ошибка ядра при создании и «идёт создание» (кнопка выключена, пока ядро работает).
+    in property <string> error;
+    in property <bool> busy;
     callback confirmed();
     callback cancelled();
     callback choose-folder();
@@ -141,7 +145,7 @@ export component CreateDialog inherits Rectangle {
 
                     if root.server : TextField {
                         label: "Адрес сервера";
-                        placeholder: "kafe-srv.local:7443";
+                        placeholder: "server.local:7700";
                         text <=> root.address;
                     }
                     TextField {
@@ -235,14 +239,16 @@ export component CreateDialog inherits Rectangle {
                 }
             }
 
+            ErrorBanner { text: root.error; }
+
             HorizontalLayout {
                 spacing: Theme.space-12;
                 alignment: end;
                 Button { text: "Отмена"; clicked => { root.cancelled(); } }
                 Button {
-                    text: "Создать";
+                    text: root.busy ? "Создаём…" : "Создать";
                     kind: ButtonKind.primary;
-                    enabled: root.valid;
+                    enabled: root.valid && !root.busy;
                     clicked => { root.confirmed(); }
                 }
             }
