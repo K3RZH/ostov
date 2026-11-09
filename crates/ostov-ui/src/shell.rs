@@ -1,28 +1,53 @@
-//! Состояние оболочки главного окна: дерево навигации и вкладки. Без интерфейса и без ядра.
+//! Состояние оболочки главного окна: дерево навигации и вкладки. Без интерфейса и без ядра:
+//! дерево строится из метаданных базы (`Shell::from_meta`).
 
 use std::collections::HashSet;
 
-/// Узел «Поступления товаров» в демо-дереве: его документы открываются в своих вкладках.
-pub const RECEIPTS_NODE: usize = 3;
+use ostov_api::{MenuItem, Meta, ObjectKind};
 
-/// Узел дерева навигации. Состав сейчас примерный (из макета), позже его даст конфигурация.
+/// Значки, которые есть в интерфейсе (`assets/icons`). Имя значка приходит из конфигурации:
+/// незнакомое заменяется значком по виду пункта, а не пустым местом.
+const KNOWN_ICONS: [&str; 18] = [
+    "bar-chart",
+    "box",
+    "calendar",
+    "database",
+    "document",
+    "folder",
+    "home",
+    "inventory",
+    "list",
+    "recipe",
+    "server",
+    "settings",
+    "stock-in",
+    "stock-out",
+    "transfer",
+    "user",
+    "users",
+    "warehouse",
+];
+
+/// Узел дерева навигации.
 pub struct NavNode {
-    pub title: &'static str,
+    pub title: String,
     pub icon: &'static str,
     pub parent: Option<usize>,
     pub is_group: bool,
     /// Ссылка на основной узел: избранное открывает ту же вкладку, что и основной пункт.
     pub link: Option<usize>,
     pub favorite: bool,
-    /// Какой экран показывать во вкладке (пусто: заглушка «появится после ядра»).
+    /// Какой экран показывать во вкладке (пусто: экран ещё не сделан).
     pub view: &'static str,
+    /// Объект конфигурации, который открывает пункт (имя в ядре).
+    pub object: Option<String>,
 }
 
 /// Строка дерева для показа.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NavRowData {
     pub id: usize,
-    pub title: &'static str,
+    pub title: String,
     pub icon: &'static str,
     pub level: usize,
     pub is_group: bool,
@@ -53,19 +78,93 @@ pub struct Shell {
     active: usize,
 }
 
-fn node(title: &'static str, icon: &'static str, parent: Option<usize>, is_group: bool) -> NavNode {
+fn node(title: &str, icon: &'static str, parent: Option<usize>, is_group: bool) -> NavNode {
     NavNode {
-        title,
+        title: title.to_owned(),
         icon,
         parent,
         is_group,
         link: None,
         favorite: false,
         view: "",
+        object: None,
+    }
+}
+
+fn known_icon(name: Option<&str>, fallback: &'static str) -> &'static str {
+    name.and_then(|name| KNOWN_ICONS.iter().copied().find(|known| *known == name))
+        .unwrap_or(fallback)
+}
+
+/// Экран вкладки объекта. Свой экран пока есть только у поступлений (`receipts_ui.rs`,
+/// временный); остальные объекты получат универсальный список (шаг A3 плана).
+fn view_for(object: &str) -> &'static str {
+    if object == "receipt" { "receipts" } else { "" }
+}
+
+/// Добавляет пункт меню и его детей. Глубину ограничивает формат YAML (раздел → группа → объект).
+fn push_menu(nodes: &mut Vec<NavNode>, meta: &Meta, item: &MenuItem, parent: Option<usize>) {
+    let id = nodes.len();
+    let object = item
+        .object
+        .as_deref()
+        .and_then(|name| meta.objects.iter().find(|object| object.name == name));
+    let fallback = match object.map(|object| &object.kind) {
+        Some(ObjectKind::Catalog) => "list",
+        Some(ObjectKind::Document) => "document",
+        None => "folder",
+    };
+    let icon = item
+        .icon
+        .as_deref()
+        .or_else(|| object.and_then(|object| object.icon.as_deref()));
+    let title = match object {
+        Some(object) if item.title.trim().is_empty() => object.title.clone(),
+        _ => item.title.clone(),
+    };
+    nodes.push(NavNode {
+        title,
+        icon: known_icon(icon, fallback),
+        parent,
+        is_group: item.object.is_none(),
+        link: None,
+        favorite: false,
+        view: item.object.as_deref().map_or("", view_for),
+        object: item.object.clone(),
+    });
+    for child in &item.children {
+        push_menu(nodes, meta, child, Some(id));
     }
 }
 
 impl Shell {
+    /// Навигация из метаданных базы: «Главная», меню конфигурации (ядро уже убрало пункты, на
+    /// которые у пользователя нет прав) и «Администрирование» для администратора. Разделы
+    /// верхнего уровня раскрыты.
+    pub fn from_meta(meta: &Meta, admin: bool) -> Self {
+        let mut nodes = vec![node("Главная", "home", None, false)];
+        let mut expanded = HashSet::new();
+        for item in &meta.menu {
+            if item.object.is_none() {
+                expanded.insert(nodes.len());
+            }
+            push_menu(&mut nodes, meta, item, None);
+        }
+        if admin {
+            let group = nodes.len();
+            expanded.insert(group);
+            nodes.push(node("Администрирование", "settings", None, true));
+            let mut users = node("Пользователи и роли", "users", Some(group), false);
+            users.view = "users";
+            nodes.push(users);
+        }
+        Self::new(nodes, expanded)
+    }
+
+    /// Только «Главная»: до открытия базы.
+    pub fn empty() -> Self {
+        Self::new(vec![node("Главная", "home", None, false)], HashSet::new())
+    }
     pub fn new(nodes: Vec<NavNode>, expanded: HashSet<usize>) -> Self {
         let mut shell = Self {
             nodes,
@@ -77,7 +176,8 @@ impl Shell {
         shell
     }
 
-    /// Примерная навигация из макета «Главное окно».
+    /// Примерная навигация из макета «Главное окно»: только для тестов и стендов
+    /// (`examples/`), приложение строит дерево из метаданных.
     pub fn demo() -> Self {
         let mut nodes = vec![
             node("Главная", "home", None, false),                    // 0
@@ -100,6 +200,8 @@ impl Shell {
             node("Пользователи и роли", "users", Some(16), false),   // 17
         ];
         nodes[3].view = "receipts";
+        nodes[3].object = Some("receipt".to_owned());
+        nodes[4].object = Some("issue".to_owned());
         nodes[17].view = "users";
         for (title, icon, target) in [
             ("Поступления товаров", "stock-in", 3),
@@ -166,7 +268,7 @@ impl Shell {
                 let target = node.link.unwrap_or(id);
                 NavRowData {
                     id,
-                    title: node.title,
+                    title: node.title.clone(),
                     icon: node.icon,
                     level: self.depth(id),
                     is_group: node.is_group,
@@ -186,13 +288,11 @@ impl Shell {
         self.active
     }
 
-    /// Раздел навигации, где живут документы этого вида (имя объекта в ядре).
+    /// Пункт навигации, где живут документы этого вида (имя объекта в ядре).
     pub fn node_for_object(&self, object: &str) -> Option<usize> {
-        match object {
-            "receipt" => Some(RECEIPTS_NODE),
-            "issue" => Some(4),
-            _ => None,
-        }
+        self.nodes
+            .iter()
+            .position(|node| node.object.as_deref() == Some(object))
     }
 
     pub fn is_group(&self, id: usize) -> bool {
@@ -237,7 +337,7 @@ impl Shell {
     }
 
     fn open(&mut self, id: usize) {
-        let (title, view) = (self.nodes[id].title.to_owned(), self.nodes[id].view);
+        let (title, view) = (self.nodes[id].title.clone(), self.nodes[id].view);
         self.open_tab(id, None, title, view, None);
     }
 
@@ -387,6 +487,61 @@ mod tests {
 
     fn ids(shell: &Shell) -> Vec<usize> {
         shell.nav_rows().iter().map(|row| row.id).collect()
+    }
+
+    fn warehouse_meta() -> Meta {
+        let config = ostov_meta::demo();
+        assert!(config.is_ok(), "{:?}", config.as_ref().err());
+        Meta::new(&config.unwrap_or_else(|_| unreachable!()))
+    }
+
+    fn titles(shell: &Shell) -> Vec<String> {
+        shell.nav_rows().into_iter().map(|row| row.title).collect()
+    }
+
+    #[test]
+    fn menu_comes_from_configuration() {
+        let meta = warehouse_meta();
+        let shell = Shell::from_meta(&meta, false);
+        let titles = titles(&shell);
+        assert_eq!(titles.first().map(String::as_str), Some("Главная"));
+        for object in &meta.objects {
+            assert!(
+                titles.contains(&object.title),
+                "нет пункта «{}»",
+                object.title
+            );
+        }
+        assert!(!titles.iter().any(|title| title == "Администрирование"));
+    }
+
+    #[test]
+    fn admin_sees_administration() {
+        let shell = Shell::from_meta(&warehouse_meta(), true);
+        assert!(
+            titles(&shell)
+                .iter()
+                .any(|title| title == "Пользователи и роли")
+        );
+    }
+
+    #[test]
+    fn object_finds_its_menu_item() {
+        let mut shell = Shell::from_meta(&warehouse_meta(), false);
+        let receipts = shell.node_for_object("receipt");
+        assert!(receipts.is_some());
+        assert_eq!(shell.node_for_object("нет такого"), None);
+        if let Some(id) = receipts {
+            shell.click(id);
+            assert_eq!(shell.tabs().last().map(|tab| tab.view), Some("receipts"));
+        }
+    }
+
+    #[test]
+    fn unknown_icon_falls_back_to_kind() {
+        assert_eq!(known_icon(Some("rm -rf"), "document"), "document");
+        assert_eq!(known_icon(Some("warehouse"), "folder"), "warehouse");
+        assert_eq!(known_icon(None, "list"), "list");
     }
 
     #[test]

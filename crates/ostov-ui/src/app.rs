@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use crate::engine::{Engine, NewAdmin, SessionInfo, call_in_background};
+use crate::engine::{Engine, Meta, NewAdmin, SessionInfo, call_in_background};
 use crate::login::{delay_secs, verify};
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
@@ -256,13 +256,17 @@ fn show_page(window: &AppWindow, page: i32) {
         .set_size(slint::LogicalSize::new(width, height));
 }
 
-/// Готовит главную страницу для выбранной базы.
-fn open_main(window: &AppWindow, base: &str, server: bool) -> Shell {
-    let shell = Shell::demo();
+/// Готовит главную страницу для выбранной базы: дерево навигации из метаданных.
+fn open_main(window: &AppWindow, session: &Session) -> Shell {
+    let shell = session
+        .meta
+        .as_ref()
+        .map_or_else(Shell::empty, |meta| Shell::from_meta(meta, session.admin));
+    let base = session.name.as_str();
     window.set_base_name(base.trim_end_matches(".sqlite").into());
     window.set_database_name(base.into());
     window.set_mode_text(
-        if server {
+        if session.server {
             "Режим: сервер"
         } else {
             "Режим: локально"
@@ -410,6 +414,18 @@ struct Session {
     failures: u32,
     /// Открытая база. Пока она здесь, файл занят: другая программа его не откроет.
     engine: Option<Arc<dyn Engine>>,
+    /// Метаданные базы для этого пользователя (меню и объекты уже обрезаны по правам).
+    meta: Option<Meta>,
+    /// Показывать ли «Администрирование». Права всё равно проверяет ядро на каждой команде.
+    admin: bool,
+}
+
+/// Встроенная роль администратора в ядре (`ostov-model`).
+const ADMIN_ROLE: &str = "admin";
+
+/// База без пользователей пускает без входа, там пользователь и есть администратор.
+fn is_admin(user: Option<&SessionInfo>) -> bool {
+    user.is_none_or(|user| user.roles.iter().any(|role| role == ADMIN_ROLE))
 }
 
 /// Открывает главную страницу выбранной базы и подключает к ней список поступлений.
@@ -419,7 +435,7 @@ fn enter_main(
     receipts: &ReceiptsUi,
     session: &Session,
 ) {
-    *shell.borrow_mut() = open_main(app, &session.name, session.server);
+    *shell.borrow_mut() = open_main(app, session);
     receipts.after(app, &shell.borrow());
     match &session.engine {
         Some(engine) => receipts.attach(engine.clone()),
@@ -446,12 +462,18 @@ fn open_local(
         move || {
             let engine = crate::local_base::open(&path)?;
             let hello = engine.hello()?;
-            Ok((engine, hello))
+            // Без входа метаданные можно взять сразу; со входом их даст ядро после login.
+            let meta = if hello.login_required {
+                None
+            } else {
+                Some(engine.get_meta()?)
+            };
+            Ok((engine, hello, meta))
         },
         move |result| {
             let Some(app) = weak.upgrade() else { return };
             app.set_start_busy(false);
-            let (engine, hello) = match result {
+            let (engine, hello, meta) = match result {
                 Ok(opened) => opened,
                 Err(error) => {
                     app.set_start_error(error.message.into());
@@ -467,6 +489,8 @@ fn open_local(
                 name: db.name.to_string(),
                 stage: Some(kind),
                 engine: Some(engine),
+                meta,
+                admin: is_admin(None),
                 ..Session::default()
             };
             if kind == LoginKind::None {
@@ -498,14 +522,23 @@ fn submit_local_login(
     let weak = app.as_weak();
     let (session, shell, receipts) = (session.clone(), shell.clone(), receipts.clone());
     call_in_background(
-        move || engine.login(&login, &password),
+        move || {
+            let user = engine.login(&login, &password)?;
+            let meta = engine.get_meta()?;
+            Ok((user, meta))
+        },
         move |result| {
             let Some(app) = weak.upgrade() else { return };
             app.set_locked(false);
             app.set_button_text(button_text(LoginKind::LocalUser).into());
             match result {
-                Ok(user) => {
+                Ok((user, meta)) => {
                     show_user(&app, Some(&user));
+                    {
+                        let mut session = session.borrow_mut();
+                        session.meta = Some(meta);
+                        session.admin = is_admin(Some(&user));
+                    }
                     enter_main(&app, &shell, &receipts, &session.borrow());
                 }
                 Err(error) => app.set_error(error.message.into()),
@@ -732,7 +765,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         app.set_config_name(title.into());
         app.set_config_info(format!("Конфигурация · версия {version}").into());
     }
-    let shell = Rc::new(RefCell::new(Shell::demo()));
+    let shell = Rc::new(RefCell::new(Shell::empty()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
     let windows = crate::windows::Windows::new(&receipts);
     let directory = Rc::new(RefCell::new(Directory::demo()));

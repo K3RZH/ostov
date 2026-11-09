@@ -108,6 +108,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             window.set_nu_role(1);
             save(&window, dark, &path)
         }
+        "main-meta" => {
+            // Меню из встроенной конфигурации «Склад», как его строит приложение.
+            let window = app_window(2)?;
+            let meta =
+                ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+            let shell = std::rc::Rc::new(std::cell::RefCell::new(
+                ostov_ui::shell::Shell::from_meta(&meta, true),
+            ));
+            let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+            receipts.attach_blocking(snapshot_engine()?);
+            let node = shell.borrow().node_for_object("receipt");
+            if let Some(node) = node {
+                shell.borrow_mut().click(node);
+            }
+            receipts.after(&window, &shell.borrow());
+            ostov_ui::app::refresh(&window, &shell.borrow());
+            window.set_base_name("Склад".into());
+            window.set_mode_text("Режим: локально".into());
+            window.set_user_text("Администратор".into());
+            window.set_user_initials("А".into());
+            save(&window, dark, &path)
+        }
         "receipts" | "receipts-large" | "receipts-marks" | "receipts-sorted"
         | "receipts-notice" | "doc-window" | "doc-dock" | "doc-close" | "receipt-form"
         | "receipt-form-error" | "tabs-many" => {

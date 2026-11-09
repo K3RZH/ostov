@@ -19,7 +19,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use crate::engine::call_in_background;
 use crate::grid;
 use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt, Sorting};
-use crate::shell::{RECEIPTS_NODE, Shell};
+use crate::shell::Shell;
 use crate::windows::Windows;
 use crate::workspace::{DocTabs, TabList, WindowId, WindowRef, Workspace};
 use crate::{AppWindow, DocLink, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
@@ -1555,11 +1555,12 @@ fn set_posted(state: &mut State, number: u32, posted: bool) {
 }
 
 /// Открывает документ в своей вкладке окна `target` (создаёт его состояние, если вкладки ещё нет).
+/// `(node, number)`: пункт навигации поступлений и номер документа.
 fn open_doc(
     app: &AppWindow,
     state: &mut State,
     tabs: &mut dyn DocTabs,
-    number: u32,
+    (node, number): (usize, u32),
     target: Target,
 ) {
     before(app, state, tabs);
@@ -1589,7 +1590,7 @@ fn open_doc(
         .get(&number)
         .map(DocState::title)
         .unwrap_or_default();
-    tabs.open_document(RECEIPTS_NODE, number, title, "receipt");
+    tabs.open_document(node, number, title, "receipt");
     after(app, state, tabs, target);
 }
 
@@ -1613,6 +1614,10 @@ fn open_from_list(
         }
         return;
     }
+    // Пункта поступлений может не быть в меню (нет прав или его нет в конфигурации).
+    let Some(node) = tabs.shell.borrow().node_for_object(OBJECT) else {
+        return;
+    };
     tabs.with(|list| {
         if new_tab {
             list.pin_index(list.active_index());
@@ -1621,7 +1626,7 @@ fn open_from_list(
             app,
             &mut form_state(state, tabs.target),
             list,
-            number,
+            (node, number),
             tabs.target,
         );
         if new_tab {
