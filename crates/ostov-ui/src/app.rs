@@ -242,7 +242,7 @@ pub fn new_database(server: bool, name: &str, folder: &str, address: &str) -> Re
 
 /// Заменяет домашнюю папку на `~`: так путь короче и привычнее.
 fn short_home(path: &str) -> String {
-    // Сравниваем с разделителем: иначе /home/kerzh2/… стало бы «~2/…».
+    // Сравниваем с разделителем: иначе при HOME=/home/ann путь /home/ann2/… стал бы «~2/…».
     let home = std::env::var("HOME").unwrap_or_default();
     let home = home.trim_end_matches('/');
     match path.strip_prefix(home).filter(|rest| rest.starts_with('/')) {
