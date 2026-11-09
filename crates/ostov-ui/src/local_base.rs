@@ -178,6 +178,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // Просьба Артёма №1: короткий пароль администратора не оставляет базу без администратора.
+    #[test]
+    fn failed_admin_leaves_no_file_and_retry_works() {
+        let (dir, path) = temp_base("short-admin");
+        let admin = |password: &str| NewAdmin {
+            login: "admin".into(),
+            password: password.into(),
+        };
+        assert!(create(&path, None, Some(&admin("коротко"))).is_err());
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "файл базы остался на диске"
+        );
+        assert!(create(&path, None, Some(&admin("длинный-пароль-1"))).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Просьба Артёма №5: первым пользователем не-администратор отклоняется, вход не включается.
+    #[test]
+    fn first_user_must_be_administrator() {
+        let (dir, path) = temp_base("first-keeper");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            let keeper = engine.admin_add_user(&ostov_api::NewUser {
+                login: "keeper".into(),
+                display_name: "Кладовщик".into(),
+                role: "storekeeper".into(),
+                password: "длинный-пароль-1".into(),
+            });
+            assert!(keeper.is_err(), "кладовщик первым не должен приниматься");
+            assert!(matches!(engine.hello(), Ok(info) if !info.login_required));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn existing_file_is_not_overwritten() {
         let (dir, path) = temp_base("twice");
