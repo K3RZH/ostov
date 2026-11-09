@@ -424,7 +424,7 @@ impl LocalEngine {
                     .map_err(error)?;
             cache.insert(token.to_owned(), built);
         }
-        let marks = cache.get(token).ok_or_else(broken)?;
+        let marks = cache.get_mut(token).ok_or_else(broken)?;
         let page = marks
             .seek(&mut **db, source, position, window(size))
             .map_err(error)?;
@@ -1372,6 +1372,9 @@ fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
         schema::record(db, &warehouse()?)?;
     }
     schema::restructure(db, config)?;
+    for doc in config.documents.values() {
+        doc.kind.index_parts(db)?;
+    }
     for register in config.registers.values() {
         if register.upgrade(db)? {
             for (table, doc) in &config.documents {

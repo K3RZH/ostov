@@ -679,6 +679,7 @@ fn old_base_gets_dates_in_movements() {
     {
         let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
         db.execute("DROP INDEX stock__period", &[]).unwrap();
+        db.execute("DROP INDEX stock__key", &[]).unwrap();
         db.execute("ALTER TABLE stock DROP COLUMN period", &[])
             .unwrap();
     }
@@ -695,6 +696,13 @@ fn old_base_gets_dates_in_movements() {
         .query("SELECT COUNT(*) FROM stock WHERE period IS NULL", &[])
         .unwrap();
     assert_eq!(empty, vec![vec![ostov_store::Value::Int(0)]]);
+    let index = db
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'stock__key'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(index, vec![vec![ostov_store::Value::Int(1)]]);
 }
 
 /// Склад с мукой: приход 10 кг 1 февраля.
@@ -1773,14 +1781,22 @@ fn failed_logins_are_counted_and_slowed_down() {
     let engine = with_admin(&base);
     engine.logout().unwrap();
     for _ in 0..4 {
-        let started = std::time::Instant::now();
         engine.login("boss", "wrong-password-1").unwrap_err();
-        assert!(started.elapsed() < std::time::Duration::from_millis(900));
     }
-    // Пятая ошибка подряд — ответ с задержкой: счётчик пережил откаты.
+    // Пятая ошибка подряд — ответ с задержкой. Сверху время не ограничиваем: хэш в debug под
+    // нагрузкой сам идёт больше секунды. Что первые четыре без задержки, проверяет
+    // `ostov_sec::delay_secs`, здесь — что счётчик пережил откаты.
     let started = std::time::Instant::now();
     engine.login("boss", "wrong-password-1").unwrap_err();
     assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let failed = ostov_store::Driver::query(
+        &mut db,
+        "SELECT failed FROM ostov_users WHERE login = 'boss'",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(failed, vec![vec![ostov_store::Value::Int(5)]]);
 
     engine.login("boss", ADMIN_PASSWORD).unwrap();
     let failed = journal(&*engine)
@@ -2338,4 +2354,17 @@ fn console_reset_needs_no_login_but_strict_password() {
     let reset = entries.iter().find(|e| e.action == "Смена пароля").unwrap();
     assert_eq!(reset.user, "консоль сервера");
     assert!(!reset.details.contains(ADMIN_PASSWORD));
+}
+
+#[test]
+fn nul_in_text_is_validation_not_database_error() {
+    let base = Base::new("nul-text");
+    let engine = base.create();
+    let data = ObjectData {
+        fields: fields(&[("name", text("Мука\0"))]),
+        ..ObjectData::default()
+    };
+    let err = engine.save("goods", &data, PostAction::Write).unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("кодом 0"), "{}", err.message);
 }

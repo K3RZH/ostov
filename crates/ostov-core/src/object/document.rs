@@ -136,6 +136,33 @@ impl DocumentKind {
             columns.join(", ")
         );
         db.execute(&sql, &[])?;
+        self.index_part(db, part)
+    }
+
+    /// Строки документа ищутся по `doc_id`: без индекса каждое открытие документа читало
+    /// строки всех документов. Старым базам индекс добавляется при открытии.
+    pub(crate) fn index_part(
+        &self,
+        db: &mut dyn Driver,
+        part: &TablePart,
+    ) -> Result<(), CoreError> {
+        let d = db.dialect();
+        let table = self.part_table(part);
+        let sql = format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} ({}, {})",
+            d.quote_ident(&format!("{table}__doc")),
+            d.quote_ident(&table),
+            d.quote_ident("doc_id"),
+            d.quote_ident("line_no"),
+        );
+        db.execute(&sql, &[])?;
+        Ok(())
+    }
+
+    pub(crate) fn index_parts(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
+        for part in &self.parts {
+            self.index_part(db, part)?;
+        }
         Ok(())
     }
 

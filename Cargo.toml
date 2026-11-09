@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ostov-model", "crates/ostov-store", "crates/ostov-core", "crates/ostov-api", "crates/ostov-proto", "crates/ostov-server", "crates/ostov-client", "crates/ostov-meta", "crates/ostov-sec", "crates/ostov-py", "crates/ostov-io", "crates/ostov-cli", "crates/ostov-ui"]
+members = ["crates/ostov-model", "crates/ostov-store", "crates/ostov-core", "crates/ostov-api", "crates/ostov-proto", "crates/ostov-server", "crates/ostov-client", "crates/ostov-meta", "crates/ostov-sec", "crates/ostov-py", "crates/ostov-io", "crates/ostov-sql", "crates/ostov-cli", "crates/ostov-ui"]
 
 [workspace.package]
 version = "0.6.0"
