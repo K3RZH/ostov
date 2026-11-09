@@ -57,7 +57,7 @@ fn main() {
     window.show().unwrap();
 
     let meta = ostov_api::Meta::new(&ostov_meta::demo().unwrap());
-    let mut shell = Shell::from_meta(&meta, true);
+    let mut shell = Shell::from_meta(&meta, ostov_api::SystemRights::ALL);
     let users_node = shell
         .nav_rows()
         .iter()

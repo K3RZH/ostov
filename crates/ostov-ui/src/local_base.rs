@@ -292,6 +292,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // Экран «Закрытие периода»: дата туда и обратно, формат ГГГГ-ММ-ДД, снятие закрытия.
+    #[test]
+    fn closing_date_round_trips() {
+        let (dir, path) = temp_base("closing");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(matches!(engine.closing_date(), Ok(None)));
+            assert!(engine.set_closing_date(Some("2026-01-31")).is_ok());
+            let closed = |engine: &Arc<dyn Engine>| engine.closing_date().ok().flatten();
+            assert_eq!(closed(&engine).as_deref(), Some("2026-01-31"));
+            // Дату в другом виде ядро отклоняет, прежнее закрытие остаётся.
+            assert!(engine.set_closing_date(Some("31.01.2026")).is_err());
+            assert!(engine.set_closing_date(Some("2026-02-31")).is_err());
+            assert_eq!(closed(&engine).as_deref(), Some("2026-01-31"));
+            assert!(engine.set_closing_date(None).is_ok());
+            assert!(matches!(engine.closing_date(), Ok(None)));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Экран «Журнал действий»: действия видны, новые сверху, страницы идут по ключу `id`.
+    #[test]
+    fn journal_shows_actions_newest_first_and_pages_by_key() {
+        let (dir, path) = temp_base("journal");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(engine.set_closing_date(Some("2026-01-31")).is_ok());
+            let added = engine.admin_add_user(&ostov_api::NewUser {
+                login: "admin".into(),
+                display_name: "Администратор".into(),
+                role: "admin".into(),
+                password: "1".into(),
+            });
+            assert!(added.is_ok(), "{added:?}");
+            assert!(engine.login("admin", "1").is_ok());
+
+            let all = engine.admin_journal(None, 100).unwrap_or_default();
+            assert!(all.len() >= 3, "{all:?}");
+            assert!(all.windows(2).all(|pair| pair[0].id > pair[1].id));
+            assert!(
+                all.iter()
+                    .any(|entry| entry.action == "Установка даты закрытия"
+                        && entry.details.contains("31.01.2026")),
+                "{all:?}"
+            );
+
+            let first = engine.admin_journal(None, 2).unwrap_or_default();
+            assert_eq!(first.len(), 2);
+            let key = first.last().map(|entry| entry.id.to_string());
+            let second = engine.admin_journal(key.as_deref(), 2).unwrap_or_default();
+            let paged: Vec<i64> = first.iter().chain(&second).map(|entry| entry.id).collect();
+            let expected: Vec<i64> = all.iter().map(|entry| entry.id).take(paged.len()).collect();
+            assert_eq!(paged, expected);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn home_prefix_expands() {
         if let Ok(home) = std::env::var("HOME") {

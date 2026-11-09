@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
+use crate::admin_ui::AdminUi;
 use crate::engine::{
-    Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, call_in_background,
+    Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, SystemRights,
+    call_in_background,
 };
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
@@ -202,7 +204,7 @@ fn open_main(window: &AppWindow, session: &Session) -> Shell {
     let shell = session
         .meta
         .as_ref()
-        .map_or_else(Shell::empty, |meta| Shell::from_meta(meta, session.admin));
+        .map_or_else(Shell::empty, |meta| Shell::from_meta(meta, session.system));
     let base = session.name.as_str();
     window.set_base_name(base.trim_end_matches(".sqlite").into());
     window.set_database_name(base.into());
@@ -411,8 +413,9 @@ struct Session {
     engine: Option<Arc<dyn Engine>>,
     /// Метаданные базы для этого пользователя (меню и объекты уже обрезаны по правам).
     meta: Option<Meta>,
-    /// Показывать ли «Администрирование». Права всё равно проверяет ядро на каждой команде.
-    admin: bool,
+    /// Какие пункты «Администрирования» показывать. Права всё равно проверяет ядро на каждой
+    /// команде.
+    system: SystemRights,
     /// Вошёл ли пользователь (в базе без пользователей входа нет).
     logged_in: bool,
 }
@@ -421,10 +424,10 @@ struct Session {
 /// первой при создании первого пользователя; кто что может, решают права, их проверяет ядро.
 const ADMIN_ROLE: &str = "admin";
 
-/// «Администрирование» видит тот, у чьей роли есть системное право `admin`. База без
-/// пользователей пускает без входа, там пользователь и есть администратор.
-fn is_admin(user: Option<&SessionInfo>) -> bool {
-    user.is_none_or(|user| user.system.admin)
+/// Системные права вошедшего: по ним строятся пункты «Администрирования». База без пользователей
+/// пускает без входа, там пользователь и есть администратор: у него все права.
+fn system_rights(user: Option<&SessionInfo>) -> SystemRights {
+    user.map_or(SystemRights::ALL, |user| user.system)
 }
 
 /// Экраны главной страницы, которым нужна открытая база.
@@ -433,6 +436,7 @@ struct Screens {
     shell: Rc<RefCell<Shell>>,
     receipts: ReceiptsUi,
     users: UsersUi,
+    admin: AdminUi,
 }
 
 /// Открывает главную страницу выбранной базы и подключает к ней экраны.
@@ -464,9 +468,10 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
             .unwrap_or(0),
     );
     screens.users.clear();
-    if session.admin {
+    if session.system.admin {
         screens.users.reload(app);
     }
+    screens.admin.start(session.system);
     app.set_password("".into());
     app.set_repeat("".into());
     show_page(app, PAGE_MAIN);
@@ -511,7 +516,7 @@ fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, scr
                 stage: Some(kind),
                 engine: Some(engine),
                 meta,
-                admin: is_admin(None),
+                system: system_rights(None),
                 ..Session::default()
             };
             if kind == LoginKind::None {
@@ -648,7 +653,7 @@ fn submit_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Scree
                     {
                         let mut session = session.borrow_mut();
                         session.meta = Some(meta);
-                        session.admin = is_admin(Some(&user));
+                        session.system = system_rights(Some(&user));
                         session.logged_in = true;
                     }
                     enter_main(&app, &screens, &session.borrow());
@@ -979,6 +984,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
             directory: directory.clone(),
             session: session.clone(),
         },
+        admin: AdminUi::new(app.as_weak(), windows.clone(), {
+            let session = session.clone();
+            move || session.borrow().engine.clone()
+        }),
     };
 
     // Закрытие окна пользователем завершает приложение.
@@ -1023,12 +1032,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // «Назад к выбору базы» и «Сменить»: вернуться к списку баз.
     let to_start = {
         let app = app.as_weak();
-        let (session, receipts) = (session.clone(), receipts.clone());
+        let (session, receipts, admin) = (session.clone(), receipts.clone(), screens.admin.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
             release(std::mem::take(&mut *session.borrow_mut()));
             receipts.detach();
+            admin.clear();
             app.set_password("".into());
             app.set_repeat("".into());
             app.set_error("".into());
@@ -1074,7 +1084,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     let (name, key, kind) = {
                         let mut session = session.borrow_mut();
                         session.meta = None;
-                        session.admin = false;
+                        session.system = SystemRights::default();
                         session.logged_in = false;
                         let kind = if session.server {
                             LoginKind::Server
@@ -1087,6 +1097,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     // Данные прошлого пользователя уходят с экрана: у следующего другие права.
                     screens.receipts.detach();
                     screens.users.clear();
+                    screens.admin.clear();
                     configure_login(&app, kind, &name, &key);
                     prefill_login(&app, &key);
                     show_page(&app, PAGE_LOGIN);
@@ -1237,13 +1248,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     wire_users(&app, &screens.users);
+    screens.admin.attach_window(&app);
     windows.on_host_created({
-        let (main, users) = (app.as_weak(), screens.users.clone());
+        let (main, users, admin) = (app.as_weak(), screens.users.clone(), screens.admin.clone());
         move |window| {
             if let Some(main) = main.upgrade() {
                 refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
                 wire_users(window, &users);
+                admin.attach_window(window);
             }
         }
     });
@@ -1478,7 +1491,6 @@ fn quit_on_close() -> slint::CloseRequestResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::SystemRights;
 
     #[test]
     fn initials_take_two_first_letters() {
@@ -1514,19 +1526,33 @@ mod tests {
     }
 
     #[test]
-    fn base_without_users_is_admin() {
-        assert!(is_admin(None));
-        let user = |admin: bool| SessionInfo {
+    fn base_without_users_has_all_rights() {
+        assert_eq!(system_rights(None), SystemRights::ALL);
+    }
+
+    #[test]
+    fn rights_come_from_the_role_not_from_its_name() {
+        let user = |system: SystemRights| SessionInfo {
             login: "u".into(),
             display_name: "".into(),
             roles: vec!["any".into()],
-            system: SystemRights {
-                admin,
-                ..SystemRights::default()
-            },
+            system,
         };
-        // Право, а не имя роли: роль из конфигурации с `system.admin` тоже видит раздел.
-        assert!(is_admin(Some(&user(true))));
-        assert!(!is_admin(Some(&user(false))));
+        // Роль из конфигурации с `system.admin` тоже видит раздел, а право закрывать период
+        // не тянет за собой право администратора.
+        let admin = SystemRights {
+            admin: true,
+            ..SystemRights::default()
+        };
+        let accountant = SystemRights {
+            set_closing_date: true,
+            ..SystemRights::default()
+        };
+        assert_eq!(system_rights(Some(&user(admin))), admin);
+        assert_eq!(system_rights(Some(&user(accountant))), accountant);
+        assert_eq!(
+            system_rights(Some(&user(SystemRights::default()))),
+            SystemRights::default()
+        );
     }
 }

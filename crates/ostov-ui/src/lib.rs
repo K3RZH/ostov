@@ -11,6 +11,8 @@ mod generated {
 }
 pub use generated::*;
 
+pub mod admin;
+pub mod admin_ui;
 pub mod app;
 pub mod date_input;
 pub mod engine;
