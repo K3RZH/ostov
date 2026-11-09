@@ -246,6 +246,8 @@ fn read_catalog(engine: &dyn Engine, object: &str) -> EngineResult<Vec<Row>> {
             order: Some("name".to_owned()),
             descending: false,
             search: None,
+            posted: None,
+            deleted: None,
             after_key: after_key.take(),
             size: PAGE_SIZE,
         })?;
@@ -385,6 +387,8 @@ fn last_number(engine: &dyn Engine) -> EngineResult<u32> {
         order: Some("number".to_owned()),
         descending: true,
         search: None,
+        posted: None,
+        deleted: None,
         after_key: None,
         size: 1,
     })?;
@@ -714,6 +718,8 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
             order: request.order.clone(),
             descending: request.descending,
             search: request.search.clone(),
+            posted: None,
+            deleted: None,
             after_key: after_key.take(),
             size: PAGE_SIZE,
         })?;

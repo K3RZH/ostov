@@ -2,6 +2,8 @@
 //! (нажатие, движение, отпускание), как их пришлёт система, и после каждого сценария
 //! проверяется, что окна по модели и на экране совпадают, а вкладки не потерялись.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example drag_e2e`.
+// Стенд, а не приложение: падение на unwrap и есть провал сценария.
+#![allow(clippy::unwrap_used)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
