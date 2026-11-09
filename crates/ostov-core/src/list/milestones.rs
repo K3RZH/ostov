@@ -9,7 +9,8 @@ pub const MILESTONE_STEP: u64 = 1000;
 
 /// Вехи списка: ключи каждой `step`-й строки для одного порядка и поиска.
 /// По ним прыжок в любое место — это одно окно от ближайшей вехи, а не OFFSET.
-/// Строятся заново при смене сортировки, поиска или после больших изменений.
+/// Строятся лениво: только до того места, куда прыгнули, дальше — при следующих прыжках.
+/// Заново — при смене сортировки, поиска или после изменений.
 #[derive(Debug, Clone)]
 pub struct Milestones {
     table: String,
@@ -18,6 +19,8 @@ pub struct Milestones {
     step: u64,
     keys: Vec<Cursor>,
     total: u64,
+    /// Список прочитан до конца: больше вех нет.
+    done: bool,
 }
 
 impl Milestones {
@@ -31,6 +34,7 @@ impl Milestones {
     }
 
     /// Вехи, где ссылки сортируются по названиям из `titles` (как в `list_titled`).
+    /// Сразу считается только число строк; сами вехи — по мере прыжков.
     pub fn build_titled(
         db: &mut dyn Driver,
         source: &dyn ListSource,
@@ -42,53 +46,15 @@ impl Milestones {
             return Err(CoreError::Invalid("шаг вех должен быть больше нуля".into()));
         }
         let plan = Plan::new(source, query, titles)?;
-        let mut params = Vec::new();
-        let sql = {
-            let d = db.dialect();
-            let mut cols = vec![d.quote_ident("id")];
-            if let Some(i) = plan.order {
-                cols.push(plan.sort_expr(d, i));
-            }
-            let mut sql = format!(
-                "SELECT {} FROM {}",
-                cols.join(", "),
-                d.quote_ident(&plan.table)
-            );
-            if let Some(filter) = plan.filter_sql(d, &mut params) {
-                sql.push_str(&format!(" WHERE {filter}"));
-            }
-            sql.push_str(&format!(" ORDER BY {}", plan.order_sql(d)));
-            sql
-        };
-
-        // Читаем только id и поле сортировки; позже — потоком, без всего списка в памяти.
-        let rows = db.query(&sql, &params)?;
-        let total = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-        let keys = rows
-            .into_iter()
-            .zip(1u64..)
-            .filter(|(_, n)| n % step == 0)
-            .map(|(row, _)| {
-                let mut values = row.into_iter();
-                match values.next() {
-                    Some(Value::Int(id)) => Ok(Cursor {
-                        id,
-                        value: plan.order.map(|_| values.next().unwrap_or(Value::Null)),
-                    }),
-                    _ => Err(CoreError::Invalid(format!(
-                        "в {} строка без id",
-                        plan.table
-                    ))),
-                }
-            })
-            .collect::<Result<_, _>>()?;
+        let total = plan.count(db)?;
         Ok(Self {
             table: plan.table,
             query: query.clone(),
             titles: titles.clone(),
             step,
-            keys,
+            keys: Vec::new(),
             total,
+            done: total == 0,
         })
     }
 
@@ -96,10 +62,69 @@ impl Milestones {
         self.total
     }
 
+    /// Дочитывает вехи, пока их не станет `wanted` или список не кончится. Читаются только
+    /// id и поле сортировки, от последней известной вехи.
+    fn extend(&mut self, db: &mut dyn Driver, plan: &Plan, wanted: usize) -> Result<(), CoreError> {
+        if self.done || self.keys.len() >= wanted {
+            return Ok(());
+        }
+        let missing = u64::try_from(wanted - self.keys.len()).unwrap_or(u64::MAX);
+        let need = missing.saturating_mul(self.step);
+        let mut params = Vec::new();
+        let sql = {
+            let d = db.dialect();
+            let mut cols = vec![d.quote_ident("id")];
+            if let Some(i) = plan.order {
+                cols.push(plan.sort_expr(d, i));
+            }
+            let mut filters: Vec<String> = plan.filter_sql(d, &mut params).into_iter().collect();
+            if let Some(after) = self.keys.last() {
+                filters.push(plan.after_sql(d, after, &mut params)?);
+            }
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                cols.join(", "),
+                d.quote_ident(&plan.table)
+            );
+            if !filters.is_empty() {
+                sql.push_str(&format!(" WHERE {}", filters.join(" AND ")));
+            }
+            params.push(Value::Int(i64::try_from(need).unwrap_or(i64::MAX)));
+            sql.push_str(&format!(
+                " ORDER BY {} LIMIT {}",
+                plan.order_sql(d),
+                d.placeholder(params.len())
+            ));
+            sql
+        };
+        let rows = db.query(&sql, &params)?;
+        let read = u64::try_from(rows.len()).unwrap_or(u64::MAX);
+        for (row, n) in rows.into_iter().zip(1u64..) {
+            if n % self.step != 0 {
+                continue;
+            }
+            let mut values = row.into_iter();
+            let Some(Value::Int(id)) = values.next() else {
+                return Err(CoreError::Invalid(format!(
+                    "в {} строка без id",
+                    plan.table
+                )));
+            };
+            self.keys.push(Cursor {
+                id,
+                value: plan.order.map(|_| values.next().unwrap_or(Value::Null)),
+            });
+        }
+        if read < need {
+            self.done = true;
+        }
+        Ok(())
+    }
+
     /// Окно, начиная со строки номер `position` (с нуля). Так работают и ползунок,
     /// и «перейти на страницу N»: позиция = (N - 1) × размер страницы.
     pub fn seek(
-        &self,
+        &mut self,
         db: &mut dyn Driver,
         source: &dyn ListSource,
         position: u64,
@@ -121,9 +146,9 @@ impl Milestones {
         }
         let plan = Plan::new(source, &self.query, &self.titles)?;
         // Веха номер k — ключ строки k × step; после неё начинается строка k × step (с нуля).
-        let mark = usize::try_from(position / self.step)
-            .unwrap_or(usize::MAX)
-            .min(self.keys.len());
+        let wanted = usize::try_from(position / self.step).unwrap_or(usize::MAX);
+        self.extend(db, &plan, wanted)?;
+        let mark = wanted.min(self.keys.len());
         let start = mark.checked_sub(1).and_then(|i| self.keys.get(i));
         let passed = u64::try_from(mark)
             .unwrap_or(u64::MAX)

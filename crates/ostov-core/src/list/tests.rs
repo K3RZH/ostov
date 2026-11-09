@@ -154,7 +154,7 @@ fn seek_lands_on_exact_row() {
     let src = goods();
     for query in [ListQuery::default(), by("name", true), by("price", false)] {
         let all = walk(&mut db, &query, MAX_WINDOW);
-        let marks = Milestones::build(&mut db, &src, &query, 100).unwrap();
+        let mut marks = Milestones::build(&mut db, &src, &query, 100).unwrap();
         assert_eq!(marks.total(), 2500);
 
         for position in [0u64, 1, 99, 100, 1234, 2490] {
@@ -176,7 +176,7 @@ fn seek_then_next_page_continues() {
     let mut db = db_with(500);
     let src = goods();
     let query = by("name", false);
-    let marks = Milestones::build(&mut db, &src, &query, 100).unwrap();
+    let mut marks = Milestones::build(&mut db, &src, &query, 100).unwrap();
     let page = marks.seek(&mut db, &src, 250, 20).unwrap();
     let next = list(&mut db, &src, &query, page.next_key.as_deref(), 20).unwrap();
     assert_eq!(page.rows.last().unwrap().fields["name"], text("item 270"));
@@ -206,4 +206,45 @@ fn documents_are_listed_with_posted_flag() {
 
     let goods_page = list(&mut db_with(1), &goods(), &ListQuery::default(), None, 1).unwrap();
     assert_eq!(goods_page.rows[0].fields["deleted"], FieldValue::Int(0));
+}
+
+#[test]
+fn milestones_are_built_lazily_and_jumps_in_any_order_land_right() {
+    let mut db = db_with(1000);
+    let src = goods();
+    let searched = ListQuery {
+        search: Some("1".into()),
+        ..by("name", true)
+    };
+    for query in [by("price", false), by("name", true), searched] {
+        let all = walk(&mut db, &query, MAX_WINDOW);
+        let total = all.len();
+        let mut marks = Milestones::build(&mut db, &src, &query, 7).unwrap();
+        assert_eq!(marks.total(), u64::try_from(total).unwrap());
+        // Назад, вперёд, на вехи и рядом, в конец.
+        let last = total - 1;
+        let half = total / 2;
+        for position in [
+            half,
+            3,
+            last,
+            0,
+            half - 1,
+            7,
+            6,
+            8,
+            total * 7 / 10,
+            14,
+            last - 7,
+        ] {
+            let page = marks
+                .seek(&mut db, &src, u64::try_from(position).unwrap(), 5)
+                .unwrap();
+            let expected: Vec<i64> = all[position..(position + 5).min(total)]
+                .iter()
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(ids(&page), expected, "{query:?} @ {position}");
+        }
+    }
 }

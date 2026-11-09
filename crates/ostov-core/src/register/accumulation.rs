@@ -164,6 +164,7 @@ impl AccumulationRegister {
                     d.quote_ident("recorder_id"),
                 ),
                 self.period_index(d),
+                self.key_index(d),
                 format!("CREATE TABLE {totals} ({})", totals_cols.join(", ")),
             ]
         };
@@ -263,24 +264,25 @@ impl AccumulationRegister {
                 d.quote_ident(&self.name)
             )
         };
-        if crate::tx::probe(db, &probe)? {
-            return Ok(false);
-        }
-        let statements = {
+        let added = !crate::tx::probe(db, &probe)?;
+        let mut statements = Vec::new();
+        {
             let d = db.dialect();
-            vec![
-                format!(
+            if added {
+                statements.push(format!(
                     "ALTER TABLE {} ADD COLUMN {} TEXT",
                     d.quote_ident(&self.name),
                     d.quote_ident("period")
-                ),
-                self.period_index(d),
-            ]
-        };
+                ));
+                statements.push(self.period_index(d));
+            }
+            // Базы до индекса по ключу: без него проверка остатка читала всю таблицу.
+            statements.push(self.key_index(d));
+        }
         for sql in statements {
             db.execute(&sql, &[])?;
         }
-        Ok(true)
+        Ok(added)
     }
 
     /// Проставляет движениям документов вида `recorder` дату из их поля `date_field`.
@@ -314,6 +316,18 @@ impl AccumulationRegister {
             d.quote_ident(&format!("{}__period", self.name)),
             d.quote_ident(&self.name),
             d.quote_ident("period"),
+        )
+    }
+
+    /// Движения по ключу и дате: по нему проверка остатка читает только нужные дни.
+    fn key_index(&self, d: &dyn Dialect) -> String {
+        let mut cols = names(d, &self.dims);
+        cols.push(d.quote_ident("period"));
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
+            d.quote_ident(&format!("{}__key", self.name)),
+            d.quote_ident(&self.name),
+            cols.join(", ")
         )
     }
 
@@ -579,7 +593,11 @@ impl AccumulationRegister {
             .collect())
     }
 
+    /// Читаем только дни с `from`: остаток на начало `from` — это итог из `__totals`
+    /// минус движения с `from` и позже. Иначе каждое проведение перечитывало бы всю историю
+    /// ключа, и заполнение базы росло бы квадратично.
     fn check_history(&self, db: &mut dyn Driver, key: &Key, from: &str) -> Result<(), CoreError> {
+        let whole = from <= NO_DATE;
         let sql = {
             let d = db.dialect();
             let period = format!("COALESCE({}, '{NO_DATE}')", d.quote_ident("period"));
@@ -591,25 +609,56 @@ impl AccumulationRegister {
                     d.quote_ident(&r.name)
                 ));
             }
+            // Сама колонка, а не COALESCE: так работает индекс `__key`. NULL — это самый
+            // ранний день, он раньше любого `from`, кроме NO_DATE.
+            let since = if whole {
+                String::new()
+            } else {
+                format!(
+                    " AND {} >= {}",
+                    d.quote_ident("period"),
+                    d.placeholder(key.len() + 1)
+                )
+            };
             format!(
-                "SELECT {} FROM {} WHERE {} GROUP BY {period} ORDER BY {period}",
+                "SELECT {} FROM {} WHERE {}{since} GROUP BY {period} ORDER BY {period}",
                 cols.join(", "),
                 d.quote_ident(&self.name),
                 self.where_key(d, 1),
             )
         };
-        let mut running = self.zeros()?;
-        for row in db.query(&sql, key)? {
+        let mut params = key.clone();
+        if !whole {
+            params.push(Value::Text(from.to_owned()));
+        }
+        let mut days = Vec::new();
+        let mut later = self.zeros()?;
+        for row in db.query(&sql, &params)? {
             let mut values = row.into_iter();
             let day = match values.next() {
                 Some(Value::Text(day)) => day,
                 _ => NO_DATE.to_owned(),
             };
-            for ((def, total), value) in self.resources.iter().zip(running.iter_mut()).zip(values) {
+            let mut deltas = Vec::with_capacity(self.resources.len());
+            for ((def, sum), value) in self.resources.iter().zip(later.iter_mut()).zip(values) {
                 let delta = match value {
                     Value::Int(units) => Decimal::new(units, scale(def))?,
                     _ => Decimal::zero(scale(def))?,
                 };
+                *sum = sum.checked_add(delta)?;
+                deltas.push(delta);
+            }
+            days.push((day, deltas));
+        }
+        let mut running = match self.totals_row(db, key, false)? {
+            Some(now) => now,
+            None => self.zeros()?,
+        };
+        for (total, sum) in running.iter_mut().zip(&later) {
+            *total = total.checked_sub(*sum)?;
+        }
+        for (day, deltas) in days {
+            for ((def, total), delta) in self.resources.iter().zip(running.iter_mut()).zip(deltas) {
                 *total = total.checked_add(delta)?;
                 if day.as_str() >= from && total.is_negative() {
                     return Err(CoreError::NegativeBalance(Box::new(Shortage {

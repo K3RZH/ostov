@@ -679,6 +679,7 @@ fn old_base_gets_dates_in_movements() {
     {
         let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
         db.execute("DROP INDEX stock__period", &[]).unwrap();
+        db.execute("DROP INDEX stock__key", &[]).unwrap();
         db.execute("ALTER TABLE stock DROP COLUMN period", &[])
             .unwrap();
     }
@@ -695,6 +696,13 @@ fn old_base_gets_dates_in_movements() {
         .query("SELECT COUNT(*) FROM stock WHERE period IS NULL", &[])
         .unwrap();
     assert_eq!(empty, vec![vec![ostov_store::Value::Int(0)]]);
+    let index = db
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'stock__key'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(index, vec![vec![ostov_store::Value::Int(1)]]);
 }
 
 /// Склад с мукой: приход 10 кг 1 февраля.
