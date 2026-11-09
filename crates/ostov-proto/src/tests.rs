@@ -305,3 +305,28 @@ fn broken_input_is_rejected_not_panicking() {
     };
     assert!(api::FieldDef::try_from(bad_kind).is_err());
 }
+
+#[test]
+fn passwords_hidden_in_debug() {
+    let creds = pb::Credentials {
+        login: "boss".into(),
+        password: "secret-password-1".into(),
+    };
+    let user = pb::NewUser {
+        login: "keeper".into(),
+        display_name: String::new(),
+        role: "storekeeper".into(),
+        password: "secret-password-2".into(),
+    };
+    let change = pb::UserPassword {
+        login: "keeper".into(),
+        password: "secret-password-3".into(),
+    };
+    for text in [
+        format!("{creds:?}"),
+        format!("{user:?}"),
+        format!("{change:?}"),
+    ] {
+        assert!(!text.contains("secret"), "{text}");
+    }
+}

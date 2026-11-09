@@ -238,6 +238,21 @@ impl LocalEngine {
         Ok(())
     }
 
+    pub(super) fn run_admin_set_user_password(
+        &self,
+        login: &str,
+        password: &str,
+    ) -> EngineResult<()> {
+        self.need_system(|s| s.admin, "администрирование")?;
+        let mut db = self.db();
+        in_transaction(&mut **db, |db| {
+            let user = ostov_sec::set_password(db, login, &Password::new(password))?;
+            let note = format!("пользователь {}", user.login);
+            self.journal(db, Action::PasswordChanged, "", Some(user.id), &[], &note)
+        })
+        .map_err(error)
+    }
+
     /// Метаданные с правами того, кто вошёл: объекты без права просмотра скрыты, и в меню тоже.
     pub(super) fn run_get_meta(&self) -> EngineResult<Meta> {
         let mut meta = self.config.meta.clone();

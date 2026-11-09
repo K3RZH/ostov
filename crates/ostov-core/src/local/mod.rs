@@ -796,6 +796,12 @@ impl Engine for LocalEngine {
         self.guarded("AdminJournal", || self.run_admin_journal(after_key, size))
     }
 
+    fn admin_set_user_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        self.guarded("AdminSetUserPassword", || {
+            self.run_admin_set_user_password(login, password)
+        })
+    }
+
     fn admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
         self.guarded("AdminSetUserActive", || {
             self.run_admin_set_user_active(login, active)

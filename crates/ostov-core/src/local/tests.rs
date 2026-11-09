@@ -2239,3 +2239,37 @@ fn old_base_with_title_instead_of_name_opens() {
     let info = LocalConnector::default().check_local(&base.path).unwrap();
     assert_eq!(info.config_title, "Склад и кухня");
 }
+
+#[test]
+fn admin_sets_user_password() {
+    let base = Base::new("set-password");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let short = engine.admin_set_user_password("keeper", "short");
+    assert_eq!(short.unwrap_err().code, ErrorCode::Validation);
+    let missing = engine.admin_set_user_password("nobody", "new-password-12");
+    assert_eq!(missing.unwrap_err().code, ErrorCode::NotFound);
+    engine
+        .admin_set_user_password("Keeper", "new-password-12")
+        .unwrap();
+    let entries = engine.admin_journal(None, 10).unwrap();
+    assert_eq!(entries[0].action, "Смена пароля");
+    assert!(!entries[0].details.contains("new-password-12"));
+
+    engine.logout().unwrap();
+    let old = engine.login("keeper", KEEPER_PASSWORD);
+    assert_eq!(old.unwrap_err().code, ErrorCode::BadCredentials);
+    engine.login("keeper", "new-password-12").unwrap();
+    let denied = engine.admin_set_user_password("boss", "keeper-took-it-1");
+    assert_eq!(denied.unwrap_err().code, ErrorCode::Forbidden);
+}

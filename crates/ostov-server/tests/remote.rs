@@ -267,6 +267,39 @@ async fn two_users_at_once_each_with_own_rights() {
     let names: Vec<&str> = meta.objects.iter().map(|o| o.name.as_str()).collect();
     assert_eq!(names, ["goods"]);
 
+    // Смена пароля: кладовщику нельзя; его сессия закрывается, свою администратор не теряет.
+    let password = |login: &str, password: &str| pb::UserPassword {
+        login: login.into(),
+        password: password.into(),
+    };
+    let denied = error(
+        c.admin_set_user_password(authed(password("boss", "keeper-took-it-1"), &keeper))
+            .await,
+    );
+    assert_eq!(denied.code, ErrorCode::Forbidden);
+    c.admin_set_user_password(authed(password("keeper", "keeper-password-2"), &boss))
+        .await
+        .unwrap();
+    assert_eq!(
+        error(c.list(authed(list("goods"), &keeper)).await).code,
+        ErrorCode::BadCredentials
+    );
+    assert_eq!(
+        error(c.login(creds(KEEPER)).await).code,
+        ErrorCode::BadCredentials
+    );
+    let keeper = c
+        .login(creds(("keeper", "keeper-password-2")))
+        .await
+        .unwrap()
+        .into_inner()
+        .token;
+    c.admin_set_user_password(authed(password("boss", "admin-password-2"), &boss))
+        .await
+        .unwrap();
+    c.list(authed(list("goods"), &boss)).await.unwrap();
+    c.list(authed(list("goods"), &keeper)).await.unwrap();
+
     // Отключённый выходит сразу, а администратор работает дальше.
     c.admin_set_user_active(authed(
         pb::UserActive {

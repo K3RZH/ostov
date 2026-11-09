@@ -327,6 +327,18 @@ impl Engine for RemoteEngine {
         Ok(())
     }
 
+    fn admin_set_user_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        let u = pb::UserPassword {
+            login: login.to_owned(),
+            password: password.to_owned(),
+        };
+        self.call(
+            u,
+            |mut c, r| async move { c.admin_set_user_password(r).await },
+        )?;
+        Ok(())
+    }
+
     fn admin_journal(&self, after_key: Option<&str>, size: u32) -> EngineResult<Vec<JournalEntry>> {
         let j = pb::JournalRequest {
             after_key: after_key.map(str::to_owned),
