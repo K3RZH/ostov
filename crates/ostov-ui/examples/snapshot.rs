@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ostov_ui::app::refresh(&window, &shell);
             ostov_ui::app::refresh_users(&window, &ostov_ui::users::Directory::demo());
             window.set_roles(ModelRc::new(VecModel::from(
-                ["admin", "storekeeper"]
+                ["Кладовщик", "Администратор"]
                     .map(slint::SharedString::from)
                     .to_vec(),
             )));

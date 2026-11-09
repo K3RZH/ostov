@@ -8,7 +8,7 @@ use std::sync::Arc;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::engine::{
-    Engine, EngineResult, Meta, NewAdmin, NewUser, SessionInfo, call_in_background,
+    Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, call_in_background,
 };
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
@@ -176,7 +176,7 @@ pub fn refresh_users(window: &AppWindow, directory: &Directory) {
         .map(|user| UserRow {
             login: user.login.as_str().into(),
             name: user.display_name.as_str().into(),
-            role: user.role.as_str().into(),
+            role: directory.role_title(&user.role).into(),
             active: user.active,
         })
         .collect();
@@ -282,7 +282,7 @@ fn add_recent(app: &AppWindow, db: RecentDb) {
 }
 
 /// Пользователь в шапке: имя из сессии ядра. База без пользователей вход не спрашивает.
-fn show_user(app: &AppWindow, user: Option<&SessionInfo>) {
+fn show_user(app: &AppWindow, user: Option<&SessionInfo>, roles: &[RoleInfo]) {
     let name = user.map(|user| {
         if user.display_name.trim().is_empty() {
             user.login.as_str()
@@ -295,7 +295,18 @@ fn show_user(app: &AppWindow, user: Option<&SessionInfo>) {
     app.set_user_roles_text(
         user.map_or(
             "База без пользователей".to_owned(),
-            |user| user.roles.join(", "),
+            |user| {
+                user.roles
+                    .iter()
+                    .map(|name| {
+                        roles
+                            .iter()
+                            .find(|role| role.name == *name)
+                            .map_or(name.as_str(), |role| role.title.as_str())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
         )
         .into(),
     );
@@ -406,12 +417,14 @@ struct Session {
     logged_in: bool,
 }
 
-/// Встроенная роль администратора в ядре (`ostov-model`).
+/// Встроенная роль администратора платформы (`ostov-model`). Нужна только чтобы предложить её
+/// первой при создании первого пользователя; кто что может, решают права, их проверяет ядро.
 const ADMIN_ROLE: &str = "admin";
 
-/// База без пользователей пускает без входа, там пользователь и есть администратор.
+/// «Администрирование» видит тот, у чьей роли есть системное право `admin`. База без
+/// пользователей пускает без входа, там пользователь и есть администратор.
 fn is_admin(user: Option<&SessionInfo>) -> bool {
-    user.is_none_or(|user| user.roles.iter().any(|role| role == ADMIN_ROLE))
+    user.is_none_or(|user| user.system.admin)
 }
 
 /// Экраны главной страницы, которым нужна открытая база.
@@ -430,13 +443,26 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
         Some(engine) => screens.receipts.attach(engine.clone()),
         None => screens.receipts.show_error("База не открыта."),
     }
-    let roles = session.meta.as_ref().map_or_else(Vec::new, |meta| {
-        meta.roles
-            .iter()
-            .map(|role| role.name.as_str().into())
-            .collect()
-    });
-    app.set_roles(ModelRc::new(VecModel::<slint::SharedString>::from(roles)));
+    let roles = session
+        .meta
+        .as_ref()
+        .map_or(&[][..], |meta| &meta.roles[..]);
+    let titles: Vec<slint::SharedString> = roles
+        .iter()
+        .map(|role| role.title.as_str().into())
+        .collect();
+    app.set_roles(ModelRc::new(VecModel::from(titles)));
+    // В базе без пользователей первым нужен администратор: предлагаем его роль сразу.
+    let default_role = if session.logged_in {
+        None
+    } else {
+        roles.iter().position(|role| role.name == ADMIN_ROLE)
+    };
+    app.set_nu_role(
+        default_role
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(0),
+    );
     screens.users.clear();
     if session.admin {
         screens.users.reload(app);
@@ -489,7 +515,7 @@ fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, scr
                 ..Session::default()
             };
             if kind == LoginKind::None {
-                show_user(&app, None);
+                show_user(&app, None, &[]);
                 enter_main(&app, &screens, &session.borrow());
                 return;
             }
@@ -618,7 +644,7 @@ fn submit_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Scree
                     if !first_run {
                         crate::recent::remember_login(&key, remember.as_deref());
                     }
-                    show_user(&app, Some(&user));
+                    show_user(&app, Some(&user), &meta.roles);
                     {
                         let mut session = session.borrow_mut();
                         session.meta = Some(meta);
@@ -685,14 +711,14 @@ fn reset_create(app: &AppWindow) {
     app.set_creating(false);
 }
 
-/// Проверяет добавляемый файл ядром (это база Ostov, её можно открыть) и закрывает его.
+/// Проверяет добавляемый файл ядром (`check_local`: база Ostov нужной конфигурации) без записи в него.
 fn add_local(app: &AppWindow, db: RecentDb) {
     let path = db.path.to_string();
     app.set_add_error("".into());
     app.set_add_busy(true);
     let weak = app.as_weak();
     call_in_background(
-        move || crate::local_base::open(&path).map(|_| ()),
+        move || crate::local_base::check(&path).map(|_| ()),
         move |result| {
             let Some(app) = weak.upgrade() else { return };
             app.set_add_busy(false);
@@ -1272,7 +1298,14 @@ impl UsersUi {
                 let Some(window) = weak.upgrade() else { return };
                 match result {
                     Ok(list) => {
-                        *users.directory.borrow_mut() = Directory::new(list);
+                        let roles = users
+                            .session
+                            .borrow()
+                            .meta
+                            .as_ref()
+                            .map(|meta| meta.roles.clone())
+                            .unwrap_or_default();
+                        *users.directory.borrow_mut() = Directory::new(list, roles);
                         users.show_all();
                         done(&window, Ok(()));
                     }
@@ -1338,30 +1371,28 @@ fn wire_users(window: &AppWindow, users: &UsersUi) {
             let Some(window) = window.upgrade() else {
                 return;
             };
-            let Some(role) =
-                index(window.get_nu_role()).and_then(|i| window.get_roles().row_data(i))
-            else {
+            // Команде нужно имя роли, а в окне заголовки: имя берём из метаданных по номеру.
+            let role = index(window.get_nu_role()).and_then(|i| {
+                users
+                    .session
+                    .borrow()
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.roles.get(i).map(|role| role.name.clone()))
+            });
+            let Some(role) = role else {
                 window.set_user_error("Выберите роль.".into());
                 return;
             };
-            // В базе без пользователей первый добавленный включает вход: если он не
-            // администратор, управлять пользователями станет некому.
+            // В базе без пользователей первый добавленный включает вход. Что первым должен быть
+            // администратор, проверяет ядро, его ошибка видна в окне.
             let first = !users.session.borrow().logged_in;
-            if first && role != ADMIN_ROLE {
-                window.set_user_error(
-                    format!(
-                        "Первым добавьте администратора (роль «{ADMIN_ROLE}»): после этого база будет спрашивать вход."
-                    )
-                    .into(),
-                );
-                return;
-            }
             let login = window.get_nu_login().trim().to_owned();
             let name = window.get_nu_name().trim().to_owned();
             let user = NewUser {
                 display_name: if name.is_empty() { login.clone() } else { name },
                 login,
-                role: role.to_string(),
+                role,
                 password: window.get_nu_password().to_string(),
             };
             window.set_user_error("".into());
@@ -1397,6 +1428,7 @@ fn quit_on_close() -> slint::CloseRequestResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::SystemRights;
 
     #[test]
     fn initials_take_two_first_letters() {
@@ -1434,13 +1466,17 @@ mod tests {
     #[test]
     fn base_without_users_is_admin() {
         assert!(is_admin(None));
-        let user = |roles: &[&str]| SessionInfo {
+        let user = |admin: bool| SessionInfo {
             login: "u".into(),
             display_name: "".into(),
-            roles: roles.iter().map(|role| (*role).to_owned()).collect(),
-            system: Default::default(),
+            roles: vec!["any".into()],
+            system: SystemRights {
+                admin,
+                ..SystemRights::default()
+            },
         };
-        assert!(is_admin(Some(&user(&["admin"]))));
-        assert!(!is_admin(Some(&user(&["storekeeper"]))));
+        // Право, а не имя роли: роль из конфигурации с `system.admin` тоже видит раздел.
+        assert!(is_admin(Some(&user(true))));
+        assert!(!is_admin(Some(&user(false))));
     }
 }

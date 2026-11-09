@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ostov_api::{Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
+use ostov_api::{BaseInfo, Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
 use ostov_core::LocalConnector;
 
 /// Название и версия встроенной конфигурации для стартовой страницы.
@@ -24,6 +24,38 @@ fn connector() -> EngineResult<LocalConnector> {
         )
     })?;
     Ok(LocalConnector::new(config))
+}
+
+/// Что за база в этом файле, не открывая и не записывая в него (для «Добавить существующую»).
+/// База другой конфигурации не подходит: программа сейчас работает только со встроенной «Склад».
+///
+/// # Errors
+/// Ошибки ядра как есть: файла нет (`NotFound`), это не база Ostov (`Incompatible`), база другой
+/// конфигурации (`Incompatible` с её названием).
+pub fn check(path: &str) -> EngineResult<BaseInfo> {
+    let info = connector()?.check_local(&expand_home(path))?;
+    let (title, _) = config_title().unwrap_or_default();
+    ensure_embedded_config(&info, &config_name(), &title)?;
+    Ok(info)
+}
+
+fn config_name() -> String {
+    ostov_meta::demo()
+        .map(|config| config.name)
+        .unwrap_or_default()
+}
+
+fn ensure_embedded_config(info: &BaseInfo, name: &str, title: &str) -> EngineResult<()> {
+    if info.config_name == name {
+        return Ok(());
+    }
+    Err(EngineError::new(
+        ErrorCode::Incompatible,
+        format!(
+            "Это база конфигурации «{}», а программа работает с «{title}».",
+            info.config_title
+        ),
+    ))
 }
 
 /// Открывает файл базы.
@@ -86,6 +118,62 @@ mod tests {
         assert!(
             matches!(hello, Ok(ref info) if !info.login_required),
             "{hello:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn info(name: &str, title: &str) -> BaseInfo {
+        BaseInfo {
+            config_name: name.into(),
+            config_title: title.into(),
+            file_password: false,
+            login_required: false,
+        }
+    }
+
+    #[test]
+    fn other_configuration_is_refused_with_its_title() {
+        assert!(ensure_embedded_config(&info("warehouse", "Склад"), "warehouse", "Склад").is_ok());
+        let error = ensure_embedded_config(&info("cafe", "Кафе"), "warehouse", "Склад").err();
+        assert!(
+            matches!(error, Some(ref e) if e.code == ErrorCode::Incompatible
+            && e.message.contains("«Кафе»") && e.message.contains("«Склад»")),
+            "{error:?}"
+        );
+    }
+
+    // «Добавить существующую» не должна менять чужой файл (просьба Артёма, ядро: check_local).
+    #[test]
+    fn check_reads_base_without_changing_the_file() {
+        let (dir, path) = temp_base("check");
+        assert!(create(&path, None, None).is_ok());
+        let before = std::fs::read(&path).unwrap_or_default();
+        let checked = check(&path);
+        assert!(
+            matches!(checked, Ok(ref i) if !i.login_required),
+            "{checked:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn check_reports_missing_and_foreign_files() {
+        let (dir, path) = temp_base("check-bad");
+        let missing = check(&path);
+        assert!(
+            matches!(missing, Err(ref e) if e.code == ErrorCode::NotFound),
+            "{missing:?}"
+        );
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            &path,
+            "это не база данных, просто текст на много байт".repeat(50),
+        );
+        let foreign = check(&path);
+        assert!(
+            matches!(foreign, Err(ref e) if e.code == ErrorCode::Incompatible),
+            "{foreign:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
