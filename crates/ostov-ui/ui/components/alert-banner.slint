@@ -1,0 +1,58 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button } from "button.slint";
+import { IconButton } from "icon-button.slint";
+import { DocLink, DocLinkText } from "doc-link.slint";
+
+// Полоса ошибки или предупреждения: текст, документы ссылками, кнопка действия или крестик.
+export component AlertBanner inherits Rectangle {
+    in property <string> text;
+    in property <[DocLink]> links;
+    in property <bool> closable;
+    in property <string> action-text;
+    callback dismissed();
+    callback action();
+    callback link-clicked(string, int);
+
+    border-radius: Shape.surface-radius;
+    background: Theme.danger-soft;
+    height: content.preferred-height;
+
+    content := VerticalLayout {
+        padding: Theme.space-8;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: root.text;
+                font-size: Theme.font-body;
+                color: Theme.danger;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if root.action-text != "" : Button {
+                text: root.action-text;
+                clicked => { root.action(); }
+            }
+            if root.closable : IconButton {
+                icon: "close";
+                control-size: 24px;
+                clicked => { root.dismissed(); }
+            }
+        }
+        if root.links.length > 0 : HorizontalLayout {
+            alignment: start;
+            spacing: Theme.space-12;
+            Text {
+                text: "Документы:";
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            for link in root.links : DocLinkText {
+                text: link.title;
+                clicked => { root.link-clicked(link.kind, link.number); }
+            }
+        }
+    }
+}
