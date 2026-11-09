@@ -18,6 +18,7 @@ pub mod date_input;
 pub mod engine;
 pub mod grid;
 pub mod local_base;
+pub mod object_list;
 pub mod receipts;
 pub mod receipts_ui;
 pub mod recent;

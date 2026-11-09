@@ -37,7 +37,7 @@ const NEW_DOC_DATE: (u16, u8, u8) = (2026, 10, 29);
 /// Объект списка в ядре и поля сортировки по колонкам (порядок как у `receipts::COLUMNS`).
 /// Ссылочные колонки ядро сортирует по названию.
 const OBJECT: &str = "receipt";
-const COLUMN_FIELDS: [&str; 6] = [
+pub(crate) const COLUMN_FIELDS: [&str; 6] = [
     "number",
     "date",
     "supplier",
@@ -1178,7 +1178,7 @@ fn grid_row(cells: Vec<String>, muted: bool) -> GridRow {
     }
 }
 
-fn list_columns() -> Vec<GridColumn> {
+pub(crate) fn list_columns() -> Vec<GridColumn> {
     COLUMNS
         .iter()
         .enumerate()
