@@ -56,6 +56,31 @@ pub struct NavRowData {
     pub favorite: bool,
 }
 
+/// Документ или элемент во вкладке и в состоянии форм: объект конфигурации и `id` в ядре.
+/// Номер документа сюда не входит: он только для заголовка, а у разных объектов совпадает.
+///
+/// У ещё не записанного документа `id` временный и отрицательный (ядро таких не выдаёт);
+/// после записи ключ заменяется на настоящий `id` из ответа ядра.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocKey {
+    pub object: String,
+    pub id: i64,
+}
+
+impl DocKey {
+    pub fn new(object: &str, id: i64) -> Self {
+        Self {
+            object: object.to_owned(),
+            id,
+        }
+    }
+
+    /// Документ ещё не записан в ядро.
+    pub fn is_temporary(&self) -> bool {
+        self.id < 0
+    }
+}
+
 /// Открытая вкладка: пункт навигации или документ в нём (`doc`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
@@ -63,8 +88,8 @@ pub struct Tab {
     pub icon: &'static str,
     pub node: usize,
     pub view: &'static str,
-    /// Номер документа, если вкладка открывает документ, а не весь пункт.
-    pub doc: Option<u32>,
+    /// Документ, если вкладка открывает документ, а не весь пункт.
+    pub doc: Option<DocKey>,
     /// Вкладка предпросмотра: следующее открытие без изменений заменит её.
     pub preview: bool,
     /// В документе есть несохранённые изменения; такая вкладка закреплена.
@@ -367,7 +392,7 @@ impl Shell {
     fn open_tab(
         &mut self,
         node: usize,
-        doc: Option<u32>,
+        doc: Option<DocKey>,
         title: String,
         view: &'static str,
         after: Option<usize>,
@@ -405,7 +430,7 @@ impl Shell {
 
     /// Открывает документ пункта `node` в своей вкладке. Если документ открыт из списка этого
     /// пункта, вкладка списка закрепляется (документ её не заменяет) и документ встаёт рядом.
-    pub fn open_doc(&mut self, node: usize, doc: u32, title: String, view: &'static str) {
+    pub fn open_doc(&mut self, node: usize, doc: DocKey, title: String, view: &'static str) {
         let parent = self
             .tabs
             .iter()
@@ -433,25 +458,31 @@ impl Shell {
         }
     }
 
-    /// Ядро назначило документу другой номер: вкладка следует за ним.
-    pub fn renumber_doc(&mut self, old: u32, new: u32) {
+    /// Документ записан и получил настоящий ключ вместо временного: вкладка следует за ним.
+    pub fn rekey_doc(&mut self, old: &DocKey, new: &DocKey) {
         for tab in &mut self.tabs {
-            if tab.doc == Some(old) {
-                tab.doc = Some(new);
+            if tab.doc.as_ref() == Some(old) {
+                tab.doc = Some(new.clone());
             }
         }
     }
 
-    pub fn doc_tab(&self, doc: u32) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.doc == Some(doc))
+    pub fn doc_tab(&self, doc: &DocKey) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.doc.as_ref() == Some(doc))
     }
 
-    pub fn active_doc(&self) -> Option<u32> {
-        self.tabs.get(self.active).and_then(|tab| tab.doc)
+    pub fn active_doc(&self) -> Option<&DocKey> {
+        self.tabs.get(self.active).and_then(|tab| tab.doc.as_ref())
     }
 
-    pub fn set_doc_title(&mut self, doc: u32, title: String) {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc == Some(doc)) {
+    pub fn set_doc_title(&mut self, doc: &DocKey, title: String) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.doc.as_ref() == Some(doc))
+        {
             tab.title = title;
         }
     }
@@ -489,7 +520,7 @@ impl Shell {
         } else if self.active == index {
             // Закрыли документ: возвращаемся к списку, из которого его открыли. Иначе встаёт
             // соседняя вкладка.
-            let parent = closed.doc.and_then(|_| {
+            let parent = closed.doc.as_ref().and_then(|_| {
                 self.tabs
                     .iter()
                     .position(|t| t.node == closed.node && t.doc.is_none())
@@ -502,6 +533,10 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn receipt(id: i64) -> DocKey {
+        DocKey::new("receipt", id)
+    }
 
     fn ids(shell: &Shell) -> Vec<usize> {
         shell.nav_rows().iter().map(|row| row.id).collect()
@@ -680,13 +715,13 @@ mod tests {
     fn document_opened_from_list_keeps_the_list_tab() {
         let mut shell = Shell::demo();
         shell.click(3);
-        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
+        shell.open_doc(3, receipt(1998), "Поступление № 1998".into(), "receipt");
         // «Главная», список (закреплён) и документ рядом с ним.
         assert_eq!(shell.tabs().len(), 3);
         assert!(!shell.tabs()[1].preview);
-        assert_eq!(shell.active_doc(), Some(1998));
+        assert_eq!(shell.active_doc(), Some(&receipt(1998)));
         // Другой документ без изменений заменяет первый, а не добавляет вкладку.
-        shell.open_doc(3, 1997, "Поступление № 1997".into(), "receipt");
+        shell.open_doc(3, receipt(1997), "Поступление № 1997".into(), "receipt");
         assert_eq!(shell.tabs().len(), 3);
         // Закрытие документа возвращает к списку.
         shell.close_tab(2);
@@ -698,10 +733,41 @@ mod tests {
     #[test]
     fn same_document_is_selected_not_duplicated() {
         let mut shell = Shell::demo();
-        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
-        shell.open_doc(3, 1998, "Поступление № 1998".into(), "receipt");
+        shell.open_doc(3, receipt(1998), "Поступление № 1998".into(), "receipt");
+        shell.open_doc(3, receipt(1998), "Поступление № 1998".into(), "receipt");
         assert_eq!(shell.tabs().len(), 2);
-        assert_eq!(shell.active_doc(), Some(1998));
+        assert_eq!(shell.active_doc(), Some(&receipt(1998)));
+    }
+
+    #[test]
+    fn tab_follows_document_from_temporary_to_saved_key() {
+        let mut shell = Shell::demo();
+        let temporary = receipt(-1);
+        assert!(temporary.is_temporary());
+        shell.open_doc(3, temporary.clone(), "Новое поступление".into(), "receipt");
+        let saved = receipt(51);
+        shell.rekey_doc(&temporary, &saved);
+        assert_eq!(shell.doc_tab(&temporary), None);
+        assert_eq!(shell.doc_tab(&saved), Some(shell.active_tab()));
+        assert_eq!(shell.active_doc(), Some(&saved));
+    }
+
+    #[test]
+    fn documents_of_different_objects_with_same_id_are_separate_tabs() {
+        let mut shell = Shell::demo();
+        let (incoming, outgoing) = (receipt(5), DocKey::new("issue", 5));
+        shell.open_doc(3, incoming.clone(), "Поступление № 5".into(), "receipt");
+        shell.pin_tab(shell.active_tab());
+        shell.open_doc(4, outgoing.clone(), "Расход № 5".into(), "");
+        assert_eq!(shell.tabs().len(), 3);
+        assert_ne!(shell.doc_tab(&incoming), shell.doc_tab(&outgoing));
+        shell.set_doc_title(&outgoing, "Расход № 5 от 01.01.2026".into());
+        let title_of = |key: &DocKey| shell.doc_tab(key).map(|i| shell.tabs()[i].title.clone());
+        assert_eq!(title_of(&incoming).as_deref(), Some("Поступление № 5"));
+        assert_eq!(
+            title_of(&outgoing).as_deref(),
+            Some("Расход № 5 от 01.01.2026")
+        );
     }
 
     #[test]

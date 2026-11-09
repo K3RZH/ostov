@@ -19,7 +19,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use crate::engine::call_in_background;
 use crate::grid;
 use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt};
-use crate::shell::Shell;
+use crate::shell::{DocKey, Shell};
 use crate::sorting::Sorting;
 use crate::values;
 use crate::windows::Windows;
@@ -163,7 +163,9 @@ struct State {
     /// Сколько строк в списке по текущему запросу (для подписи «Показано N из M»).
     total_all: usize,
     next_number: u32,
-    docs: HashMap<u32, DocState>,
+    /// Последний выданный временный `id` нового документа (они идут вниз от -1).
+    last_temporary: i64,
+    docs: HashMap<DocKey, DocState>,
     /// Состояние формы окна, которому сейчас служит обработчик (см. `form_state`).
     form: FormCtx,
     /// Главное окно: все окна показывают один и тот же список.
@@ -171,7 +173,7 @@ struct State {
     /// Дополнительные окна с вкладками и состояние их форм.
     hosts: HashMap<WindowId, HostWindow>,
     /// Какие документы открыты во вкладках какого окна: документ живёт, пока открыт хотя бы в одном.
-    tab_docs: HashMap<WindowRef, HashSet<u32>>,
+    tab_docs: HashMap<WindowRef, HashSet<DocKey>>,
     /// Номера документов со своей вехой пользователя (в списке они не зависят от сортировки).
     marks: HashSet<u32>,
     /// Сколько показывать сообщение об ошибке действия над списком.
@@ -451,7 +453,7 @@ fn load_catalogs(engine: &dyn Engine) -> EngineResult<Catalogs> {
 #[derive(Default)]
 struct FormCtx {
     /// Документ, поля которого сейчас в форме.
-    loaded: Option<u32>,
+    loaded: Option<DocKey>,
     /// Какая строка правится в окне строки (`None`: добавляется новая).
     editing_line: Option<usize>,
     /// Справочник, в который добавляют элемент (кнопка «+ Добавить» в выпадающем списке).
@@ -619,11 +621,32 @@ fn all_windows(state: &State) -> Vec<AppWindow> {
 
 impl State {
     /// Окно, в котором документ открыт во вкладке.
-    fn owner_of(&self, number: u32) -> Option<Target> {
+    fn owner_of(&self, key: &DocKey) -> Option<Target> {
         self.tab_docs
             .iter()
-            .find(|(_, docs)| docs.contains(&number))
+            .find(|(_, docs)| docs.contains(key))
             .map(|(target, _)| *target)
+    }
+
+    /// Ключ для нового документа, пока ядро не дало ему `id`.
+    fn temporary_key(&mut self) -> DocKey {
+        self.last_temporary = self.last_temporary.saturating_sub(1);
+        DocKey::new(OBJECT, self.last_temporary)
+    }
+
+    /// Поступление по номеру (ссылки в предупреждении ядра называют документ номером): строка
+    /// списка или уже открытый документ, которого в списке может не быть из-за поиска.
+    fn key_of_number(&self, number: u32) -> Option<DocKey> {
+        self.all
+            .iter()
+            .find(|r| r.number == number)
+            .map(|r| DocKey::new(OBJECT, r.id))
+            .or_else(|| {
+                self.docs
+                    .iter()
+                    .find(|(_, doc)| doc.number == number)
+                    .map(|(key, _)| key.clone())
+            })
     }
 
     /// Показанные строки: и порядок, и поиск делает ядро.
@@ -749,7 +772,8 @@ fn post_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32, post:
     ) else {
         return;
     };
-    let id = receipt.id;
+    let key = DocKey::new(OBJECT, receipt.id);
+    let id = key.id;
     let state_rc = state_rc.clone();
     call_in_background(
         move || {
@@ -764,11 +788,11 @@ fn post_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u32, post:
             match result {
                 Ok(saved) => {
                     show_notice(&state, "");
-                    set_posted(&mut state, number, post);
-                    if let Some(doc) = state.docs.get_mut(&number) {
+                    set_posted(&mut state, &key, post);
+                    if let Some(doc) = state.docs.get_mut(&key) {
                         doc.version = saved.version;
                     }
-                    if let Some(index) = state.all.iter().position(|r| r.number == number) {
+                    if let Some(index) = state.all.iter().position(|r| r.id == key.id) {
                         update_row(&state, index);
                     }
                 }
@@ -841,7 +865,7 @@ fn mark_deleted_in_core(state_rc: &Rc<RefCell<State>>, state: &State, number: u3
             match result {
                 Ok(saved) => {
                     show_notice(&state, "");
-                    if let Some(doc) = state.docs.values_mut().find(|doc| doc.id == id) {
+                    if let Some(doc) = state.docs.get_mut(&DocKey::new(OBJECT, id)) {
                         doc.version = saved.version;
                         doc.deleted = deleted;
                     }
@@ -1396,11 +1420,11 @@ fn form_date(data: &ReceiptsData<'_>) -> String {
 
 /// Сохраняет поля формы на экране в состояние её документа.
 fn store_form(app: &AppWindow, state: &mut State) {
-    let Some(number) = state.form.loaded else {
+    let Some(key) = &state.form.loaded else {
         return;
     };
     let data = app.global::<ReceiptsData>();
-    if let Some(doc) = state.docs.get_mut(&number) {
+    if let Some(doc) = state.docs.get_mut(key) {
         doc.content.supplier = data.get_form_supplier().to_string();
         doc.content.warehouse = data.get_form_warehouse().to_string();
         doc.content.date = form_date(&data);
@@ -1447,12 +1471,12 @@ fn fill_form(app: &AppWindow, doc: &DocState) {
 }
 
 /// Загружает документ в форму на экране.
-fn load_doc(app: &AppWindow, state: &mut State, number: u32) {
-    let Some(doc) = state.docs.get(&number) else {
+fn load_doc(app: &AppWindow, state: &mut State, key: DocKey) {
+    let Some(doc) = state.docs.get(&key) else {
         return;
     };
     fill_form(app, doc);
-    state.form.loaded = Some(number);
+    state.form.loaded = Some(key);
 }
 
 /// Значения выпадающих списков (справочники) в окне `app`.
@@ -1472,9 +1496,9 @@ fn publish_all(state: &State) {
 
 fn before(app: &AppWindow, state: &mut State, tabs: &mut dyn DocTabs) {
     store_form(app, state);
-    if let Some(number) = state.form.loaded {
-        let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
-        if let Some(tab) = tabs.tab_of_doc(number).filter(|_| modified) {
+    if let Some(key) = &state.form.loaded {
+        let modified = state.docs.get(key).is_some_and(DocState::is_modified);
+        if let Some(tab) = tabs.tab_of_doc(key).filter(|_| modified) {
             tabs.set_tab_modified(tab, true);
         }
     }
@@ -1483,14 +1507,14 @@ fn before(app: &AppWindow, state: &mut State, tabs: &mut dyn DocTabs) {
 /// Забывает документы, которые не открыты ни в одном окне.
 fn forget_closed(state: &mut State) {
     let State { docs, tab_docs, .. } = state;
-    docs.retain(|number, _| tab_docs.values().any(|open| open.contains(number)));
+    docs.retain(|key, _| tab_docs.values().any(|open| open.contains(key)));
 }
 
 /// Вкладка показывает, изменён ли её документ: вкладка могла приехать из другого окна.
 fn mark_modified(state: &State, tabs: &mut dyn DocTabs) {
-    for number in tabs.documents() {
-        let modified = state.docs.get(&number).is_some_and(DocState::is_modified);
-        if let Some(tab) = tabs.tab_of_doc(number) {
+    for key in tabs.documents() {
+        let modified = state.docs.get(&key).is_some_and(DocState::is_modified);
+        if let Some(tab) = tabs.tab_of_doc(&key) {
             tabs.set_tab_modified(tab, modified);
         }
     }
@@ -1501,9 +1525,11 @@ fn after(app: &AppWindow, state: &mut State, tabs: &dyn DocTabs, target: Target)
     forget_closed(state);
     match tabs
         .active_document()
-        .filter(|n| state.docs.contains_key(n))
+        .filter(|key| state.docs.contains_key(*key))
     {
-        Some(number) if state.form.loaded != Some(number) => load_doc(app, state, number),
+        Some(key) if state.form.loaded.as_ref() != Some(key) => {
+            load_doc(app, state, key.clone());
+        }
         Some(_) => {}
         None => state.form.loaded = None,
     }
@@ -1529,65 +1555,59 @@ fn update_row(state: &State, index: usize) {
 }
 
 /// Проводит документ из списка или отменяет проведение; открытый документ получает тот же статус.
-fn set_posted(state: &mut State, number: u32, posted: bool) {
-    if let Some(receipt) = state.all.iter_mut().find(|r| r.number == number) {
+fn set_posted(state: &mut State, key: &DocKey, posted: bool) {
+    if let Some(receipt) = state.all.iter_mut().find(|r| r.id == key.id) {
         receipt.posted = posted;
     }
-    if let Some(doc) = state.docs.get_mut(&number) {
+    if let Some(doc) = state.docs.get_mut(key) {
         doc.posted = posted;
     }
-    let Some(doc) = state.docs.get(&number) else {
+    let Some(doc) = state.docs.get(key) else {
         return;
     };
-    if state.form.loaded == Some(number)
+    if state.form.loaded.as_ref() == Some(key)
         && let Some(main) = state.main.upgrade()
     {
         show_status(&main, doc);
     }
     for host in state.hosts.values() {
-        if host.form.loaded == Some(number) {
+        if host.form.loaded.as_ref() == Some(key) {
             show_status(&host.window, doc);
         }
     }
 }
 
-/// Открывает документ в своей вкладке окна `target` (создаёт его состояние, если вкладки ещё нет).
-/// `(node, number)`: пункт навигации поступлений и номер документа.
+/// Открывает документ в своей вкладке окна `target`; записанный читается из ядра, если вкладки
+/// ещё нет. Новый документ (временный ключ) кладёт в `docs` тот, кто его создал.
+/// `(node, key)`: пункт навигации поступлений и документ.
 fn open_doc(
     app: &AppWindow,
     state: &mut State,
     tabs: &mut dyn DocTabs,
-    (node, number): (usize, u32),
+    (node, key): (usize, DocKey),
     target: Target,
 ) {
     before(app, state, tabs);
-    if !state.docs.contains_key(&number) {
-        let doc = match state.all.iter().find(|r| r.number == number).map(|r| r.id) {
-            Some(id) => match fetch_doc(state, id) {
-                Ok(doc) => doc,
-                Err(error) => {
-                    show_notice(state, &error.message);
-                    return;
-                }
-            },
-            None => DocState::new_document(
-                number,
-                state
-                    .catalogs
-                    .warehouses
-                    .first()
-                    .map(|(_, name)| name.clone())
-                    .unwrap_or_default(),
-            ),
-        };
-        state.docs.insert(number, doc);
+    if !state.docs.contains_key(&key) {
+        if key.is_temporary() {
+            return;
+        }
+        match fetch_doc(state, key.id) {
+            Ok(doc) => {
+                state.docs.insert(key.clone(), doc);
+            }
+            Err(error) => {
+                show_notice(state, &error.message);
+                return;
+            }
+        }
     }
     let title = state
         .docs
-        .get(&number)
+        .get(&key)
         .map(DocState::title)
         .unwrap_or_default();
-    tabs.open_document(node, number, title, "receipt");
+    tabs.open_document(node, key, title, "receipt");
     after(app, state, tabs, target);
 }
 
@@ -1601,13 +1621,13 @@ fn open_from_list(
     main: &AppWindow,
     state: &Rc<RefCell<State>>,
     tabs: &Tabs,
-    number: u32,
+    key: DocKey,
     new_tab: bool,
 ) {
-    let owner = state.borrow().owner_of(number);
+    let owner = state.borrow().owner_of(&key);
     if let Some(owner) = owner.filter(|owner| *owner != tabs.target) {
         if let Some(windows) = tabs.windows() {
-            windows.show_doc(main, &tabs.shell, owner, number);
+            windows.show_doc(main, &tabs.shell, owner, &key);
         }
         return;
     }
@@ -1623,7 +1643,7 @@ fn open_from_list(
             app,
             &mut form_state(state, tabs.target),
             list,
-            (node, number),
+            (node, key),
             tabs.target,
         );
         if new_tab {
@@ -1644,13 +1664,10 @@ fn open_link(
     kind: &str,
     number: u32,
 ) {
-    if kind == "receipt" {
-        let known = {
-            let state = state.borrow();
-            state.docs.contains_key(&number) || state.all.iter().any(|r| r.number == number)
-        };
-        if known {
-            open_from_list(app, main, state, tabs, number, true);
+    if kind == OBJECT {
+        let key = state.borrow().key_of_number(number);
+        if let Some(key) = key {
+            open_from_list(app, main, state, tabs, key, true);
         } else {
             show_notice(
                 &state.borrow(),
@@ -1686,12 +1703,13 @@ fn save_loaded(
     action: PostAction,
 ) -> EngineResult<()> {
     store_form(app, state);
-    let Some(number) = state.form.loaded else {
+    let Some(key) = state.form.loaded.clone() else {
         return Ok(());
     };
-    let Some(doc) = state.docs.get(&number) else {
+    let Some(doc) = state.docs.get(&key) else {
         return Ok(());
     };
+    let number = doc.number;
     let engine = state.engine.clone().ok_or_else(no_engine)?;
     let data = to_object(doc, &state.catalogs)
         .map_err(|text| EngineError::new(ErrorCode::Validation, text))?;
@@ -1702,19 +1720,10 @@ fn save_loaded(
     })?;
     let row = receipt_from_object(&loaded, &fresh);
 
-    // Новому документу ядро могло дать номер, отличный от временного: вкладка следует за ним.
-    let mut key = number;
-    if loaded.number != number {
-        if let Some(doc) = state.docs.remove(&number) {
-            state.docs.insert(loaded.number, doc);
-        }
-        state.form.loaded = Some(loaded.number);
-        tabs.renumber(number, loaded.number);
-        key = loaded.number;
-    }
+    // Новый документ получил `id` в ядре: временный ключ меняется на настоящий, вкладка следует.
+    let key = adopt_saved_key(state, tabs, key, saved.id);
     state.next_number = state.next_number.max(loaded.number + 1);
     let title = loaded.title();
-    state.docs.insert(key, loaded);
     match state
         .all
         .iter()
@@ -1726,11 +1735,29 @@ fn save_loaded(
             state.total_all += 1;
         }
     }
-    if let Some(tab) = tabs.tab_of_doc(key) {
+    if let Some(tab) = tabs.tab_of_doc(&key) {
         tabs.set_tab_modified(tab, false);
     }
-    tabs.set_title_of_doc(key, title);
+    tabs.set_title_of_doc(&key, title);
+    state.docs.insert(key, loaded);
     Ok(())
+}
+
+/// Ключ документа после записи: у нового временный ключ меняется на `id` из ответа ядра в `docs`,
+/// в форме и во вкладке окна `tabs`. Записанный документ свой ключ сохраняет.
+fn adopt_saved_key(state: &mut State, tabs: &mut dyn DocTabs, key: DocKey, id: i64) -> DocKey {
+    if key.id == id {
+        return key;
+    }
+    let saved = DocKey::new(&key.object, id);
+    if let Some(doc) = state.docs.remove(&key) {
+        state.docs.insert(saved.clone(), doc);
+    }
+    if state.form.loaded.as_ref() == Some(&key) {
+        state.form.loaded = Some(saved.clone());
+    }
+    tabs.rekey(&key, &saved);
+    saved
 }
 
 /// Показывает результат записи над формой: ошибка ядра или пусто.
@@ -1774,7 +1801,12 @@ fn change_lines(
     edit: impl FnOnce(&mut Vec<Line>) -> Option<Option<usize>>,
 ) {
     let data = app.global::<ReceiptsData>();
-    let Some(doc) = state.form.loaded.and_then(|n| state.docs.get_mut(&n)) else {
+    let Some(doc) = state
+        .form
+        .loaded
+        .as_ref()
+        .and_then(|key| state.docs.get_mut(key))
+    else {
         return;
     };
     let Some(select) = edit(&mut doc.content.lines) else {
@@ -1791,7 +1823,8 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     let line = state
         .form
         .loaded
-        .and_then(|n| state.docs.get(&n))
+        .as_ref()
+        .and_then(|key| state.docs.get(key))
         .zip(index)
         .and_then(|(doc, i)| doc.content.lines.get(i).cloned());
     state.form.editing_line = index.filter(|_| line.is_some());
@@ -1831,6 +1864,7 @@ pub fn setup(app: &AppWindow, shell: Rc<RefCell<Shell>>) -> ReceiptsUi {
         generation: 0,
         total_all: 0,
         next_number: 1,
+        last_temporary: 0,
         docs: HashMap::new(),
         form: FormCtx::default(),
         main: app.as_weak(),
@@ -1992,11 +2026,19 @@ fn wire_list(
             let Some(index) = usize::try_from(row).ok() else {
                 return;
             };
-            let Some(number) = state.borrow().visible().get(index).map(|r| r.number) else {
+            let Some((number, doc_id)) = state
+                .borrow()
+                .visible()
+                .get(index)
+                .map(|r| (r.number, r.id))
+            else {
                 return;
             };
             match id.as_str() {
-                "edit" => open_from_list(&app, &main, &state, &tabs, number, false),
+                "edit" => {
+                    let key = DocKey::new(OBJECT, doc_id);
+                    open_from_list(&app, &main, &state, &tabs, key, false);
+                }
                 "post" | "unpost" => {
                     post_in_core(&state, &state.borrow(), number, id == "post");
                     return;
@@ -2031,9 +2073,9 @@ fn wire_list(
             };
             let picked = usize::try_from(row)
                 .ok()
-                .and_then(|i| state.borrow().visible().get(i).map(|r| r.number));
-            if let Some(number) = picked {
-                open_from_list(&app, &main, &state, &tabs, number, false);
+                .and_then(|i| state.borrow().visible().get(i).map(|r| r.id));
+            if let Some(id) = picked {
+                open_from_list(&app, &main, &state, &tabs, DocKey::new(OBJECT, id), false);
             }
         }
     });
@@ -2044,7 +2086,7 @@ fn wire_list(
             let (Some(app), Some(main)) = (app.upgrade(), main.upgrade()) else {
                 return;
             };
-            let number = {
+            let key = {
                 let mut state = state.borrow_mut();
                 let number = state
                     .engine
@@ -2052,9 +2094,19 @@ fn wire_list(
                     .and_then(|engine| last_number(&**engine).ok())
                     .map_or(state.next_number, |last| (last + 1).max(state.next_number));
                 state.next_number = number + 1;
-                number
+                let warehouse = state
+                    .catalogs
+                    .warehouses
+                    .first()
+                    .map(|(_, name)| name.clone())
+                    .unwrap_or_default();
+                let key = state.temporary_key();
+                state
+                    .docs
+                    .insert(key.clone(), DocState::new_document(number, warehouse));
+                key
             };
-            open_from_list(&app, &main, &state, &tabs, number, false);
+            open_from_list(&app, &main, &state, &tabs, key, false);
         }
     });
 }
@@ -2107,9 +2159,9 @@ fn wire_form(
                     let mut state = form_state(&state, target);
                     let result = save_loaded(&app, &mut state, list, PostAction::Write);
                     if result.is_ok()
-                        && let Some(number) = state.form.loaded
+                        && let Some(key) = state.form.loaded.clone()
                     {
-                        load_doc(&app, &mut state, number);
+                        load_doc(&app, &mut state, key);
                     }
                     result
                 })
@@ -2132,9 +2184,9 @@ fn wire_form(
                     let result = save_loaded(&app, &mut state, list, PostAction::Post);
                     if result.is_ok()
                         && !close
-                        && let Some(number) = state.form.loaded
+                        && let Some(key) = state.form.loaded.clone()
                     {
-                        load_doc(&app, &mut state, number);
+                        load_doc(&app, &mut state, key);
                     }
                     result
                 })
@@ -2166,15 +2218,15 @@ fn wire_form(
         move || {
             let Some(app) = app.upgrade() else { return };
             let mut state = form_state(&state, target);
-            let Some(number) = state.form.loaded else {
+            let Some(key) = state.form.loaded.clone() else {
                 return;
             };
-            let Some(id) = state.docs.get(&number).map(|doc| doc.id) else {
+            let Some(id) = state.docs.get(&key).map(|doc| doc.id) else {
                 return;
             };
             let result = fetch_doc(&state, id).map(|doc| {
-                state.docs.insert(number, doc);
-                load_doc(&app, &mut state, number);
+                state.docs.insert(key.clone(), doc);
+                load_doc(&app, &mut state, key);
             });
             show_form_result(&app, &result);
         }
@@ -2241,7 +2293,8 @@ fn wire_form(
             let count = state
                 .form
                 .loaded
-                .and_then(|n| state.docs.get(&n))
+                .as_ref()
+                .and_then(|key| state.docs.get(key))
                 .map_or(0, |doc| doc.content.lines.len());
             let actions = usize::try_from(row)
                 .ok()
@@ -2450,6 +2503,104 @@ fn wire_form(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Состояние без окон и ядра: хватает для логики ключей документов.
+    fn bare_state() -> State {
+        State {
+            all: Vec::new(),
+            sorting: Sorting::default(),
+            query: String::new(),
+            engine: None,
+            generation: 0,
+            total_all: 0,
+            next_number: 1,
+            last_temporary: 0,
+            docs: HashMap::new(),
+            form: FormCtx::default(),
+            main: slint::Weak::default(),
+            hosts: HashMap::new(),
+            tab_docs: HashMap::new(),
+            marks: HashSet::new(),
+            notice_timer: slint::Timer::default(),
+            catalogs: Catalogs::default(),
+        }
+    }
+
+    #[test]
+    fn saved_document_gets_real_key_and_its_tab_follows() {
+        let mut state = bare_state();
+        let mut shell = Shell::demo();
+        let temporary = state.temporary_key();
+        assert!(temporary.is_temporary());
+        state.docs.insert(
+            temporary.clone(),
+            DocState::new_document(7, "Основной".into()),
+        );
+        state.form.loaded = Some(temporary.clone());
+        shell.open_doc(3, temporary.clone(), "Новое поступление".into(), "receipt");
+
+        let saved = adopt_saved_key(&mut state, &mut shell, temporary.clone(), 42);
+        assert_eq!(saved, DocKey::new(OBJECT, 42));
+        assert!(!state.docs.contains_key(&temporary));
+        assert!(state.docs.contains_key(&saved));
+        assert_eq!(state.form.loaded.as_ref(), Some(&saved));
+        assert_eq!(shell.active_doc(), Some(&saved));
+        assert_eq!(shell.doc_tab(&temporary), None);
+        // Повторная запись: ключ уже настоящий и остаётся прежним.
+        assert_eq!(
+            adopt_saved_key(&mut state, &mut shell, saved.clone(), 42),
+            saved
+        );
+        // Следующий новый документ не совпадёт с прошлым временным ключом.
+        assert_ne!(state.temporary_key(), temporary);
+    }
+
+    #[test]
+    fn same_id_in_different_objects_is_not_mixed_up() {
+        let mut state = bare_state();
+        let (incoming, outgoing) = (DocKey::new(OBJECT, 5), DocKey::new("issue", 5));
+        for key in [&incoming, &outgoing] {
+            state
+                .docs
+                .insert(key.clone(), DocState::new_document(5, String::new()));
+        }
+        state
+            .tab_docs
+            .insert(WindowRef::Main, HashSet::from([incoming.clone()]));
+        state
+            .tab_docs
+            .insert(WindowRef::Extra(1), HashSet::from([outgoing.clone()]));
+        assert_eq!(state.owner_of(&incoming), Some(WindowRef::Main));
+        assert_eq!(state.owner_of(&outgoing), Some(WindowRef::Extra(1)));
+
+        // Окно с расходом закрыли: забывается только расход.
+        state.tab_docs.remove(&WindowRef::Extra(1));
+        forget_closed(&mut state);
+        assert!(state.docs.contains_key(&incoming));
+        assert!(!state.docs.contains_key(&outgoing));
+    }
+
+    #[test]
+    fn link_number_finds_list_row_or_open_new_document() {
+        let mut state = bare_state();
+        state.all.push(Receipt {
+            id: 30,
+            number: 12,
+            date: (2026, 1, 1),
+            supplier: String::new(),
+            warehouse: String::new(),
+            amount: 0,
+            posted: false,
+            deleted: false,
+        });
+        let temporary = state.temporary_key();
+        state
+            .docs
+            .insert(temporary.clone(), DocState::new_document(13, String::new()));
+        assert_eq!(state.key_of_number(12), Some(DocKey::new(OBJECT, 30)));
+        assert_eq!(state.key_of_number(13), Some(temporary));
+        assert_eq!(state.key_of_number(14), None);
+    }
 
     #[test]
     fn money_is_converted_to_kopecks() {

@@ -14,7 +14,7 @@ use crate::app::{
     HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_tabs, tab_items,
 };
 use crate::receipts_ui::ReceiptsUi;
-use crate::shell::{Shell, Tab};
+use crate::shell::{DocKey, Shell, Tab};
 use crate::workspace::{Change, TabList, WindowId, WindowRef, Workspace};
 
 /// Перетаскивание вкладки между окнами на общих координатах экрана.
@@ -475,7 +475,7 @@ impl Windows {
         main: &AppWindow,
         shell: &Rc<RefCell<Shell>>,
         window: WindowRef,
-        doc: u32,
+        doc: &DocKey,
     ) {
         match window {
             WindowRef::Main => {
