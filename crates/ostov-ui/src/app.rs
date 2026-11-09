@@ -292,6 +292,49 @@ fn show_user(app: &AppWindow, user: Option<&SessionInfo>) {
     });
     app.set_user_text(name.unwrap_or("Без входа").into());
     app.set_user_initials(name.map(initials).unwrap_or_default().into());
+    app.set_user_roles_text(
+        user.map_or(
+            "База без пользователей".to_owned(),
+            |user| user.roles.join(", "),
+        )
+        .into(),
+    );
+    // Сменить пользователя можно, только если база спрашивает вход.
+    app.set_can_switch_user(user.is_some());
+}
+
+/// Через сколько секунд сообщение в строке состояния сменяется на «Готово».
+const STATUS_SECONDS: u64 = 6;
+
+/// Показывает сообщение в строке состояния; через несколько секунд там снова «Готово».
+fn show_status(app: &AppWindow, message: &str) {
+    app.set_status_message(message.into());
+    let weak = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_secs(STATUS_SECONDS), move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_status_message("Готово".into());
+        }
+    });
+}
+
+/// Можно ли сейчас закрыть базу или сменить пользователя: окна и несохранённые документы
+/// принадлежат текущему пользователю и базе, закрыть их молча значит потерять правки.
+fn can_leave(
+    app: &AppWindow,
+    shell: &Rc<RefCell<Shell>>,
+    windows: &crate::windows::Windows,
+) -> bool {
+    let mut extra = 0;
+    windows.each(|_| extra += 1);
+    if extra > 0 {
+        show_status(app, "Сначала закройте дополнительные окна.");
+        return false;
+    }
+    if shell.borrow().tabs().iter().any(|tab| tab.modified) {
+        show_status(app, "Сначала сохраните или закройте изменённые документы.");
+        return false;
+    }
+    true
 }
 
 /// Инициалы для кружка в шапке: первые буквы двух первых слов.
@@ -800,7 +843,58 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     };
     app.on_back(to_start.clone());
-    app.on_change_source(to_start);
+    app.on_change_source(to_start.clone());
+
+    // Меню под аватаром: закрыть базу и вернуться к выбору.
+    app.on_close_base({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            if can_leave(&app, &shell, &windows) {
+                to_start();
+            }
+        }
+    });
+
+    // Меню под аватаром: выйти и войти под другим пользователем в той же открытой базе.
+    app.on_switch_user({
+        let (app, shell, windows) = (app.as_weak(), shell.clone(), windows.clone());
+        let (session, screens) = (session.clone(), screens.clone());
+        move || {
+            let Some(app) = app.upgrade() else { return };
+            if !can_leave(&app, &shell, &windows) {
+                return;
+            }
+            let Some(engine) = session.borrow().engine.clone() else {
+                return;
+            };
+            let weak = app.as_weak();
+            let (session, screens) = (session.clone(), screens.clone());
+            call_in_background(
+                move || engine.logout(),
+                move |result| {
+                    let Some(app) = weak.upgrade() else { return };
+                    if let Err(error) = result {
+                        show_status(&app, &error.message);
+                        return;
+                    }
+                    let name = {
+                        let mut session = session.borrow_mut();
+                        session.meta = None;
+                        session.admin = false;
+                        session.logged_in = false;
+                        session.stage = Some(LoginKind::LocalUser);
+                        session.name.clone()
+                    };
+                    // Данные прошлого пользователя уходят с экрана: у следующего другие права.
+                    screens.receipts.detach();
+                    screens.users.clear();
+                    configure_login(&app, LoginKind::LocalUser, &name, "");
+                    show_page(&app, PAGE_LOGIN);
+                },
+            );
+        }
+    });
 
     app.on_create_confirmed({
         let app = app.as_weak();
