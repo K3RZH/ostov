@@ -2314,3 +2314,28 @@ fn local_policy_allows_any_password_but_strict_blocks_weak_ones() {
     let failed = engine.admin_journal(None, 50);
     assert_eq!(failed.unwrap_err().code, ErrorCode::Forbidden);
 }
+
+#[test]
+fn console_reset_needs_no_login_but_strict_password() {
+    let base = Base::new("console-reset");
+    let local =
+        LocalConnector::new(roles_model()).with_password_policy(crate::PasswordPolicy::LOCAL);
+    drop({
+        let engine = local.create_local(&base.path, None, None).unwrap();
+        engine.create_first_admin("boss", "").unwrap();
+        engine
+    });
+    let config = crate::local::Config::from_model(&roles_model()).unwrap();
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let engine = crate::LocalEngine::open(Box::new(db), config).unwrap();
+    assert_eq!(
+        engine.reset_password("boss", "").unwrap_err().code,
+        ErrorCode::Validation
+    );
+    engine.reset_password("Boss", ADMIN_PASSWORD).unwrap();
+    engine.login("boss", ADMIN_PASSWORD).unwrap();
+    let entries = engine.admin_journal(None, 10).unwrap();
+    let reset = entries.iter().find(|e| e.action == "Смена пароля").unwrap();
+    assert_eq!(reset.user, "консоль сервера");
+    assert!(!reset.details.contains(ADMIN_PASSWORD));
+}

@@ -61,6 +61,21 @@ impl Base {
         Ok(LocalEngine::new(self.connect()?, self.config()?))
     }
 
+    /// Сброс пароля из консоли (`ostov-server --reset-password`): пустую базу не создаёт.
+    pub fn reset_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        let mut db = self.connect()?;
+        let exists = db
+            .query("SELECT value FROM ostov_base WHERE key = 'config'", &[])
+            .is_ok();
+        if !exists {
+            return Err(EngineError::new(
+                ErrorCode::NotFound,
+                "Базы ещё нет: сервер её создаст при первом запуске.",
+            ));
+        }
+        LocalEngine::open(db, self.config()?)?.reset_password(login, password)
+    }
+
     /// Один раз при запуске: пустую базу устанавливает, существующую доводит до конфигурации.
     fn prepare(&self) -> EngineResult<()> {
         let mut db = self.connect()?;

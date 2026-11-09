@@ -12,6 +12,9 @@ use super::LocalEngine;
 use super::convert::error;
 use crate::in_transaction;
 
+/// Кто в журнале, если пароль сбросили из консоли сервера.
+const CONSOLE: &str = "консоль сервера";
+
 #[derive(Debug, Default)]
 pub(super) struct Access {
     /// Есть ли в базе пользователи: тогда без входа ничего нельзя.
@@ -166,6 +169,27 @@ impl LocalEngine {
                 Err(sec_error(e))
             }
         }
+    }
+
+    /// Сброс пароля из консоли сервера, без входа: на случай, когда войти некому
+    /// (например, у всех администраторов слабый пароль из режима 1). Только строгая политика.
+    pub fn reset_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        let mut db = self.db();
+        in_transaction(&mut **db, |db| {
+            let password = Password::new(password);
+            let user = ostov_sec::set_password(db, login, &password, PasswordPolicy::STRICT)?;
+            let note = format!("пользователь {}, сброс из консоли сервера", user.login);
+            super::journal::record(
+                db,
+                CONSOLE,
+                Action::PasswordChanged,
+                "",
+                Some(user.id),
+                &[],
+                &note,
+            )
+        })
+        .map_err(error)
     }
 
     /// Строгая политика (сервер) не пускает со слабым паролем из режима 1 (ADR-033).

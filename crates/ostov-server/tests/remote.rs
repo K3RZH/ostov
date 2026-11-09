@@ -487,3 +487,73 @@ async fn weak_passwords_from_local_base_do_not_pass_server() {
         assert_eq!(err.code, ErrorCode::Validation);
     }
 }
+
+/// У единственного администратора слабый пароль из режима 1: войти некому, помогает
+/// только сброс из консоли сервера.
+#[tokio::test]
+async fn console_reset_unlocks_server_with_weak_admin() {
+    let dir = temp("reset");
+    let path = dir.join("base.db").to_string_lossy().into_owned();
+    let base_dir = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let local = ostov_core::LocalConnector::new(model())
+            .with_password_policy(ostov_core::PasswordPolicy::LOCAL);
+        let engine = local.create_local(&path, None, None).unwrap();
+        engine.create_first_admin(ADMIN.0, "").unwrap();
+        drop(engine);
+        let base = Base::new(sqlite(&base_dir), model());
+        let short = base.reset_password(ADMIN.0, "1234").unwrap_err();
+        assert_eq!(short.code, ErrorCode::Validation);
+        let missing = base.reset_password("nobody", ADMIN.1).unwrap_err();
+        assert_eq!(missing.code, ErrorCode::NotFound);
+        base.reset_password(ADMIN.0, ADMIN.1).unwrap();
+    })
+    .await
+    .unwrap();
+
+    let mut s = start_in(dir, None).await;
+    let c = &mut s.client;
+    assert_eq!(
+        error(c.login(creds((ADMIN.0, ""))).await).code,
+        ErrorCode::BadCredentials
+    );
+    let boss = c.login(creds(ADMIN)).await.unwrap().into_inner().token;
+    let journal = c
+        .admin_journal(authed(
+            pb::JournalRequest {
+                after_key: None,
+                size: 100,
+            },
+            &boss,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        journal
+            .entries
+            .iter()
+            .any(|e| e.action == "Смена пароля" && e.user == "консоль сервера")
+    );
+}
+
+#[tokio::test]
+async fn console_reset_does_not_create_empty_base() {
+    let dir = temp("reset-empty");
+    let base_dir = dir.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        Base::new(sqlite(&base_dir), model())
+            .reset_password(ADMIN.0, ADMIN.1)
+            .unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::NotFound);
+    let tables = {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(dir.join("base.db")).unwrap();
+        db.query("SELECT name FROM sqlite_master WHERE type = 'table'", &[])
+            .unwrap()
+    };
+    assert!(tables.is_empty(), "{tables:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
