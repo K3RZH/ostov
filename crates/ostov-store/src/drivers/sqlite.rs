@@ -36,6 +36,7 @@ impl Dialect for SqliteDialect {
 /// База режима «один компьютер»: файл SQLite рядом с приложением.
 pub struct SqliteDriver {
     conn: Connection,
+    depth: crate::Depth,
 }
 
 impl SqliteDriver {
@@ -43,14 +44,20 @@ impl SqliteDriver {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         add_functions(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            depth: crate::Depth::default(),
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         add_functions(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            depth: crate::Depth::default(),
+        })
     }
 }
 
@@ -95,15 +102,21 @@ impl Driver for SqliteDriver {
     }
 
     fn begin(&mut self) -> Result<(), StoreError> {
-        Ok(self.conn.execute_batch("BEGIN")?)
+        self.conn.execute_batch(&self.depth.begin())?;
+        self.depth.entered();
+        Ok(())
     }
 
     fn commit(&mut self) -> Result<(), StoreError> {
-        Ok(self.conn.execute_batch("COMMIT")?)
+        self.conn.execute_batch(&self.depth.commit())?;
+        self.depth.left();
+        Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), StoreError> {
-        Ok(self.conn.execute_batch("ROLLBACK")?)
+        let sql = self.depth.rollback();
+        self.depth.left();
+        Ok(self.conn.execute_batch(&sql)?)
     }
 }
 
@@ -182,6 +195,42 @@ mod tests {
             .unwrap();
         let rows = db.query("SELECT name FROM items", &[]).unwrap();
         assert_eq!(rows, vec![vec![Value::Text(evil.into())]]);
+    }
+
+    #[test]
+    fn nested_transactions_use_savepoints() {
+        let mut db = db();
+        let names = |db: &mut SqliteDriver| -> Vec<Row> {
+            db.query("SELECT name FROM items ORDER BY id", &[]).unwrap()
+        };
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('outer')", &[])
+            .unwrap();
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('inner')", &[])
+            .unwrap();
+        db.rollback().unwrap();
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('kept')", &[])
+            .unwrap();
+        db.commit().unwrap();
+        db.commit().unwrap();
+        assert_eq!(
+            names(&mut db),
+            vec![
+                vec![Value::Text("outer".into())],
+                vec![Value::Text("kept".into())]
+            ]
+        );
+
+        // Откат внешней убирает и то, что внутренняя уже «записала».
+        db.begin().unwrap();
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('lost')", &[])
+            .unwrap();
+        db.commit().unwrap();
+        db.rollback().unwrap();
+        assert_eq!(names(&mut db).len(), 2);
     }
 
     #[test]

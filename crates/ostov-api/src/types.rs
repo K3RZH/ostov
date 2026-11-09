@@ -55,7 +55,7 @@ pub use ostov_model::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub id: i64,
-    /// Поля строки плюс служебные: у документов `number`, `posted`, у всех `deleted`.
+    /// Поля строки плюс служебные: у документов `number`, `posted`, у всех `deleted` и `version`.
     pub values: Fields,
 }
 
@@ -68,6 +68,10 @@ pub struct ListQuery {
     pub descending: bool,
     /// Подстрока по текстовым полям.
     pub search: Option<String>,
+    /// Отбор: только проведённые (`Some(true)`) или только черновики (`Some(false)`).
+    pub posted: Option<bool>,
+    /// Отбор: только помеченные на удаление или только непомеченные.
+    pub deleted: Option<bool>,
     /// Ключ из прошлой страницы; `None` — с начала.
     pub after_key: Option<String>,
     /// Сколько строк, от 1 до 1000 (СТ-51).
@@ -112,6 +116,14 @@ pub enum PostAction {
     Unpost,
 }
 
+/// Одна запись из `Engine::save_batch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchItem {
+    pub object: String,
+    pub data: ObjectData,
+    pub post: PostAction,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Saved {
     pub id: i64,
@@ -151,6 +163,8 @@ pub struct NewUser {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
+    /// Ключ страницы: следующую просить с `after_key = id` последней записи.
+    pub id: i64,
     pub when: String,
     pub user: String,
     pub object: String,

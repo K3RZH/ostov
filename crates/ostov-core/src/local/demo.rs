@@ -92,7 +92,7 @@ fn fill(db: &mut dyn Driver, config: &Config, receipts: usize) -> Result<(), Cor
             })
             .collect::<Result<_, CoreError>>()?;
         let mut parts = Parts::from([("lines".to_owned(), lines)]);
-        (receipt.prepare)(&mut header, &mut parts)?;
+        receipt.rule.prepare(&mut header, &mut parts)?;
         let doc = receipt.kind.insert_in(db, &header, &parts)?;
 
         if n % 30 == 29 {
@@ -175,14 +175,16 @@ fn post(
     cfg: &DocumentConfig,
     doc: &Document,
 ) -> Result<(), CoreError> {
-    let movements = (cfg.rule)(doc)?;
-    config.stock.replace_dated(
-        db,
-        cfg.kind.table(),
-        doc.id,
-        crate::posting::period(doc).as_deref(),
-        &movements,
-    )?;
+    let mut moves = cfg.rule.movements(doc)?;
+    for register in config.registers_of(cfg) {
+        register.replace_dated(
+            db,
+            cfg.kind.table(),
+            doc.id,
+            crate::posting::period(doc).as_deref(),
+            &moves.remove(register.name()).unwrap_or_default(),
+        )?;
+    }
     cfg.kind.set_posted(db, doc.id, true)
 }
 

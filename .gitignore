@@ -15,3 +15,6 @@ Thumbs.db
 .env
 *.db
 *.sqlite
+
+# Подсказки .pyi генерирует ostov stubs
+config/_stubs/

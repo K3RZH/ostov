@@ -1,10 +1,13 @@
 //! `LocalEngine` — реализация `ostov_api::Engine` поверх ядра в том же процессе (режим 1).
 //! В режиме 2 его же будет вызывать сервер на каждую команду по gRPC.
 
+mod access;
 mod config;
 mod convert;
 mod demo;
+mod journal;
 mod schema;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -15,19 +18,23 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
-    Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage, NewAdmin,
-    ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
+    BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage,
+    NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
-pub use config::{Config, DocumentConfig, warehouse, warehouse_model};
+use access::Need;
+use config::Parts;
+pub use config::{BuiltinRules, Config, DocumentConfig, Rules, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid};
+use ostov_sec::Action;
+
+use crate::closing::ClosedPeriodPass;
 
 use crate::list::{MILESTONE_STEP, Milestones, TitleColumns, list_titled};
 use crate::{
-    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction,
-    insert_and_post, posting,
+    Catalog, Document, Element, FieldDef, FieldKind, ListQuery, ListSource, in_transaction, posting,
 };
 
 pub struct LocalEngine {
@@ -37,6 +44,8 @@ pub struct LocalEngine {
     milestones: Mutex<HashMap<String, Milestones>>,
     /// Справочник → его поле-название: по нему ссылки сортируются и ищутся.
     titles: TitleColumns,
+    /// Кто вошёл и есть ли в базе пользователи.
+    access: Mutex<access::Access>,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
 }
@@ -47,7 +56,8 @@ enum Object<'a> {
 }
 
 impl LocalEngine {
-    pub fn new(db: Box<dyn Driver + Send>, config: Config) -> Self {
+    pub fn new(mut db: Box<dyn Driver + Send>, config: Config) -> Self {
+        let users = ostov_sec::has_users(&mut *db).unwrap_or(false);
         let titles = config
             .catalogs
             .iter()
@@ -61,8 +71,21 @@ impl LocalEngine {
             titles,
             config,
             milestones: Mutex::new(HashMap::new()),
+            access: Mutex::new(access::Access { users, user: None }),
             _lock: None,
         }
+    }
+
+    /// Новая база Ostov в пустой базе данных любого драйвера (так её будет создавать и сервер).
+    pub fn install(mut db: Box<dyn Driver + Send>, config: Config) -> EngineResult<Self> {
+        in_transaction(&mut *db, |db| install(db, &config)).map_err(error)?;
+        Ok(Self::new(db, config))
+    }
+
+    /// Существующая база: доводится до конфигурации (реструктуризация) и открывается.
+    pub fn open(mut db: Box<dyn Driver + Send>, config: Config) -> EngineResult<Self> {
+        in_transaction(&mut *db, |db| upgrade(db, &config)).map_err(error)?;
+        Ok(Self::new(db, config))
     }
 
     fn locked(mut self, lock: File) -> Self {
@@ -214,16 +237,18 @@ const SEP: char = '\u{1f}';
 
 fn token(object: &str, q: &ListQuery) -> String {
     format!(
-        "{object}{SEP}{}{SEP}{}{SEP}{}",
+        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
         q.order.as_deref().unwrap_or(""),
         u8::from(q.descending),
+        flag(q.posted),
+        flag(q.deleted),
         q.search.as_deref().unwrap_or("")
     )
 }
 
 fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
-    let parts: Vec<&str> = token.splitn(4, SEP).collect();
-    let [object, order, descending, search] = parts.as_slice() else {
+    let parts: Vec<&str> = token.splitn(6, SEP).collect();
+    let [object, order, descending, posted, deleted, search] = parts.as_slice() else {
         return Err(invalid("испорченный токен списка".into()));
     };
     let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
@@ -233,8 +258,26 @@ fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
             order: some(order),
             descending: *descending == "1",
             search: some(search),
+            posted: unflag(posted),
+            deleted: unflag(deleted),
         },
     ))
+}
+
+fn flag(value: Option<bool>) -> &'static str {
+    match value {
+        None => "",
+        Some(true) => "1",
+        Some(false) => "0",
+    }
+}
+
+fn unflag(s: &str) -> Option<bool> {
+    match s {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn saved_doc(d: &Document) -> Saved {
@@ -260,7 +303,7 @@ impl LocalEngine {
             config_name: self.config.name.clone(),
             config_version: self.config.version.clone(),
             config_format: 0,
-            login_required: false,
+            login_required: self.login_required(),
             first_run: false,
         })
     }
@@ -271,6 +314,8 @@ impl LocalEngine {
             order: q.order.clone(),
             descending: q.descending,
             search: q.search.clone(),
+            posted: q.posted,
+            deleted: q.deleted,
         };
         let mut db = self.db();
         let page = list_titled(
@@ -287,6 +332,7 @@ impl LocalEngine {
 
     fn run_seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
         let (object, query) = parse_token(token)?;
+        self.need(&object, Need::Read)?;
         let source = self.source(&object)?;
         let mut db = self.db();
         let mut cache = self.milestones();
@@ -357,48 +403,132 @@ impl LocalEngine {
         }
     }
 
-    fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+    /// Перевод и пересчёт до записи: без базы, ошибки — по данным.
+    fn prepare_save(
+        &self,
+        object: &str,
+        data: &ObjectData,
+        post: PostAction,
+    ) -> EngineResult<(Object<'_>, crate::Fields, Parts)> {
         let mut fields = fields_from_api(&data.fields)?;
-        let mut db = self.db();
-        let db = &mut **db;
-        let saved = match self.object(object)? {
-            Object::Catalog(c) => {
-                if post != PostAction::Write {
-                    return Err(invalid(format!("{object} — справочник, он не проводится")));
+        let target = self.object(object)?;
+        let mut parts = Parts::new();
+        match &target {
+            Object::Catalog(_) if post != PostAction::Write => {
+                return Err(invalid(format!("{object} — справочник, он не проводится")));
+            }
+            Object::Catalog(_) => {}
+            Object::Document(cfg) => {
+                for (name, lines) in &data.tables {
+                    let lines = lines
+                        .iter()
+                        .map(fields_from_api)
+                        .collect::<Result<_, _>>()?;
+                    parts.insert(name.clone(), lines);
                 }
+                cfg.rule.prepare(&mut fields, &mut parts).map_err(error)?;
+            }
+        }
+        Ok((target, fields, parts))
+    }
+
+    fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
+        let (target, fields, parts) = self.prepare_save(object, data, post)?;
+        let mut guard = self.db();
+        let db = &mut **guard;
+        let saved = in_transaction(db, |db| {
+            self.save_in(db, object, data, post, target, &fields, &parts)
+        })
+        .map_err(|e| self.explain(db, e))?;
+        self.forget_lists();
+        Ok(saved)
+    }
+
+    /// Пачка в одной транзакции: упала одна запись — не записалось ничего (импорт, Дизайн §12).
+    fn run_save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        let mut prepared = Vec::with_capacity(items.len());
+        for (n, item) in items.iter().enumerate() {
+            let ready = self
+                .prepare_save(&item.object, &item.data, item.post)
+                .map_err(|e| numbered(n, e))?;
+            prepared.push(ready);
+        }
+        let mut guard = self.db();
+        let db = &mut **guard;
+        let mut failed = 0;
+        let saved = in_transaction(db, |db| {
+            let mut saved = Vec::with_capacity(items.len());
+            for (n, (item, (target, fields, parts))) in items.iter().zip(prepared).enumerate() {
+                failed = n;
+                saved.push(self.save_in(
+                    db,
+                    &item.object,
+                    &item.data,
+                    item.post,
+                    target,
+                    &fields,
+                    &parts,
+                )?);
+            }
+            Ok(saved)
+        })
+        .map_err(|e| numbered(failed, self.explain(db, e)))?;
+        self.forget_lists();
+        Ok(saved)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_in(
+        &self,
+        db: &mut dyn Driver,
+        object: &str,
+        data: &ObjectData,
+        post: PostAction,
+        target: Object<'_>,
+        fields: &crate::Fields,
+        parts: &Parts,
+    ) -> Result<Saved, crate::CoreError> {
+        match target {
+            Object::Catalog(c) => {
+                let old = match data.id {
+                    Some(id) => c.get(db, id)?.map(|e| e.fields),
+                    None => None,
+                };
                 let element = match data.id {
-                    None => c.insert(db, &fields),
+                    None => c.insert(db, fields)?,
                     Some(id) => c.update(
                         db,
                         &Element {
                             id,
                             version: data.version,
                             deleted: data.deleted,
-                            fields,
+                            fields: fields.clone(),
                         },
-                    ),
+                    )?,
                 };
-                saved_element(&element.map_err(error)?)
+                let changes = self.changes(db, c.fields(), old.as_ref(), &element.fields);
+                let action = if old.is_some() {
+                    Action::Update
+                } else {
+                    Action::Create
+                };
+                if action == Action::Create || !changes.is_empty() {
+                    self.journal(db, action, object, Some(element.id), &changes, "")?;
+                }
+                Ok(saved_element(&element))
             }
             Object::Document(cfg) => {
-                let mut parts = data
-                    .tables
-                    .iter()
-                    .map(|(name, lines)| {
-                        let lines = lines
-                            .iter()
-                            .map(fields_from_api)
-                            .collect::<Result<_, _>>()?;
-                        Ok((name.clone(), lines))
-                    })
-                    .collect::<EngineResult<BTreeMap<_, _>>>()?;
-                (cfg.prepare)(&mut fields, &mut parts).map_err(error)?;
-                let stock = &self.config.stock;
+                let old = match data.id {
+                    Some(id) => cfg.kind.get(db, id)?,
+                    None => None,
+                };
+                let registers = self.config.registers_of(cfg);
+                let rule = |doc: &Document| cfg.rule.movements(doc);
                 let doc = match data.id {
                     None if post == PostAction::Post => {
-                        insert_and_post(db, &cfg.kind, stock, &fields, &parts, cfg.rule)
+                        posting::insert_and_post_to(db, &cfg.kind, &registers, fields, parts, rule)?
                     }
-                    None => cfg.kind.insert(db, &fields, &parts),
+                    None => cfg.kind.insert(db, fields, parts)?,
                     Some(id) => {
                         let doc = Document {
                             id,
@@ -406,25 +536,87 @@ impl LocalEngine {
                             number: data.number.unwrap_or_default(),
                             posted: data.posted,
                             deleted: data.deleted,
-                            header: fields,
-                            parts,
+                            header: fields.clone(),
+                            parts: parts.clone(),
                         };
                         match post {
-                            PostAction::Write => cfg.kind.update(db, &doc),
+                            PostAction::Write => cfg.kind.update(db, &doc)?,
                             PostAction::Post => {
-                                posting::save(db, &cfg.kind, stock, &doc, true, cfg.rule)
+                                posting::save_to(db, &cfg.kind, &registers, &doc, true, rule)?
                             }
                             PostAction::Unpost => {
-                                posting::save(db, &cfg.kind, stock, &doc, false, cfg.rule)
+                                posting::save_to(db, &cfg.kind, &registers, &doc, false, rule)?
                             }
                         }
                     }
                 };
-                saved_doc(&doc.map_err(|e| self.explain(db, e))?)
+                let changes = self.changes(
+                    db,
+                    cfg.kind.header(),
+                    old.as_ref().map(|d| &d.header),
+                    &doc.header,
+                );
+                let lines_changed = old.as_ref().is_some_and(|d| d.parts != doc.parts);
+                let note = if lines_changed {
+                    let titles: Vec<String> = cfg
+                        .kind
+                        .parts()
+                        .iter()
+                        .filter(|p| {
+                            old.as_ref().map(|d| d.parts.get(p.name()))
+                                != Some(doc.parts.get(p.name()))
+                        })
+                        .map(|p| self.part_title(object, p.name()))
+                        .collect();
+                    format!("изменены строки: {}", titles.join(", "))
+                } else {
+                    String::new()
+                };
+                let action = if old.is_some() {
+                    Action::Update
+                } else {
+                    Action::Create
+                };
+                if action == Action::Create || !changes.is_empty() || lines_changed {
+                    self.journal(db, action, object, Some(doc.id), &changes, &note)?;
+                }
+                let was_posted = old.as_ref().is_some_and(|d| d.posted);
+                match post {
+                    PostAction::Post => {
+                        self.journal(db, Action::Post, object, Some(doc.id), &[], "")?;
+                    }
+                    PostAction::Unpost if was_posted => {
+                        self.journal(db, Action::Unpost, object, Some(doc.id), &[], "")?;
+                    }
+                    PostAction::Write | PostAction::Unpost => {}
+                }
+                Ok(saved_doc(&doc))
             }
+        }
+    }
+
+    fn need_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<()> {
+        let need = if data.id.is_some() {
+            Need::Update
+        } else {
+            Need::Create
         };
-        self.forget_lists();
-        Ok(saved)
+        self.need(object, need)?;
+        match post {
+            PostAction::Write => Ok(()),
+            PostAction::Post => self.need(object, Need::Post),
+            PostAction::Unpost => self.need(object, Need::Unpost),
+        }
+    }
+
+    fn part_title(&self, object: &str, part: &str) -> String {
+        self.config
+            .meta
+            .objects
+            .iter()
+            .find(|o| o.name == object)
+            .and_then(|o| o.table_parts.iter().find(|p| p.name == part))
+            .map_or_else(|| part.to_owned(), |p| p.title.clone())
     }
 
     fn run_mark_deleted(
@@ -434,18 +626,22 @@ impl LocalEngine {
         version: i64,
         deleted: bool,
     ) -> EngineResult<Saved> {
+        let target = self.object(object)?;
         let mut db = self.db();
-        let saved = match self.object(object)? {
-            Object::Catalog(c) => saved_element(
-                &c.mark_deleted(&mut **db, id, version, deleted)
-                    .map_err(error)?,
-            ),
-            Object::Document(d) => saved_doc(
-                &d.kind
-                    .mark_deleted(&mut **db, id, version, deleted)
-                    .map_err(error)?,
-            ),
+        let action = if deleted {
+            Action::MarkDeleted
+        } else {
+            Action::Unmark
         };
+        let saved = in_transaction(&mut **db, |db| {
+            let saved = match target {
+                Object::Catalog(c) => saved_element(&c.mark_deleted(db, id, version, deleted)?),
+                Object::Document(d) => saved_doc(&d.kind.mark_deleted(db, id, version, deleted)?),
+            };
+            self.journal(db, action, object, Some(id), &[], "")?;
+            Ok(saved)
+        })
+        .map_err(error)?;
         self.forget_lists();
         Ok(saved)
     }
@@ -453,8 +649,12 @@ impl LocalEngine {
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::post(&mut **db, &cfg.kind, &self.config.stock, id, cfg.rule)
-            .map_err(|e| self.explain(&mut **db, e))?;
+        let registers = self.config.registers_of(cfg);
+        in_transaction(&mut **db, |db| {
+            posting::post_to(db, &cfg.kind, &registers, id, |doc| cfg.rule.movements(doc))?;
+            self.journal(db, Action::Post, document, Some(id), &[], "")
+        })
+        .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -467,8 +667,12 @@ impl LocalEngine {
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
         let mut db = self.db();
-        posting::unpost(&mut **db, &cfg.kind, &self.config.stock, id)
-            .map_err(|e| self.explain(&mut **db, e))?;
+        let registers = self.config.registers_of(cfg);
+        in_transaction(&mut **db, |db| {
+            posting::unpost_from(db, &cfg.kind, &registers, id)?;
+            self.journal(db, Action::Unpost, document, Some(id), &[], "")
+        })
+        .map_err(|e| self.explain(&mut **db, e))?;
         let doc = cfg
             .kind
             .get(&mut **db, id)
@@ -484,8 +688,53 @@ impl Engine for LocalEngine {
         self.guarded("Hello", || self.run_hello())
     }
 
+    fn login(&self, login: &str, password: &str) -> EngineResult<ostov_api::SessionInfo> {
+        self.guarded("Login", || self.run_login(login, password))
+    }
+
+    fn logout(&self) -> EngineResult<()> {
+        self.access().user = None;
+        self.forget_lists();
+        Ok(())
+    }
+
+    fn create_first_admin(
+        &self,
+        login: &str,
+        password: &str,
+    ) -> EngineResult<ostov_api::SessionInfo> {
+        self.guarded("CreateFirstAdmin", || {
+            self.run_create_first_admin(login, password)
+        })
+    }
+
+    fn admin_users(&self) -> EngineResult<Vec<ostov_api::UserInfo>> {
+        self.guarded("AdminUsers", || self.run_admin_users())
+    }
+
+    fn admin_add_user(&self, user: &ostov_api::NewUser) -> EngineResult<()> {
+        self.guarded("AdminAddUser", || self.run_admin_add_user(user))
+    }
+
+    fn admin_journal(
+        &self,
+        after_key: Option<&str>,
+        size: u32,
+    ) -> EngineResult<Vec<ostov_api::JournalEntry>> {
+        self.guarded("AdminJournal", || self.run_admin_journal(after_key, size))
+    }
+
+    fn admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
+        self.guarded("AdminSetUserActive", || {
+            self.run_admin_set_user_active(login, active)
+        })
+    }
+
     fn list(&self, q: &ostov_api::ListQuery) -> EngineResult<ListPage> {
-        self.guarded("List", || self.run_list(q))
+        self.guarded("List", || {
+            self.need(&q.object, Need::Read)?;
+            self.run_list(q)
+        })
     }
 
     fn seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
@@ -493,11 +742,29 @@ impl Engine for LocalEngine {
     }
 
     fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
-        self.guarded("Get", || self.run_get(object, id))
+        self.guarded("Get", || {
+            self.need(object, Need::Read)?;
+            self.run_get(object, id)
+        })
     }
 
     fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
-        self.guarded("Save", || self.run_save(object, data, post))
+        self.guarded("Save", || {
+            self.need_save(object, data, post)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_save(object, data, post)
+        })
+    }
+
+    fn save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
+        self.guarded("SaveBatch", || {
+            for (n, item) in items.iter().enumerate() {
+                self.need_save(&item.object, &item.data, item.post)
+                    .map_err(|e| numbered(n, e))?;
+            }
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_save_batch(items)
+        })
     }
 
     fn mark_deleted(
@@ -508,47 +775,92 @@ impl Engine for LocalEngine {
         deleted: bool,
     ) -> EngineResult<Saved> {
         self.guarded("MarkDeleted", || {
+            self.need(object, Need::Delete)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             self.run_mark_deleted(object, id, version, deleted)
         })
     }
 
     fn post(&self, document: &str, id: i64) -> EngineResult<Saved> {
-        self.guarded("Post", || self.run_post(document, id))
+        self.guarded("Post", || {
+            self.need(document, Need::Post)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_post(document, id)
+        })
     }
 
     fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
-        self.guarded("Unpost", || self.run_unpost(document, id))
+        self.guarded("Unpost", || {
+            self.need(document, Need::Unpost)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_unpost(document, id)
+        })
     }
 
+    // Отчёты, настройки и дата закрытия — всем, кто вошёл: проверка входа в `need_system`.
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
-        self.guarded("RunReport", || self.run_run_report(query))
+        self.guarded("RunReport", || {
+            self.need_system(|_| true, "отчёты")?;
+            self.run_run_report(query)
+        })
+    }
+
+    fn get_settings(&self, key: &str) -> EngineResult<Option<ostov_api::Fields>> {
+        self.guarded("GetSettings", || {
+            self.need_system(|_| true, "настройки")?;
+            settings::get(&mut **self.db(), key).map_err(error)
+        })
+    }
+
+    fn save_settings(&self, key: &str, values: &ostov_api::Fields) -> EngineResult<()> {
+        self.guarded("SaveSettings", || {
+            self.need_system(|_| true, "настройки")?;
+            settings::save(&mut **self.db(), key, values).map_err(error)
+        })
     }
 
     fn get_meta(&self) -> EngineResult<ostov_api::Meta> {
-        Ok(self.config.meta.clone())
+        self.guarded("GetMeta", || self.run_get_meta())
     }
 
     fn closing_date(&self) -> EngineResult<Option<String>> {
         self.guarded("GetClosingDate", || {
+            self.need_system(|_| true, "дата закрытия")?;
             crate::closing::closing_date(&mut **self.db()).map_err(error)
         })
     }
 
     fn set_closing_date(&self, date: Option<&str>) -> EngineResult<()> {
         self.guarded("SetClosingDate", || {
-            crate::closing::set_closing_date(&mut **self.db(), date).map_err(error)
+            self.need_system(|s| s.set_closing_date, "установка даты закрытия")?;
+            let note = match date {
+                Some(d) => format!("период закрыт по {}", ru_date(d)),
+                None => "период открыт".to_owned(),
+            };
+            let mut db = self.db();
+            in_transaction(&mut **db, |db| {
+                crate::closing::set_closing_date(db, date)?;
+                self.journal(db, Action::ClosingDateSet, "", None, &[], &note)
+            })
+            .map_err(error)
         })
     }
 }
 
-/// Отчёты по остаткам:
-/// - `stock_balance` — остатки на конец дня `date` (без даты — текущие);
-/// - `stock_turnover` — обороты с `from` по `to`: `<ресурс>_opening`, `_receipt`, `_issue`, `_closing`.
+/// Отчёты по любому регистру накопления `<регистр>`:
+/// - `<регистр>_balance` — остатки на конец дня `date` (без даты — текущие);
+/// - `<регистр>_turnover` — обороты с `from` по `to`: `<ресурс>_opening`, `_receipt`, `_issue`, `_closing`.
 ///
 /// Отбор — параметры с именами измерений (`warehouse`, `goods`). Строки окнами по `size`.
 impl LocalEngine {
     fn run_run_report(&self, q: &ReportQuery) -> EngineResult<ListPage> {
-        let stock = &self.config.stock;
+        let no_report =
+            || EngineError::new(ErrorCode::NotFound, format!("нет отчёта {}", q.report));
+        let (register, kind) = q
+            .report
+            .rsplit_once('_')
+            .and_then(|(name, kind)| Some((self.config.registers.get(name)?, kind)))
+            .ok_or_else(no_report)?;
         let date = |name: &str| -> EngineResult<Option<String>> {
             match q.params.get(name) {
                 None | Some(ostov_api::Value::Null) => Ok(None),
@@ -559,7 +871,7 @@ impl LocalEngine {
         let allowed = ["date", "from", "to"];
         let mut filter = crate::Fields::new();
         for (name, value) in &q.params {
-            if stock.dims().iter().any(|d| &d.name == name) {
+            if register.dims().iter().any(|d| &d.name == name) {
                 if *value != ostov_api::Value::Null {
                     filter.insert(name.clone(), convert::value_from_api(value)?);
                 }
@@ -572,8 +884,8 @@ impl LocalEngine {
         }
 
         let mut db = self.db();
-        let mut rows: Vec<ostov_api::Fields> = match q.report.as_str() {
-            "stock_balance" => stock
+        let mut rows: Vec<ostov_api::Fields> = match kind {
+            "balance" => register
                 .balances(&mut **db, date("date")?.as_deref(), &filter)
                 .map_err(error)?
                 .into_iter()
@@ -585,7 +897,7 @@ impl LocalEngine {
                     row
                 })
                 .collect(),
-            "stock_turnover" => stock
+            "turnover" => register
                 .turnovers(
                     &mut **db,
                     date("from")?.as_deref(),
@@ -609,12 +921,7 @@ impl LocalEngine {
                     row
                 })
                 .collect(),
-            other => {
-                return Err(EngineError::new(
-                    ErrorCode::NotFound,
-                    format!("нет отчёта {other}"),
-                ));
-            }
+            _ => return Err(no_report()),
         };
 
         let total = rows.len();
@@ -634,7 +941,7 @@ impl LocalEngine {
         let end = start.saturating_add(size).min(total);
         let mut page: Vec<ostov_api::Fields> = rows.drain(start.min(total)..end).collect();
         let mut refs: Vec<&mut ostov_api::Fields> = page.iter_mut().collect();
-        self.fill_titles(&mut **db, stock.dims(), &mut refs)?;
+        self.fill_titles(&mut **db, register.dims(), &mut refs)?;
 
         Ok(ListPage {
             rows: page
@@ -668,7 +975,9 @@ impl LocalEngine {
             blockers,
             ..
         } = &**shortage;
-        let stock = &self.config.stock;
+        let Some(stock) = self.config.registers.get(&shortage.register) else {
+            return error(e);
+        };
         let title = |defs: &[FieldDef], name: &str| {
             defs.iter()
                 .find(|f| f.name == name)
@@ -735,6 +1044,14 @@ fn ru_date(iso: &str) -> String {
     }
 }
 
+/// Ошибка записи из пачки: человеку сразу видно, какая это запись по счёту.
+fn numbered(n: usize, e: EngineError) -> EngineError {
+    EngineError {
+        message: format!("Запись {}: {}", n + 1, e.message),
+        ..e
+    }
+}
+
 fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
     ostov_api::Value::Decimal {
         units: d.units(),
@@ -745,21 +1062,42 @@ fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
 /// Открывает и создаёт локальные базы (режим 1).
 ///
 /// Конфигурацию передаёт приложение: `LocalConnector::new(ostov_meta::load("config")?)`.
-/// `LocalConnector::default()` — встроенный «Склад» из кода.
-#[derive(Debug, Default, Clone)]
+/// `LocalConnector::default()` — встроенный «Склад» из кода. Правила документов — встроенные,
+/// другие (Python) — через `with_rules`.
+#[derive(Default, Clone)]
 pub struct LocalConnector {
     model: Option<ostov_model::Config>,
+    rules: Option<Arc<dyn Rules + Send + Sync>>,
+}
+
+impl std::fmt::Debug for LocalConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalConnector")
+            .field("model", &self.model.as_ref().map(|m| &m.name))
+            .field("rules", &self.rules.is_some())
+            .finish()
+    }
 }
 
 impl LocalConnector {
     pub fn new(model: ostov_model::Config) -> Self {
-        Self { model: Some(model) }
+        Self {
+            model: Some(model),
+            rules: None,
+        }
+    }
+
+    /// Свои правила документов вместо встроенных, например из Python (`ostov-py`).
+    pub fn with_rules(mut self, rules: Arc<dyn Rules + Send + Sync>) -> Self {
+        self.rules = Some(rules);
+        self
     }
 
     fn config(&self) -> EngineResult<Config> {
-        match &self.model {
-            Some(model) => Config::from_model(model),
-            None => warehouse(),
+        let model = self.model.clone().unwrap_or_else(warehouse_model);
+        match &self.rules {
+            Some(rules) => Config::from_model_with(&model, rules.as_ref()),
+            None => Config::from_model(&model),
         }
         .map_err(error)
     }
@@ -797,13 +1135,15 @@ impl Connector for LocalConnector {
         &self,
         path: &str,
         file_password: Option<&str>,
-        _admin: Option<&NewAdmin>,
+        admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
-        Ok(Arc::new(
-            LocalEngine::new(Box::new(db), config).locked(lock),
-        ))
+        let engine = LocalEngine::new(Box::new(db), config).locked(lock);
+        if let Some(admin) = admin {
+            engine.create_first_admin(&admin.login, &admin.password)?;
+        }
+        Ok(Arc::new(engine))
     }
 }
 
@@ -816,35 +1156,45 @@ fn create_base(path: &str, config: Config) -> EngineResult<(SqliteDriver, Config
     }
     let lock = lock_base(path)?;
     let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
-    in_transaction(&mut db, |db| {
-        db.execute(
-            &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
-            &[],
-        )?;
-        db.execute(
-            &format!("INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', ?1)"),
-            &[Value::Text(config.name.clone())],
-        )?;
-        config.create_tables(db)?;
-        schema::record(db, &config)
-    })
-    .map_err(error)?;
+    in_transaction(&mut db, |db| install(db, &config)).map_err(error)?;
     Ok((db, config, lock))
+}
+
+/// Служебные таблицы и таблицы конфигурации в пустой базе.
+fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    let insert = format!(
+        "INSERT INTO {BASE_TABLE} (key, value) VALUES ('config', {})",
+        db.dialect().placeholder(1)
+    );
+    db.execute(
+        &format!("CREATE TABLE {BASE_TABLE} (key TEXT PRIMARY KEY, value TEXT)"),
+        &[],
+    )?;
+    db.execute(&insert, &[Value::Text(config.name.clone())])?;
+    config.create_tables(db)?;
+    settings::create_table(db)?;
+    ostov_sec::create_tables(db)?;
+    schema::record(db, config)
 }
 
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
     crate::closing::create_table(db)?;
+    settings::create_table(db)?;
+    ostov_sec::create_tables(db)?;
     if !schema::recorded(db)? {
         // Базы до реструктуризации создавались только под встроенный «Склад».
         schema::record(db, &warehouse()?)?;
     }
     schema::restructure(db, config)?;
-    if config.stock.upgrade(db)? {
-        for (table, doc) in &config.documents {
-            if doc.kind.header().iter().any(|f| f.name == "date") {
-                config.stock.fill_periods(db, table, "date")?;
+    for register in config.registers.values() {
+        if register.upgrade(db)? {
+            for (table, doc) in &config.documents {
+                let moves = doc.registers.iter().any(|r| r == register.name());
+                if moves && doc.kind.header().iter().any(|f| f.name == "date") {
+                    register.fill_periods(db, table, "date")?;
+                }
             }
         }
     }

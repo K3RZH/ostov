@@ -1,0 +1,23 @@
+[package]
+name = "ostov-client"
+description = "Engine: Remote — команды ядра по gRPC поверх TLS для приложения в режиме 2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ostov-api = { path = "../ostov-api" }
+ostov-proto = { path = "../ostov-proto" }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread"] }
+tonic = { version = "=0.14.9", features = ["tls-ring"] }
+
+[dev-dependencies]
+ostov-core = { path = "../ostov-core" }
+ostov-model = { path = "../ostov-model" }
+ostov-server = { path = "../ostov-server" }
+ostov-store = { path = "../ostov-store", features = ["postgres", "sqlite"] }
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "net", "sync"] }

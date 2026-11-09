@@ -52,7 +52,10 @@ pub(super) fn record(db: &mut dyn Driver, config: &Config) -> Result<(), CoreErr
             save(db, &d.kind.part_table(part), part.fields(), "")?;
         }
     }
-    save_register(db, &config.stock)
+    for register in config.registers.values() {
+        save_register(db, register)?;
+    }
+    Ok(())
 }
 
 /// Доводит таблицы до конфигурации: новые объекты, табличные части и поля добавляются.
@@ -90,7 +93,10 @@ pub(super) fn restructure(db: &mut dyn Driver, config: &Config) -> Result<(), Co
             }
         }
     }
-    restructure_register(db, &config.stock, stored.get(config.stock.name()))
+    for register in config.registers.values() {
+        restructure_register(db, register, stored.get(register.name()))?;
+    }
+    Ok(())
 }
 
 fn restructure_register(

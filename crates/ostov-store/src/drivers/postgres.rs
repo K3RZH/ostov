@@ -22,6 +22,7 @@ impl Dialect for PostgresDialect {
 /// База режима «сервер в локальной сети».
 pub struct PostgresDriver {
     client: Client,
+    depth: crate::Depth,
 }
 
 impl PostgresDriver {
@@ -29,6 +30,7 @@ impl PostgresDriver {
     pub fn connect(url: &str) -> Result<Self, StoreError> {
         Ok(Self {
             client: Client::connect(url, NoTls)?,
+            depth: crate::Depth::default(),
         })
     }
 }
@@ -84,15 +86,21 @@ impl Driver for PostgresDriver {
     }
 
     fn begin(&mut self) -> Result<(), StoreError> {
-        Ok(self.client.batch_execute("BEGIN")?)
+        self.client.batch_execute(&self.depth.begin())?;
+        self.depth.entered();
+        Ok(())
     }
 
     fn commit(&mut self) -> Result<(), StoreError> {
-        Ok(self.client.batch_execute("COMMIT")?)
+        self.client.batch_execute(&self.depth.commit())?;
+        self.depth.left();
+        Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), StoreError> {
-        Ok(self.client.batch_execute("ROLLBACK")?)
+        let sql = self.depth.rollback();
+        self.depth.left();
+        Ok(self.client.batch_execute(&sql)?)
     }
 }
 
@@ -154,7 +162,11 @@ fn from_row(row: &postgres::Row) -> Result<Row, StoreError> {
 
 impl From<postgres::Error> for StoreError {
     fn from(e: postgres::Error) -> Self {
-        Self::Database(e.to_string())
+        // Сам `postgres::Error` пишет только «db error»; причина — в ответе сервера.
+        match e.as_db_error() {
+            Some(db) => Self::Database(format!("{} ({})", db.message(), db.code().code())),
+            None => Self::Database(e.to_string()),
+        }
     }
 }
 
@@ -226,6 +238,21 @@ mod tests {
             .unwrap();
         let rows = db.query("SELECT name FROM items", &[]).unwrap();
         assert_eq!(rows, vec![vec![Value::Text(evil.into())]]);
+    }
+
+    #[test]
+    fn nested_transactions_use_savepoints() {
+        let Some(mut db) = db() else { return };
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('outer')", &[])
+            .unwrap();
+        db.begin().unwrap();
+        db.execute("INSERT INTO items (name) VALUES ('inner')", &[])
+            .unwrap();
+        db.rollback().unwrap();
+        db.commit().unwrap();
+        let rows = db.query("SELECT name FROM items", &[]).unwrap();
+        assert_eq!(rows, vec![vec![Value::Text("outer".into())]]);
     }
 
     #[test]

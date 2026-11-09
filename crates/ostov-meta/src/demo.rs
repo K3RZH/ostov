@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crate::Error;
 use crate::load::{
-    CATALOGS_DIR, DOCUMENTS_DIR, MANIFEST_FILE, REGISTERS_DIR, SUBSYSTEMS_DIR, Source, Sources,
-    checked, parse_sources,
+    CATALOGS_DIR, DOCUMENTS_DIR, MANIFEST_FILE, REGISTERS_DIR, ROLES_DIR, SUBSYSTEMS_DIR, Source,
+    Sources, checked, parse_sources,
 };
 
 /// Встроенные файлы: (путь внутри `config/`, текст). Тест сверяет их с папкой на диске.
@@ -42,6 +42,10 @@ const SUBSYSTEMS: [(&str, &str); 1] = [(
     "warehouse.yaml",
     include_str!("../../../config/subsystems/warehouse.yaml"),
 )];
+const ROLES: [(&str, &str); 1] = [(
+    "storekeeper.yaml",
+    include_str!("../../../config/roles/storekeeper.yaml"),
+)];
 
 /// Модель встроенной конфигурации «Склад».
 ///
@@ -66,6 +70,7 @@ pub fn demo() -> Result<ostov_model::Config, Vec<Error>> {
         documents: embedded(DOCUMENTS_DIR, &DOCUMENTS),
         registers: embedded(REGISTERS_DIR, &REGISTERS),
         subsystems: embedded(SUBSYSTEMS_DIR, &SUBSYSTEMS),
+        roles: embedded(ROLES_DIR, &ROLES),
     };
     checked(parse_sources(&sources, Vec::new())?).map(crate::convert::into_model)
 }

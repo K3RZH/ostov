@@ -11,6 +11,7 @@ pub mod error;
 pub mod field_type;
 pub mod load;
 pub mod model;
+pub mod stubs;
 
 pub use check::check;
 pub use demo::demo;
@@ -18,6 +19,7 @@ pub use error::Error;
 pub use field_type::FieldType;
 pub use load::{FORMAT_VERSION, load, parse};
 pub use model::{
-    Catalog, ConfigFiles, Document, Field, Group, Located, Manifest, MenuEntry, Register,
-    RegisterKind, Subsystem, TablePart,
+    Catalog, ConfigFiles, Document, Field, Group, Located, Manifest, MenuEntry, ObjectRights,
+    Register, RegisterKind, Role, Subsystem, TablePart,
 };
+pub use stubs::{STUBS_DIR, stubs};

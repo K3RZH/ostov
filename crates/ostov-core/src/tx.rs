@@ -16,6 +16,18 @@ pub fn in_transaction<T>(
     tx.run(f)
 }
 
+/// Пробный запрос внутри транзакции: есть ли колонка, таблица. В PostgreSQL неудачный
+/// запрос обрывает всю транзакцию, поэтому проба идёт под точкой сохранения.
+pub(crate) fn probe(db: &mut dyn Driver, sql: &str) -> Result<bool, CoreError> {
+    db.execute("SAVEPOINT ostov_probe", &[])?;
+    let ok = db.query(sql, &[]).is_ok();
+    if !ok {
+        db.execute("ROLLBACK TO SAVEPOINT ostov_probe", &[])?;
+    }
+    db.execute("RELEASE SAVEPOINT ostov_probe", &[])?;
+    Ok(ok)
+}
+
 struct Transaction<'a> {
     db: &'a mut dyn Driver,
     committed: bool,

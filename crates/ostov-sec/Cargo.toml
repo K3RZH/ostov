@@ -1,0 +1,21 @@
+[package]
+name = "ostov-sec"
+description = "Безопасность Ostov: пользователи, пароли, вход, права по ролям, сессии"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+argon2 = "=0.6.0"
+getrandom = "=0.4.3"
+ostov-model = { path = "../ostov-model" }
+ostov-store = { path = "../ostov-store" }
+
+[dev-dependencies]
+# Тесты: права по роли из настоящего config/roles и хранение на PostgreSQL.
+ostov-meta = { path = "../ostov-meta" }
+ostov-store = { path = "../ostov-store", features = ["postgres"] }

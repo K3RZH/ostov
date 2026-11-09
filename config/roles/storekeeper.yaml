@@ -1,0 +1,9 @@
+role: storekeeper
+title: Кладовщик
+objects:
+  goods: [read, create, update, delete]
+  warehouses: [read]
+  suppliers: [read, create, update]
+  receipt: [read, create, update, post, unpost, delete]
+  issue: [read, create, update, post, unpost]
+system: [closed_period]

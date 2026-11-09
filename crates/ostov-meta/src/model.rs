@@ -19,6 +19,7 @@ pub struct ConfigFiles {
     pub documents: Vec<Located<Document>>,
     pub registers: Vec<Located<Register>>,
     pub subsystems: Vec<Located<Subsystem>>,
+    pub roles: Vec<Located<Role>>,
 }
 
 /// Раздел меню: заголовок, значок и пункты — объекты и группы объектов.
@@ -154,6 +155,47 @@ pub struct Register {
     pub kind: RegisterKind,
     pub dimensions: Vec<Field>,
     pub resources: Vec<Field>,
+}
+
+/// Роль: права на справочники и документы и системные права, как они записаны в файле.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Role {
+    #[serde(rename = "role")]
+    pub name: Spanned<String>,
+    pub title: String,
+    #[serde(default)]
+    pub objects: ObjectRights,
+    #[serde(default)]
+    pub system: Vec<Spanned<String>>,
+}
+
+/// `объект: [право, ...]` в порядке файла. Повтор объекта отвергает разбор (повтор ключа).
+#[derive(Debug, Default)]
+pub struct ObjectRights(pub Vec<(Spanned<String>, Vec<Spanned<String>>)>);
+
+impl<'de> Deserialize<'de> for ObjectRights {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RightsVisitor;
+
+        impl<'de> Visitor<'de> for RightsVisitor {
+            type Value = ObjectRights;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("объекты с правами: «goods: [read, update]»")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ObjectRights, A::Error> {
+                let mut objects = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    objects.push(entry);
+                }
+                Ok(ObjectRights(objects))
+            }
+        }
+
+        deserializer.deserialize_map(RightsVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

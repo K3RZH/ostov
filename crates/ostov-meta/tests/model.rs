@@ -60,9 +60,10 @@ fn yaml_model_matches_config_rs() {
     let [stock] = model.registers.as_slice() else {
         panic!("ожидался один регистр: {:?}", model.registers);
     };
-    assert_eq!(stock.name, code.stock.name());
+    let code_stock = &code.registers["stock"];
+    assert_eq!(stock.name, code_stock.name());
     assert_eq!(stock.kind, RegisterKind::Accumulation);
-    assert_eq!(shape(&stock.dimensions), shape(code.stock.dims()));
+    assert_eq!(shape(&stock.dimensions), shape(code_stock.dims()));
     // Ресурсы ядро наружу не отдаёт; в config.rs это qty с 3 знаками.
     assert_eq!(
         shape(&stock.resources),
@@ -92,7 +93,10 @@ fn demo_matches_config_folder() {
 #[test]
 fn get_meta_for_warehouse() {
     let meta = Meta::new(&load(&repo_config()).unwrap());
-    assert!(meta.roles.is_empty(), "роли заполнит ostov-sec");
+    assert_eq!(
+        meta.roles,
+        vec!["storekeeper".to_owned(), "admin".to_owned()]
+    );
 
     let [section] = meta.menu.as_slice() else {
         panic!("ожидался один раздел меню: {:?}", meta.menu);
@@ -151,4 +155,28 @@ fn get_meta_for_warehouse() {
     let goods = meta.objects.iter().find(|o| o.name == "goods").unwrap();
     assert_eq!(goods.kind, ObjectKind::Catalog);
     assert!(goods.table_parts.is_empty());
+}
+
+#[test]
+fn stubs_describe_documents_and_rows() {
+    let files = ostov_meta::stubs(&load(&repo_config()).unwrap());
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["__init__.pyi", "issue.pyi", "receipt.pyi"]);
+    let receipt = &files[2].1;
+    for line in [
+        "class ReceiptLines:",
+        "    goods: int | None  # Товар, ссылка на goods",
+        "    qty: Decimal | None  # Количество",
+        "class Receipt:",
+        "    \"\"\"Документ «Поступление».\"\"\"",
+        "    posted: bool",
+        "    date: datetime.date | None  # Дата",
+        "    supplier: int | None  # Поставщик, ссылка на suppliers",
+        "    lines: tuple[ReceiptLines, ...]",
+    ] {
+        assert!(
+            receipt.lines().any(|l| l == line),
+            "нет строки {line:?} в\n{receipt}"
+        );
+    }
 }
