@@ -18,8 +18,10 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::engine::call_in_background;
 use crate::grid;
-use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt, Sorting};
+use crate::receipts::{self, COLUMNS, DocRef, Line, Receipt};
 use crate::shell::Shell;
+use crate::sorting::Sorting;
+use crate::values;
 use crate::windows::Windows;
 use crate::workspace::{DocTabs, TabList, WindowId, WindowRef, Workspace};
 use crate::{AppWindow, DocLink, GridColumn, GridMark, GridRow, MenuAction, ReceiptsData};
@@ -86,7 +88,7 @@ impl DocState {
             supplier: title("supplier"),
             warehouse: title("warehouse"),
             date: match data.fields.get("date") {
-                Some(Value::Date(text)) => parse_iso_date(text).map(receipts::date_text),
+                Some(Value::Date(text)) => values::parse_iso_date(text).map(values::date_text),
                 _ => None,
             }
             .unwrap_or_default(),
@@ -116,7 +118,7 @@ impl DocState {
         let content = Content {
             supplier: String::new(),
             warehouse,
-            date: receipts::date_text(NEW_DOC_DATE),
+            date: values::date_text(NEW_DOC_DATE),
             lines: Vec::new(),
         };
         Self {
@@ -285,7 +287,7 @@ fn line_from_fields(row: &Fields, catalogs: &Catalogs) -> Option<Line> {
 /// Документ интерфейса в объект ядра. Ошибка: текст для человека (поле, которое не разобрать).
 fn to_object(doc: &DocState, catalogs: &Catalogs) -> Result<ObjectData, String> {
     let (year, month, day) =
-        receipts::parse_date(&doc.content.date).ok_or("Дата: введите в виде дд.мм.гггг.")?;
+        values::parse_date(&doc.content.date).ok_or("Дата: введите в виде дд.мм.гггг.")?;
     let reference = |name: &str, id: Option<i64>, what: &str| -> Result<Value, String> {
         if name.is_empty() {
             return Ok(Value::Null);
@@ -353,7 +355,7 @@ fn receipt_from_object(doc: &DocState, data: &ObjectData) -> Receipt {
     Receipt {
         id: doc.id,
         number: doc.number,
-        date: parse_iso_date(match data.fields.get("date") {
+        date: values::parse_iso_date(match data.fields.get("date") {
             Some(Value::Date(text)) => text,
             _ => "",
         })
@@ -669,15 +671,6 @@ fn rescale(units: i64, scale: u8, target: u8) -> i64 {
     }
 }
 
-/// Дата ядра `ГГГГ-ММ-ДД` в (год, месяц, день).
-fn parse_iso_date(text: &str) -> Option<(u16, u8, u8)> {
-    let mut parts = text.split('-');
-    let year = parts.next()?.parse().ok()?;
-    let month = parts.next()?.parse().ok()?;
-    let day = parts.next()?.parse().ok()?;
-    parts.next().is_none().then_some((year, month, day))
-}
-
 /// Строка списка ядра в строку списка интерфейса; без номера строка не показывается.
 fn receipt_from_row(row: &Row) -> Option<Receipt> {
     let flag = |name: &str| matches!(row.values.get(name), Some(Value::Bool(true)));
@@ -696,7 +689,7 @@ fn receipt_from_row(row: &Row) -> Option<Receipt> {
         id: row.id,
         number: u32::try_from(int("number")?).ok()?,
         date: match row.values.get("date") {
-            Some(Value::Date(text)) => parse_iso_date(text).unwrap_or_default(),
+            Some(Value::Date(text)) => values::parse_iso_date(text).unwrap_or_default(),
             _ => (0, 0, 0),
         },
         supplier: title("supplier"),
@@ -737,7 +730,7 @@ fn fetch_receipts(engine: &dyn Engine, request: &ListRequest) -> EngineResult<(V
         }
     }
     if request.sorting.keys().len() > 1 {
-        receipts.sort_by(|a, b| request.sorting.compare(a, b));
+        receipts.sort_by(|a, b| receipts::compare(&request.sorting, a, b));
     }
     Ok((receipts, total))
 }
@@ -1378,9 +1371,9 @@ fn render_lines(app: &AppWindow, doc: &DocState) {
                     (i + 1).to_string(),
                     line.name.clone(),
                     line.unit.clone(),
-                    receipts::quantity(line.quantity_milli),
-                    receipts::money(line.price),
-                    receipts::money(line.amount),
+                    values::quantity(line.quantity_milli),
+                    values::money(line.price),
+                    values::money(line.amount),
                 ],
                 false,
             )
@@ -1388,13 +1381,13 @@ fn render_lines(app: &AppWindow, doc: &DocState) {
         .collect();
     data.set_lines(ModelRc::new(VecModel::from(rows)));
     data.set_form_count(receipts::positions(doc.content.lines.len()).into());
-    data.set_form_total(receipts::money(doc.total()).into());
+    data.set_form_total(values::money(doc.total()).into());
 }
 
 /// Дата из полей формы (день, месяц, год).
 fn form_date(data: &ReceiptsData<'_>) -> String {
     let part = |value: i32| u16::try_from(value).unwrap_or(1);
-    receipts::date_text((
+    values::date_text((
         part(data.get_form_year()),
         u8::try_from(data.get_form_month()).unwrap_or(1),
         u8::try_from(data.get_form_day()).unwrap_or(1),
@@ -1440,7 +1433,7 @@ fn fill_form(app: &AppWindow, doc: &DocState) {
     data.set_form_conflict(false);
     show_status(app, doc);
     data.set_form_number(doc.number.to_string().into());
-    let (year, month, day) = receipts::parse_date(&doc.content.date).unwrap_or(NEW_DOC_DATE);
+    let (year, month, day) = values::parse_date(&doc.content.date).unwrap_or(NEW_DOC_DATE);
     data.set_form_year(i32::from(year));
     data.set_form_month(i32::from(month));
     data.set_form_day(i32::from(day));
@@ -1813,12 +1806,12 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     data.set_line_name(line.as_ref().map_or("", |l| l.name.as_str()).into());
     data.set_line_quantity(
         line.as_ref()
-            .map_or(String::new(), |l| receipts::quantity(l.quantity_milli))
+            .map_or(String::new(), |l| values::quantity(l.quantity_milli))
             .into(),
     );
     data.set_line_price(
         line.as_ref()
-            .map_or(String::new(), |l| receipts::money(l.price))
+            .map_or(String::new(), |l| values::money(l.price))
             .into(),
     );
     data.set_line_error("".into());
@@ -2390,7 +2383,7 @@ fn wire_form(
         let app = app.as_weak();
         move |text| {
             let Some(app) = app.upgrade() else { return };
-            let clean = receipts::clean_decimal(&text, 3);
+            let clean = values::clean_decimal(&text, 3);
             if clean != text.as_str() {
                 app.global::<ReceiptsData>().set_line_quantity(clean.into());
             }
@@ -2400,7 +2393,7 @@ fn wire_form(
         let app = app.as_weak();
         move |text| {
             let Some(app) = app.upgrade() else { return };
-            let clean = receipts::clean_decimal(&text, 2);
+            let clean = values::clean_decimal(&text, 2);
             if clean != text.as_str() {
                 app.global::<ReceiptsData>().set_line_price(clean.into());
             }
@@ -2415,8 +2408,8 @@ fn wire_form(
             };
             let data = app.global::<ReceiptsData>();
             let name = data.get_line_name().to_string();
-            let quantity = receipts::parse_decimal(&data.get_line_quantity(), 3).filter(|q| *q > 0);
-            let price = receipts::parse_decimal(&data.get_line_price(), 2);
+            let quantity = values::parse_decimal(&data.get_line_quantity(), 3).filter(|q| *q > 0);
+            let price = values::parse_decimal(&data.get_line_price(), 2);
             let error = match (name.is_empty(), quantity, price) {
                 (true, _, _) => "Выберите товар из справочника.",
                 (_, None, _) => {
@@ -2460,12 +2453,6 @@ mod tests {
         assert_eq!(kopecks(1250, 2), 1250);
         assert_eq!(kopecks(12, 0), 1200);
         assert_eq!(kopecks(12_345, 3), 1234);
-    }
-
-    #[test]
-    fn iso_date_is_parsed() {
-        assert_eq!(parse_iso_date("2026-10-18"), Some((2026, 10, 18)));
-        assert_eq!(parse_iso_date("18.10.2026"), None);
     }
 
     /// Документ из настоящего ядра: чтение, запись, конфликт версий, новый документ с проведением.

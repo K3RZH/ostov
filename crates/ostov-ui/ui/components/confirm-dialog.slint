@@ -1,0 +1,55 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "button.slint";
+
+// Подтверждение действия поверх экрана: заголовок, пояснение, «Отмена» и кнопка действия.
+// Растягивается на всю область, затемняет её и забирает щелчки на себя. Показывает и скрывает
+// его тот, кто подключил (`if ... : ConfirmDialog`); закрытие по «Отмена» тоже на нём.
+export component ConfirmDialog inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <string> accept-text;
+    callback accepted();
+    callback cancelled();
+
+    background: Theme.scrim;
+
+    TouchArea { }
+
+    card := Rectangle {
+        width: min(420px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+            Text {
+                text: root.title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Text {
+                text: root.text;
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                Button {
+                    text: root.accept-text;
+                    kind: ButtonKind.primary;
+                    clicked => { root.accepted(); }
+                }
+            }
+        }
+    }
+}

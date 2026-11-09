@@ -5,12 +5,10 @@ import { TextField } from "../components/text-field.slint";
 import { Select } from "../components/select.slint";
 import { DateField } from "../components/date-field.slint";
 import { MenuAction } from "../components/context-menu.slint";
-import { IconButton } from "../components/icon-button.slint";
+import { AlertBanner } from "../components/alert-banner.slint";
+import { ConfirmDialog } from "../components/confirm-dialog.slint";
+import { DocLink } from "../components/doc-link.slint";
 import { ErpGrid, GridColumn, GridMark, GridRow } from "../components/erp-grid.slint";
-
-// Документ, названный в предупреждении (например, расход, который мешает перепровести приход):
-// показывается ссылкой, нажатие открывает его в новой вкладке. kind это имя объекта в ядре.
-export struct DocLink { title: string, kind: string, number: int }
 
 // Данные и события экрана «Поступления»: список и форма документа.
 // Состояние ведёт Rust (src/receipts_ui.rs), здесь только свойства и колбэки.
@@ -118,84 +116,6 @@ export global ReceiptsData {
     callback form-post(bool);
     callback form-save();
     callback form-close();
-}
-
-// Ссылка на документ в предупреждении.
-component DocLinkText inherits Rectangle {
-    in property <string> text;
-    callback clicked();
-    width: label.preferred-width;
-    height: label.preferred-height;
-    label := Text {
-        text: root.text;
-        font-size: Theme.font-body;
-        font-weight: 600;
-        color: Theme.accent-text;
-    }
-    // Подчёркивание: в этой версии Slint у Text нет свойства подчёркивания.
-    Rectangle {
-        y: label.preferred-height - 1px;
-        height: touch.has-hover ? 2px : 1px;
-        background: Theme.accent-text;
-    }
-    touch := TouchArea {
-        mouse-cursor: MouseCursor.pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// Полоса ошибки или предупреждения: текст, документы ссылками, кнопка действия или крестик.
-component AlertBanner inherits Rectangle {
-    in property <string> text;
-    in property <[DocLink]> links;
-    in property <bool> closable;
-    in property <string> action-text;
-    callback dismissed();
-    callback action();
-    callback link-clicked(string, int);
-
-    border-radius: Shape.surface-radius;
-    background: Theme.danger-soft;
-    height: content.preferred-height;
-
-    content := VerticalLayout {
-        padding: Theme.space-8;
-        spacing: Theme.space-4;
-        HorizontalLayout {
-            spacing: Theme.space-12;
-            Text {
-                text: root.text;
-                font-size: Theme.font-body;
-                color: Theme.danger;
-                wrap: word-wrap;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-            if root.action-text != "" : Button {
-                text: root.action-text;
-                clicked => { root.action(); }
-            }
-            if root.closable : IconButton {
-                icon: "close";
-                control-size: 24px;
-                clicked => { root.dismissed(); }
-            }
-        }
-        if root.links.length > 0 : HorizontalLayout {
-            alignment: start;
-            spacing: Theme.space-12;
-            Text {
-                text: "Документы:";
-                font-size: Theme.font-body;
-                color: Theme.text-muted;
-                vertical-alignment: center;
-            }
-            for link in root.links : DocLinkText {
-                text: link.title;
-                clicked => { root.link-clicked(link.kind, link.number); }
-            }
-        }
-    }
 }
 
 component ReceiptList inherits VerticalLayout {
@@ -532,51 +452,6 @@ component CatalogDialog inherits Rectangle {
     }
 }
 
-// Подтверждение удаления документа из списка.
-component ConfirmDialog inherits Rectangle {
-    background: Theme.scrim;
-
-    TouchArea { }
-
-    card := Rectangle {
-        width: min(420px, root.width - 2 * Theme.space-24);
-        height: content.preferred-height;
-        x: (root.width - self.width) / 2;
-        y: max(Theme.space-24, (root.height - self.height) / 2);
-        border-radius: Shape.surface-radius;
-        border-width: 1px;
-        border-color: Theme.border;
-        background: Theme.surface;
-
-        content := VerticalLayout {
-            padding: Theme.space-24;
-            spacing: Theme.space-16;
-            Text {
-                text: "Удалить документ?";
-                font-size: Theme.font-title;
-                font-weight: 700;
-                color: Theme.text;
-            }
-            Text {
-                text: ReceiptsData.confirm-text;
-                font-size: Theme.font-body;
-                color: Theme.text-muted;
-                wrap: word-wrap;
-            }
-            HorizontalLayout {
-                spacing: Theme.space-12;
-                alignment: end;
-                Button { text: "Отмена"; clicked => { ReceiptsData.confirm-open = false; } }
-                Button {
-                    text: "Удалить";
-                    kind: ButtonKind.primary;
-                    clicked => { ReceiptsData.confirm-accepted(); }
-                }
-            }
-        }
-    }
-}
-
 // Вкладка «Поступления товаров»: только список; документ открывается в своей вкладке.
 export component ReceiptsView inherits Rectangle {
     background: Theme.bg;
@@ -588,6 +463,11 @@ export component ReceiptsView inherits Rectangle {
         height: parent.height;
     }
     if ReceiptsData.confirm-open : ConfirmDialog {
+        title: "Удалить документ?";
+        text: ReceiptsData.confirm-text;
+        accept-text: "Удалить";
+        accepted => { ReceiptsData.confirm-accepted(); }
+        cancelled => { ReceiptsData.confirm-open = false; }
         x: 0px;
         y: 0px;
         width: parent.width;
