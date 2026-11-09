@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
     BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
-    JournalEntry, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PostAction,
-    ReportQuery, Saved, SessionInfo, UserInfo,
+    JournalEntry, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
+    PostAction, ReportQuery, Saved, SessionInfo, UserInfo,
 };
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_from_pb, fields_to_pb, from_status, pb, session_from_pb};
@@ -55,11 +55,21 @@ impl RemoteConnector {
                 .await
                 .map_err(|e| unavailable(&format!("{e:?}")))
         })?;
-        Ok(RemoteEngine {
+        let engine = RemoteEngine {
             client: EngineClient::new(channel),
             token: Mutex::new(None),
             runtime,
-        })
+        };
+        let server = engine.hello()?.protocol_version;
+        if server != PROTOCOL_VERSION {
+            return Err(EngineError::new(
+                ErrorCode::Incompatible,
+                format!(
+                    "Версия протокола сервера {server}, а программы {PROTOCOL_VERSION}: обновите сервер и программу до одной версии."
+                ),
+            ));
+        }
+        Ok(engine)
     }
 }
 
@@ -73,7 +83,6 @@ impl Connector for RemoteConnector {
     /// `address` — `хост` или `хост:порт`, например `server.local:7700`.
     fn connect_remote(&self, address: &str) -> EngineResult<Arc<dyn Engine>> {
         let engine = self.connect(address)?;
-        engine.hello()?;
         Ok(Arc::new(engine))
     }
 
