@@ -69,13 +69,14 @@ component RecentRow inherits Rectangle {
                 color: Theme.text-muted;
             }
         }
-        // «Убрать из списка» у выбранной строки. Место держит и скрытая кнопка: строки не прыгают.
+        // «Убрать из списка» у строки под мышкой и у выбранной. Место держит и скрытая кнопка:
+        // строки не прыгают. Пока мышь на самом крестике, строка его не прячет.
         VerticalLayout {
             alignment: center;
-            IconButton {
+            close := IconButton {
                 icon: "close";
                 control-size: Theme.control-sm;
-                visible: root.selected;
+                visible: root.selected || touch.has-hover || close.has-hover;
                 enabled: !root.busy;
                 clicked => { root.forget(); }
             }
@@ -131,7 +132,8 @@ export component StartPage inherits Rectangle {
                             selected: index == root.selected-recent;
                             busy: root.busy;
                             chosen => { root.selected-recent = index; }
-                            forget => { root.forget(); }
+                            // Крестик чужой строки сначала выбирает её: подтверждение говорит о ней.
+                            forget => { root.selected-recent = index; root.forget(); }
                         }
                     }
                     if root.error != "" : ErrorBanner { text: root.error; }

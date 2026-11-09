@@ -156,12 +156,14 @@ fn main() {
     let (file0, file2) = (rows[0].path.to_string(), rows[2].path.to_string());
     settle();
 
-    // Крестик есть только у выбранной строки: щелчок на месте чужого крестика выбирает строку.
+    // Крестик виден у строки под мышкой: щелчок по нему выбирает эту строку и спрашивает о ней.
     click(&window, (CROSS_X, row_y(3, 1)));
     check(
-        "щелчок по строке выбирает её, окно не открывается",
-        window.get_selected_recent() == 1 && !window.get_forgetting(),
+        "крестик строки под мышкой выбирает её и открывает подтверждение",
+        window.get_selected_recent() == 1 && window.get_forgetting(),
     );
+    click(&window, CANCEL);
+    check("отмена закрывает подтверждение", !window.get_forgetting());
     click(&window, (ROW_X, row_y(3, 0)));
     check("выбрана первая строка", window.get_selected_recent() == 0);
 
