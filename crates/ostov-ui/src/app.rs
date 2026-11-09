@@ -1366,6 +1366,55 @@ fn wire_users(window: &AppWindow, users: &UsersUi) {
         }
     });
 
+    window.on_user_password({
+        let (window, users) = (window.as_weak(), users.clone());
+        move |row| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some(login) =
+                index(row).and_then(|i| users.directory.borrow().get(i).map(|u| u.login.clone()))
+            else {
+                return;
+            };
+            window.set_pw_login(login.into());
+            window.set_pw_password("".into());
+            window.set_pw_repeat("".into());
+            window.set_pw_error("".into());
+            window.set_changing_password(true);
+        }
+    });
+
+    window.on_password_confirmed({
+        let (window, users) = (window.as_weak(), users.clone());
+        move || {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let login = window.get_pw_login().to_string();
+            let password = window.get_pw_password().to_string();
+            window.set_pw_error("".into());
+            let main = users.main.clone();
+            users.run(
+                &window,
+                move |engine| engine.admin_set_user_password(&login, &password),
+                move |window, result| match result {
+                    // Правила пароля (длина на сервере, нет такого логина) знает ядро.
+                    Err(message) => window.set_pw_error(message.into()),
+                    Ok(()) => {
+                        let login = window.get_pw_login();
+                        window.set_pw_password("".into());
+                        window.set_pw_repeat("".into());
+                        window.set_changing_password(false);
+                        if let Some(main) = main.upgrade() {
+                            show_status(&main, &format!("Пароль пользователя «{login}» сменён."));
+                        }
+                    }
+                },
+            );
+        }
+    });
+
     window.on_user_add_confirmed({
         let (window, users) = (window.as_weak(), users.clone());
         move || {

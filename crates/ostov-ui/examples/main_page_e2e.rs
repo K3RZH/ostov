@@ -81,6 +81,11 @@ fn main() {
         let toggled = toggled.clone();
         move |row| toggled.set(row)
     });
+    let password_row = Rc::new(Cell::new(-1));
+    window.on_user_password({
+        let password_row = password_row.clone();
+        move |row| password_row.set(row)
+    });
     let closed = Rc::new(Cell::new(0));
     let switched = Rc::new(Cell::new(0));
     window.on_close_base({
@@ -142,8 +147,13 @@ fn main() {
 
     window.set_adding_user(false);
     settle();
-    click(&window, 1350.0, 238.0);
+    click(&window, 1395.0, 238.0);
     check("«Отключить» в строке срабатывает", toggled.get() == 0);
+    click(&window, 1260.0, 282.0);
+    check(
+        "«Сменить пароль» во второй строке срабатывает",
+        password_row.get() == 1,
+    );
 
     // Меню под аватаром: пункт «Сменить пользователя» недоступен, пока база без входа.
     click(&window, 1276.0, 24.0);

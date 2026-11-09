@@ -8,6 +8,7 @@ import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
+import { PasswordDialog } from "screens/password-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 
@@ -124,6 +125,15 @@ export component AppWindow inherits Window {
     in property <[UserRow]> users <=> main-page.users;
     in property <string> user-message <=> main-page.user-message;
     callback user-toggle <=> main-page.user-toggle;
+    callback user-password <=> main-page.user-password;
+
+    // Окно «Новый пароль» для пользователя из списка.
+    in-out property <bool> changing-password;
+    in property <string> pw-login;
+    in property <string> pw-error;
+    in-out property <string> pw-password;
+    in-out property <string> pw-repeat;
+    callback password-confirmed();
     callback nav-clicked <=> main-page.nav-clicked;
     callback tab-selected <=> main-page.tab-selected;
     callback tab-closed <=> main-page.tab-closed;
@@ -244,6 +254,7 @@ export component AppWindow inherits Window {
         tab-returned(i) => { root.tab-returned(i); }
         user-add-clicked => { root.adding-user = true; }
         user-toggle(i) => { root.user-toggle(i); }
+        user-password(i) => { root.user-password(i); }
     }
 
     if root.creating && root.page == 0 : CreateDialog {
@@ -310,6 +321,23 @@ export component AppWindow inherits Window {
         density-chosen(mode) => { root.density-chosen(mode); }
         font-chosen(mode) => { root.font-chosen(mode); }
         closed => { root.settings-open = false; }
+    }
+
+    if root.changing-password : PasswordDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        login: root.pw-login;
+        error: root.pw-error;
+        password <=> root.pw-password;
+        repeat <=> root.pw-repeat;
+        confirmed => { root.password-confirmed(); }
+        cancelled => {
+            root.changing-password = false;
+            root.pw-password = "";
+            root.pw-repeat = "";
+        }
     }
 
     if root.adding-user : UserDialog {

@@ -59,6 +59,7 @@ export component MainPage inherits Rectangle {
     in property <string> user-message;
     callback user-add-clicked();
     callback user-toggle(int);
+    callback user-password(int);
 
     background: Theme.bg;
 
@@ -156,6 +157,7 @@ export component MainPage inherits Rectangle {
                 follower-active: root.follower-active;
                 user-add-clicked => { root.user-add-clicked(); }
                 user-toggle(i) => { root.user-toggle(i); }
+                user-password(i) => { root.user-password(i); }
             }
         }
 

@@ -198,6 +198,7 @@ export component TabHost inherits VerticalLayout {
 
     callback user-add-clicked();
     callback user-toggle(int);
+    callback user-password(int);
 
     // Меню вкладки (правая кнопка): куда открыть и для какой вкладки.
     private property <length> tab-menu-x;
@@ -338,6 +339,7 @@ export component TabHost inherits VerticalLayout {
                     message: root.user-message;
                     add-clicked => { root.user-add-clicked(); }
                     toggle(i) => { root.user-toggle(i); }
+                    password(i) => { root.user-password(i); }
                 }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipts" : ReceiptsView { }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "receipt" : ReceiptFormView { }

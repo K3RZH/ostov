@@ -197,6 +197,33 @@ mod tests {
         }
     }
 
+    // Кнопка «Сменить пароль»: после смены администратором старый пароль не подходит, новый подходит.
+    #[test]
+    fn admin_changes_user_password() {
+        let (dir, path) = temp_base("set-password");
+        let admin = NewAdmin {
+            login: "admin".into(),
+            password: "1".into(),
+        };
+        let engine = create(&path, None, Some(&admin));
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            assert!(engine.login("admin", "1").is_ok());
+            let user = ostov_api::NewUser {
+                login: "keeper".into(),
+                display_name: "Кладовщик".into(),
+                role: "storekeeper".into(),
+                password: "старый".into(),
+            };
+            assert!(engine.admin_add_user(&user).is_ok());
+            assert!(engine.admin_set_user_password("keeper", "новый").is_ok());
+            assert!(engine.admin_set_user_password("нет-такого", "x").is_err());
+            assert!(engine.login("keeper", "старый").is_err());
+            assert!(engine.login("keeper", "новый").is_ok());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     // Просьба Артёма №5: первым пользователем не-администратор отклоняется, вход не включается.
     #[test]
     fn first_user_must_be_administrator() {
