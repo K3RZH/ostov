@@ -165,6 +165,8 @@ export component LoginPage inherits Rectangle {
                         Button {
                             text: "Назад к выбору базы";
                             kind: ButtonKind.text;
+                            // Пока ядро проверяет пароль, база занята этим входом.
+                            enabled: !root.locked;
                             clicked => { root.back(); }
                         }
                     }

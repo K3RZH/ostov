@@ -120,6 +120,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // На этом держится переход к входу после первого пользователя (UsersUi::ask_login).
+    #[test]
+    fn first_user_turns_login_on() {
+        let (dir, path) = temp_base("first-user");
+        let engine = create(&path, None, None);
+        assert!(engine.is_ok(), "{:?}", engine.err());
+        if let Ok(engine) = engine {
+            let added = engine.admin_add_user(&ostov_api::NewUser {
+                login: "admin".into(),
+                display_name: "Администратор".into(),
+                role: "admin".into(),
+                password: "длинный-пароль-1".into(),
+            });
+            assert!(added.is_ok(), "{added:?}");
+            assert!(matches!(engine.hello(), Ok(info) if info.login_required));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn home_prefix_expands() {
         if let Ok(home) = std::env::var("HOME") {

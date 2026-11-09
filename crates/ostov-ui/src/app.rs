@@ -357,6 +357,8 @@ struct Session {
     meta: Option<Meta>,
     /// Показывать ли «Администрирование». Права всё равно проверяет ядро на каждой команде.
     admin: bool,
+    /// Вошёл ли пользователь (в базе без пользователей входа нет).
+    logged_in: bool,
 }
 
 /// Встроенная роль администратора в ядре (`ostov-model`).
@@ -490,6 +492,7 @@ fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: 
                         let mut session = session.borrow_mut();
                         session.meta = Some(meta);
                         session.admin = is_admin(Some(&user));
+                        session.logged_in = true;
                     }
                     enter_main(&app, &screens, &session.borrow());
                 }
@@ -1007,6 +1010,22 @@ impl UsersUi {
         );
     }
 
+    /// В базе появился первый пользователь: ядро теперь требует вход, текущая сессия без
+    /// пользователя больше ничего не может. Показываем страницу входа той же открытой базы.
+    fn ask_login(&self) {
+        let Some(main) = self.main.upgrade() else {
+            return;
+        };
+        let name = {
+            let mut session = self.session.borrow_mut();
+            session.stage = Some(LoginKind::LocalUser);
+            session.name.clone()
+        };
+        configure_login(&main, LoginKind::LocalUser, &name, "");
+        main.set_hint("В базе появился администратор: войдите под ним.".into());
+        show_page(&main, PAGE_LOGIN);
+    }
+
     fn reload(&self, window: &AppWindow) {
         self.run(
             window,
@@ -1053,17 +1072,32 @@ fn wire_users(window: &AppWindow, users: &UsersUi) {
                 window.set_user_error("Выберите роль.".into());
                 return;
             };
+            // В базе без пользователей первый добавленный включает вход: если он не
+            // администратор, управлять пользователями станет некому.
+            let first = !users.session.borrow().logged_in;
+            if first && role != ADMIN_ROLE {
+                window.set_user_error(
+                    format!(
+                        "Первым добавьте администратора (роль «{ADMIN_ROLE}»): после этого база будет спрашивать вход."
+                    )
+                    .into(),
+                );
+                return;
+            }
+            let login = window.get_nu_login().trim().to_owned();
+            let name = window.get_nu_name().trim().to_owned();
             let user = NewUser {
-                login: window.get_nu_login().trim().to_owned(),
-                display_name: window.get_nu_name().trim().to_owned(),
+                display_name: if name.is_empty() { login.clone() } else { name },
+                login,
                 role: role.to_string(),
                 password: window.get_nu_password().to_string(),
             };
             window.set_user_error("".into());
+            let after = users.clone();
             users.run(
                 &window,
                 move |engine| engine.admin_add_user(&user),
-                |window, result| match result {
+                move |window, result| match result {
                     Err(message) => window.set_user_error(message.into()),
                     Ok(()) => {
                         window.set_user_message("".into());
@@ -1073,6 +1107,9 @@ fn wire_users(window: &AppWindow, users: &UsersUi) {
                         window.set_nu_password("".into());
                         window.set_nu_repeat("".into());
                         window.set_adding_user(false);
+                        if first {
+                            after.ask_login();
+                        }
                     }
                 },
             );
