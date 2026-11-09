@@ -10,6 +10,7 @@ use ostov_store::Driver;
 use ostov_store::drivers::postgres::PostgresDriver;
 use ostov_store::drivers::sqlite::SqliteDriver;
 
+use crate::PasswordPolicy;
 use crate::password::{HashParams, hash_password, verify_password};
 use crate::{
     NewUser, Password, SecError, Sessions, User, add_user, create_tables, delay_secs, has_users,
@@ -17,6 +18,8 @@ use crate::{
 };
 
 pub(crate) const GOOD_PASSWORD: &str = "правильный-пароль";
+const STRICT: PasswordPolicy = PasswordPolicy::STRICT;
+const LOCAL: PasswordPolicy = PasswordPolicy::LOCAL;
 
 /// Чистые базы с таблицей пользователей: SQLite и, если задан `OSTOV_PG_URL`, PostgreSQL.
 pub(crate) fn bases(test: &str) -> Vec<Box<dyn Driver>> {
@@ -63,7 +66,7 @@ fn new_user(login: &str, role: &str) -> NewUser {
 }
 
 pub(crate) fn add(db: &mut dyn Driver, login: &str, role: &str) -> User {
-    add_user(db, &new_user(login, role), &roles()).unwrap()
+    add_user(db, &new_user(login, role), &roles(), STRICT).unwrap()
 }
 
 fn invalid(result: Result<User, SecError>) -> String {
@@ -110,7 +113,7 @@ fn add_user_checks_every_field() {
         let try_add = |db: &mut dyn Driver, change: &dyn Fn(&mut NewUser)| {
             let mut user = new_user("ivan", "storekeeper");
             change(&mut user);
-            add_user(db, &user, &roles)
+            add_user(db, &user, &roles, STRICT)
         };
         let login_rule = "логин: от 3 до 64 символов";
         for login in ["iv", &"a".repeat(65), "иван", "ivan petrov", "ivan@shop"] {
@@ -121,10 +124,11 @@ fn add_user_checks_every_field() {
         assert_eq!(reason, "имя пользователя не может быть пустым");
         let reason = invalid(try_add(db, &|u| u.role = "cashier".into()));
         assert_eq!(reason, "нет роли «cashier»");
-        for password in ["коротко".to_owned(), "x".repeat(1025)] {
-            let reason = invalid(try_add(db, &|u| u.password = password.as_str().into()));
-            assert_eq!(reason, "пароль: от 12 до 1024 символов");
-        }
+        let reason = invalid(try_add(db, &|u| u.password = "коротко".into()));
+        assert_eq!(reason, "пароль: не короче 12 символов");
+        let long = "x".repeat(1025);
+        let reason = invalid(try_add(db, &|u| u.password = long.as_str().into()));
+        assert_eq!(reason, "пароль: не длиннее 1024 символов");
         assert!(
             !has_users(db).unwrap(),
             "ни один неверный пользователь не записан"
@@ -145,6 +149,7 @@ fn login_is_lowercased_and_unique() {
             db,
             &new_user("IVAN.PETROV_2-X", "admin"),
             &roles(),
+            STRICT,
         ));
         assert_eq!(reason, "логин «ivan.petrov_2-x» уже занят");
         add(db, "anna", "admin");
@@ -291,9 +296,9 @@ fn new_password_replaces_old_and_resets_failures() {
         for _ in 0..6 {
             let _ = verify(db, "ivan", &wrong);
         }
-        let reason = invalid(set_password(db, "ivan", &"короткий".into()));
-        assert_eq!(reason, "пароль: от 12 до 1024 символов");
-        let user = set_password(db, "ivan", &"новый-длинный-пароль".into()).unwrap();
+        let reason = invalid(set_password(db, "ivan", &"короткий".into(), STRICT));
+        assert_eq!(reason, "пароль: не короче 12 символов");
+        let user = set_password(db, "ivan", &"новый-длинный-пароль".into(), STRICT).unwrap();
         assert_eq!(user.version, 2);
         assert!(verify(db, "ivan", &GOOD_PASSWORD.into()).is_err());
         verify(db, "ivan", &"новый-длинный-пароль".into()).unwrap();
@@ -358,6 +363,7 @@ fn some_user() -> User {
         role: "storekeeper".into(),
         active: true,
         version: 1,
+        weak_password: false,
     }
 }
 
@@ -417,4 +423,55 @@ fn disabled_user_loses_all_sessions() {
     assert_eq!(sessions.touch(&first, 1), None);
     assert_eq!(sessions.touch(&second, 1), None);
     assert!(sessions.touch(&other, 1).is_some());
+}
+
+// ---------------------------------------------------------------- политика пароля (ADR-033)
+
+#[test]
+fn local_policy_takes_any_password_and_marks_short_ones() {
+    for db in &mut bases("local_policy") {
+        let db = db.as_mut();
+        let user = |login: &str, password: &str| NewUser {
+            password: password.into(),
+            ..new_user(login, "storekeeper")
+        };
+        let empty = add_user(db, &user("anna", ""), &roles(), LOCAL).unwrap();
+        assert!(empty.weak_password);
+        verify(db, "anna", &"".into()).unwrap();
+        assert!(verify(db, "anna", &"x".into()).is_err());
+
+        let short = add_user(db, &user("ivan", "1234"), &roles(), LOCAL).unwrap();
+        assert!(short.weak_password);
+        let long = add_user(db, &user("petr", GOOD_PASSWORD), &roles(), LOCAL).unwrap();
+        assert!(!long.weak_password);
+        let strict = add_user(db, &user("oleg", "1234"), &roles(), STRICT);
+        assert_eq!(invalid(strict), "пароль: не короче 12 символов");
+
+        // Пометка живёт до смены пароля на длинный, и вход её видит.
+        assert!(verify(db, "ivan", &"1234".into()).unwrap().weak_password);
+        let changed = set_password(db, "ivan", &GOOD_PASSWORD.into(), STRICT).unwrap();
+        assert!(!changed.weak_password);
+        let again = set_password(db, "ivan", &"12".into(), LOCAL).unwrap();
+        assert!(again.weak_password);
+        assert!(
+            list_users(db)
+                .unwrap()
+                .iter()
+                .any(|u| u.login == "anna" && u.weak_password)
+        );
+    }
+}
+
+#[test]
+fn old_users_table_gets_weak_password_column() {
+    for db in &mut bases("old_users") {
+        let db = db.as_mut();
+        add(db, "ivan", "admin");
+        db.execute("ALTER TABLE ostov_users DROP COLUMN weak_password", &[])
+            .unwrap();
+        create_tables(db).unwrap();
+        create_tables(db).unwrap();
+        let user = verify(db, "ivan", &GOOD_PASSWORD.into()).unwrap();
+        assert!(!user.weak_password);
+    }
 }

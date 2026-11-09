@@ -18,6 +18,7 @@ pub use local::{LocalConnector, LocalEngine};
 pub use object::catalog::{Catalog, Element};
 pub use object::document::{Document, DocumentKind, TablePart};
 pub use object::{FieldDef, FieldKind, FieldValue, Fields};
+pub use ostov_sec::PasswordPolicy;
 pub use posting::{
     Moves, Parts, PostingRule, insert_and_post, insert_and_post_to, post, post_to, save, save_to,
     unpost, unpost_from,

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ostov_api::{Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
-use ostov_core::LocalConnector;
+use ostov_core::{LocalConnector, PasswordPolicy};
 
 /// Название и версия встроенной конфигурации для стартовой страницы.
 pub fn config_title() -> Option<(String, String)> {
@@ -23,7 +23,8 @@ fn connector() -> EngineResult<LocalConnector> {
             format!("Встроенная конфигурация не прошла проверку: {first}"),
         )
     })?;
-    Ok(LocalConnector::new(config))
+    // Один компьютер: любой пароль, в том числе пустой (ADR-033).
+    Ok(LocalConnector::new(config).with_password_policy(PasswordPolicy::LOCAL))
 }
 
 /// Открывает файл базы.

@@ -6,7 +6,7 @@ use ostov_model::RoleDef;
 use ostov_store::{Dialect, Driver, Row, StoreError, Value};
 
 use crate::SecError;
-use crate::password::{self, HashParams, Password};
+use crate::password::{self, HashParams, Password, PasswordPolicy};
 use crate::rights::{role_exists, system_rights};
 
 pub const USERS_TABLE: &str = "ostov_users";
@@ -16,7 +16,7 @@ const LOGIN_MAX: usize = 64;
 const FREE_ATTEMPTS: i64 = 5;
 /// Потолок задержки: дальше она не растёт, постоянной блокировки нет (СТ-32).
 const MAX_DELAY_SECS: u64 = 30;
-const COLUMNS: &str = "id, login, display_name, role, active, version";
+const COLUMNS: &str = "id, login, display_name, role, active, version, weak_password";
 
 /// Данные для `add_user`. `Debug` пароль не показывает.
 #[derive(Debug, Clone)]
@@ -36,6 +36,9 @@ pub struct User {
     pub role: String,
     pub active: bool,
     pub version: i64,
+    /// Пароль задан на одном компьютере и короче 12 символов: на сервер с ним не войти,
+    /// пока администратор не сменит пароль (ADR-033).
+    pub weak_password: bool,
 }
 
 pub(crate) fn create_table(db: &mut dyn Driver) -> Result<(), SecError> {
@@ -43,13 +46,35 @@ pub(crate) fn create_table(db: &mut dyn Driver) -> Result<(), SecError> {
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} ({} {}, login TEXT NOT NULL UNIQUE, \
          display_name TEXT NOT NULL, role TEXT NOT NULL, password TEXT NOT NULL, \
-         active BIGINT NOT NULL, failed BIGINT NOT NULL, version BIGINT NOT NULL)",
+         active BIGINT NOT NULL, failed BIGINT NOT NULL, version BIGINT NOT NULL, \
+         weak_password BIGINT NOT NULL DEFAULT 0)",
         table(d),
         d.quote_ident("id"),
         d.id_column()
     );
     db.execute(&sql, &[])?;
+    if !has_weak_column(db)? {
+        let sql = format!(
+            "ALTER TABLE {} ADD COLUMN weak_password BIGINT NOT NULL DEFAULT 0",
+            table(db.dialect())
+        );
+        db.execute(&sql, &[])?;
+    }
     Ok(())
+}
+
+/// Таблицы до ADR-033 без колонки `weak_password`. Спрашиваем каталог, а не пробуем запрос:
+/// в PostgreSQL неудачный запрос обрывает транзакцию ядра.
+fn has_weak_column(db: &mut dyn Driver) -> Result<bool, SecError> {
+    let sql = if db.dialect().name() == "postgres" {
+        format!(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() \
+             AND table_name = '{USERS_TABLE}' AND column_name = 'weak_password'"
+        )
+    } else {
+        format!("SELECT 1 FROM pragma_table_info('{USERS_TABLE}') WHERE name = 'weak_password'")
+    };
+    Ok(!db.query(&sql, &[])?.is_empty())
 }
 
 /// Есть ли хоть один пользователь: по этому ядро решает, нужен ли вход.
@@ -64,8 +89,13 @@ pub fn has_users(db: &mut dyn Driver) -> Result<bool, SecError> {
 /// Добавляет активного пользователя. Логин приводится к нижнему регистру.
 ///
 /// # Errors
-/// `Invalid` — логин, имя, роль или длина пароля не подходят, логин занят.
-pub fn add_user(db: &mut dyn Driver, user: &NewUser, roles: &[RoleDef]) -> Result<User, SecError> {
+/// `Invalid` — логин, имя, роль или длина пароля по `policy` не подходят, логин занят.
+pub fn add_user(
+    db: &mut dyn Driver,
+    user: &NewUser,
+    roles: &[RoleDef],
+    policy: PasswordPolicy,
+) -> Result<User, SecError> {
     let login = normalize_login(&user.login)?;
     let display_name = user.display_name.trim();
     if display_name.is_empty() {
@@ -74,16 +104,16 @@ pub fn add_user(db: &mut dyn Driver, user: &NewUser, roles: &[RoleDef]) -> Resul
         ));
     }
     check_role(&user.role, roles)?;
-    user.password.check_length()?;
+    user.password.check_length(policy)?;
     if find(db, &login, false)?.is_some() {
         return Err(SecError::Invalid(format!("логин «{login}» уже занят")));
     }
     let hash = password::hash_password(&user.password, HashParams::current())?;
     let d = db.dialect();
-    let placeholders: Vec<String> = (1..=7).map(|n| d.placeholder(n)).collect();
+    let placeholders: Vec<String> = (1..=8).map(|n| d.placeholder(n)).collect();
     let sql = format!(
-        "INSERT INTO {} (login, display_name, role, password, active, failed, version) \
-         VALUES ({})",
+        "INSERT INTO {} (login, display_name, role, password, active, failed, version, \
+         weak_password) VALUES ({})",
         table(d),
         placeholders.join(", ")
     );
@@ -95,6 +125,7 @@ pub fn add_user(db: &mut dyn Driver, user: &NewUser, roles: &[RoleDef]) -> Resul
         Value::Int(1),
         Value::Int(0),
         Value::Int(1),
+        Value::Int(i64::from(user.password.is_weak())),
     ];
     db.execute(&sql, &values)?;
     get(db, &login, false)
@@ -158,15 +189,24 @@ pub fn set_role(
 /// Новый пароль; счётчик ошибок входа обнуляется. Старый пароль проверяет ядро через `verify`.
 ///
 /// # Errors
-/// `Invalid` — длина пароля; `NotFound`; `VersionConflict`.
-pub fn set_password(db: &mut dyn Driver, login: &str, new: &Password) -> Result<User, SecError> {
-    new.check_length()?;
+/// `Invalid` — длина пароля по `policy`; `NotFound`; `VersionConflict`.
+pub fn set_password(
+    db: &mut dyn Driver,
+    login: &str,
+    new: &Password,
+    policy: PasswordPolicy,
+) -> Result<User, SecError> {
+    new.check_length(policy)?;
     let user = get(db, login, true)?;
     let hash = password::hash_password(new, HashParams::current())?;
     update(
         db,
         &user,
-        &[("password", hash.into()), ("failed", Value::Int(0))],
+        &[
+            ("password", hash.into()),
+            ("failed", Value::Int(0)),
+            ("weak_password", Value::Int(i64::from(new.is_weak()))),
+        ],
     )
 }
 
@@ -350,6 +390,7 @@ fn user_from_row(row: Row) -> Result<User, SecError> {
         role: text(values.next(), "role")?,
         active: int(values.next(), "active")? != 0,
         version: int(values.next(), "version")?,
+        weak_password: int(values.next(), "weak_password")? != 0,
     })
 }
 

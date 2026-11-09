@@ -82,7 +82,7 @@ export component CreateDialog inherits Rectangle {
     private property <bool> admin-mismatch: root.admin-repeat != "" && root.admin-password != root.admin-repeat;
     private property <bool> file-ok: !root.protect-password || (root.password != "" && root.password == root.password-repeat);
     private property <bool> admin-ok: !root.need-admin
-        || (root.admin-login != "" && root.admin-password != "" && root.admin-password == root.admin-repeat);
+        || (root.admin-login != "" && (!root.server || root.admin-password != "") && root.admin-password == root.admin-repeat);
     private property <bool> valid: root.db-name != ""
         && root.admin-ok
         && (root.server ? root.address != "" : root.folder != "" && root.file-ok);

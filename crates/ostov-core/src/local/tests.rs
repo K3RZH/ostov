@@ -2273,3 +2273,44 @@ fn admin_sets_user_password() {
     let denied = engine.admin_set_user_password("boss", "keeper-took-it-1");
     assert_eq!(denied.unwrap_err().code, ErrorCode::Forbidden);
 }
+
+#[test]
+fn local_policy_allows_any_password_but_strict_blocks_weak_ones() {
+    let base = Base::new("password-policy");
+    let local =
+        || LocalConnector::new(roles_model()).with_password_policy(crate::PasswordPolicy::LOCAL);
+    {
+        let engine = local().create_local(&base.path, None, None).unwrap();
+        engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+        for (login, password) in [("keeper", "1234"), ("cook", "")] {
+            engine
+                .admin_add_user(&ostov_api::NewUser {
+                    login: login.into(),
+                    display_name: "Кладовщик".into(),
+                    role: "storekeeper".into(),
+                    password: password.into(),
+                })
+                .unwrap();
+        }
+        engine.logout().unwrap();
+        engine.login("cook", "").unwrap();
+    }
+
+    // Та же база со строгой политикой (так её откроет сервер): слабых не пускает.
+    let engine = LocalConnector::new(roles_model())
+        .open_local(&base.path, None)
+        .unwrap();
+    let err = engine.login("keeper", "1234").unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert!(err.message.contains("сменить"), "{}", err.message);
+    engine.login("boss", ADMIN_PASSWORD).unwrap();
+    let short = engine.admin_set_user_password("keeper", "12345");
+    assert_eq!(short.unwrap_err().code, ErrorCode::Validation);
+    engine
+        .admin_set_user_password("keeper", KEEPER_PASSWORD)
+        .unwrap();
+    engine.logout().unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let failed = engine.admin_journal(None, 50);
+    assert_eq!(failed.unwrap_err().code, ErrorCode::Forbidden);
+}

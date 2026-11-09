@@ -9,7 +9,7 @@ use ostov_store::{Driver, Value};
 
 use crate::journal::{Action, Change, Entry, JournalQuery, details, list, record};
 use crate::tests::{GOOD_PASSWORD, add, bases};
-use crate::{Password, SecError, set_password, verify};
+use crate::{Password, PasswordPolicy, SecError, set_password, verify};
 
 fn entry<'a>(login: &'a str, action: Action, object: &'a str, object_id: Option<i64>) -> Entry<'a> {
     Entry {
@@ -238,7 +238,7 @@ fn passwords_never_reach_the_journal() {
         // Как это сделает ядро: неудачный вход и смена пароля, каждый со своей записью.
         let _ = verify(db, "ivan", &Password::new(typed));
         record(db, &entry("ivan", Action::LoginFailed, "", None)).unwrap();
-        set_password(db, "ivan", &Password::new(new)).unwrap();
+        set_password(db, "ivan", &Password::new(new), PasswordPolicy::STRICT).unwrap();
         // Даже если вызывающий по ошибке передаст пароль в изменениях, он не запишется.
         let leaked = [change("Пароль", Some(GOOD_PASSWORD), Some(new))];
         let password_changed = Entry {

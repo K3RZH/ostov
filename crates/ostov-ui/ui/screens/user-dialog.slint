@@ -16,7 +16,8 @@ export component UserDialog inherits Rectangle {
     callback cancelled();
 
     private property <bool> mismatch: root.repeat != "" && root.password != root.repeat;
-    private property <bool> valid: root.login != "" && root.password != "" && root.password == root.repeat;
+    // Пустой пароль можно на одном компьютере (ADR-033); на сервере его отклонит ядро.
+    private property <bool> valid: root.login != "" && root.password == root.repeat;
 
     background: Theme.scrim;
 
