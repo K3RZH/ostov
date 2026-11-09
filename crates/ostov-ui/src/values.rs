@@ -372,4 +372,13 @@ mod tests {
             assert_eq!(parse(&display(&value, kind), kind), Ok(value));
         }
     }
+
+    // Окно строки подставляет цену так; она должна разбираться обратно без правки.
+    #[test]
+    fn price_in_line_dialog_parses_back() {
+        for kopecks in [0, 5, 100_000, 123_456_789] {
+            let text = clean_decimal(&money(kopecks), 2);
+            assert_eq!(parse_decimal(&text, 2), Some(kopecks), "{text:?}");
+        }
+    }
 }

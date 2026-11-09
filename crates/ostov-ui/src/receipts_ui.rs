@@ -1811,7 +1811,10 @@ fn open_line_dialog(app: &AppWindow, state: &mut State, index: Option<usize>) {
     );
     data.set_line_price(
         line.as_ref()
-            .map_or(String::new(), |l| values::money(l.price))
+            // Без разрядов: строгий разбор цены не примет «1 000,00», и «ОК» без правки упал бы.
+            .map_or(String::new(), |l| {
+                values::clean_decimal(&values::money(l.price), 2)
+            })
             .into(),
     );
     data.set_line_error("".into());
