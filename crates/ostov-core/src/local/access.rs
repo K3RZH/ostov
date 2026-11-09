@@ -6,11 +6,14 @@ use std::time::Duration;
 
 use ostov_api::{EngineError, EngineResult, ErrorCode, SessionInfo, UserInfo};
 use ostov_model::{ADMIN_ROLE, MenuItem, Meta, Rights, SystemRights};
-use ostov_sec::{Action, Password, SecError, User};
+use ostov_sec::{Action, Password, PasswordPolicy, SecError, User};
 
 use super::LocalEngine;
 use super::convert::error;
 use crate::in_transaction;
+
+/// Кто в журнале, если пароль сбросили из консоли сервера.
+const CONSOLE: &str = "консоль сервера";
 
 #[derive(Debug, Default)]
 pub(super) struct Access {
@@ -138,6 +141,9 @@ impl LocalEngine {
             in_transaction(&mut **db, |db| {
                 let result = ostov_sec::verify(db, login, &password);
                 let (action, note) = match &result {
+                    Ok(user) if self.blocks_weak(user) => {
+                        (Action::LoginFailed, "пароль задан для одного компьютера")
+                    }
                     Ok(_) => (Action::Login, ""),
                     Err(SecError::WrongCredentials { .. }) => {
                         (Action::LoginFailed, "неверный логин или пароль")
@@ -152,6 +158,10 @@ impl LocalEngine {
             .map_err(error)?
         };
         match verified {
+            Ok(user) if self.blocks_weak(&user) => Err(EngineError::new(
+                ErrorCode::Forbidden,
+                "Пароль этого пользователя задан для работы на одном компьютере. Попросите администратора сменить его.",
+            )),
             Ok(user) => Ok(self.enter(user)),
             Err(e) => {
                 // Ждём уже без замка базы: остальные команды не стоят.
@@ -159,6 +169,32 @@ impl LocalEngine {
                 Err(sec_error(e))
             }
         }
+    }
+
+    /// Сброс пароля из консоли сервера, без входа: на случай, когда войти некому
+    /// (например, у всех администраторов слабый пароль из режима 1). Только строгая политика.
+    pub fn reset_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        let mut db = self.db();
+        in_transaction(&mut **db, |db| {
+            let password = Password::new(password);
+            let user = ostov_sec::set_password(db, login, &password, PasswordPolicy::STRICT)?;
+            let note = format!("пользователь {}, сброс из консоли сервера", user.login);
+            super::journal::record(
+                db,
+                CONSOLE,
+                Action::PasswordChanged,
+                "",
+                Some(user.id),
+                &[],
+                &note,
+            )
+        })
+        .map_err(error)
+    }
+
+    /// Строгая политика (сервер) не пускает со слабым паролем из режима 1 (ADR-033).
+    fn blocks_weak(&self, user: &User) -> bool {
+        user.weak_password && self.password_policy != PasswordPolicy::LOCAL
     }
 
     pub(super) fn run_create_first_admin(
@@ -238,6 +274,22 @@ impl LocalEngine {
         Ok(())
     }
 
+    pub(super) fn run_admin_set_user_password(
+        &self,
+        login: &str,
+        password: &str,
+    ) -> EngineResult<()> {
+        self.need_system(|s| s.admin, "администрирование")?;
+        let mut db = self.db();
+        in_transaction(&mut **db, |db| {
+            let user =
+                ostov_sec::set_password(db, login, &Password::new(password), self.password_policy)?;
+            let note = format!("пользователь {}", user.login);
+            self.journal(db, Action::PasswordChanged, "", Some(user.id), &[], &note)
+        })
+        .map_err(error)
+    }
+
     /// Метаданные с правами того, кто вошёл: объекты без права просмотра скрыты, и в меню тоже.
     pub(super) fn run_get_meta(&self) -> EngineResult<Meta> {
         let mut meta = self.config.meta.clone();
@@ -257,7 +309,8 @@ impl LocalEngine {
         let added = {
             let mut db = self.db();
             in_transaction(&mut **db, |db| {
-                let added = ostov_sec::add_user(db, user, &self.config.roles)?;
+                let added =
+                    ostov_sec::add_user(db, user, &self.config.roles, self.password_policy)?;
                 let note = format!("пользователь {}, роль {}", added.login, added.role);
                 // Первого администратора записываем от его же имени: до него входить было некому.
                 let by = match &self.access().user {

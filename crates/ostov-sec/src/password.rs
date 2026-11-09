@@ -6,6 +6,7 @@ use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVe
 
 use crate::SecError;
 
+/// Минимум для сервера (СТ-32); пароль короче — «слабый».
 pub const MIN_LEN: usize = 12;
 /// Верхняя граница, чтобы огромный «пароль» не грузил хеширование.
 pub const MAX_LEN: usize = 1024;
@@ -23,16 +24,45 @@ impl Password {
         self.0.as_bytes()
     }
 
-    /// Длина от `MIN_LEN` до `MAX_LEN` символов.
-    pub(crate) fn check_length(&self) -> Result<(), SecError> {
+    /// Длина по политике: от `policy.min_len` до `MAX_LEN` символов.
+    pub(crate) fn check_length(&self, policy: PasswordPolicy) -> Result<(), SecError> {
         let len = self.0.chars().count();
-        if (MIN_LEN..=MAX_LEN).contains(&len) {
-            Ok(())
-        } else {
-            Err(SecError::Invalid(format!(
-                "пароль: от {MIN_LEN} до {MAX_LEN} символов"
-            )))
+        if len > MAX_LEN {
+            return Err(SecError::Invalid(format!(
+                "пароль: не длиннее {MAX_LEN} символов"
+            )));
         }
+        if len < policy.min_len {
+            return Err(SecError::Invalid(format!(
+                "пароль: не короче {} символов",
+                policy.min_len
+            )));
+        }
+        Ok(())
+    }
+
+    /// Короче, чем требует сервер: такой пароль годится только для одного компьютера.
+    pub(crate) fn is_weak(&self) -> bool {
+        self.0.chars().count() < MIN_LEN
+    }
+}
+
+/// Какой пароль можно задать (ADR-033): на сервере строго, на одном компьютере любой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasswordPolicy {
+    pub min_len: usize,
+}
+
+impl PasswordPolicy {
+    /// Сервер и всё по умолчанию: от 12 символов (СТ-32).
+    pub const STRICT: Self = Self { min_len: MIN_LEN };
+    /// Режим 1: любой, в том числе пустой. Короткий пароль помечается как слабый.
+    pub const LOCAL: Self = Self { min_len: 0 };
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self::STRICT
     }
 }
 

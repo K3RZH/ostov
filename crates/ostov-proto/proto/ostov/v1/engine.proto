@@ -29,6 +29,7 @@ service Engine {
   rpc AdminUsers(Empty) returns (UserList);
   rpc AdminAddUser(NewUser) returns (Empty);
   rpc AdminSetUserActive(UserActive) returns (Empty);
+  rpc AdminSetUserPassword(UserPassword) returns (Empty);
   rpc AdminJournal(JournalRequest) returns (JournalList);
   rpc AdminBackup(BackupRequest) returns (JobId);
   rpc GetClosingDate(Empty) returns (ClosingDate);
@@ -337,6 +338,11 @@ message NewUser {
 message UserActive {
   string login = 1;
   bool active = 2;
+}
+
+message UserPassword {
+  string login = 1;
+  string password = 2;
 }
 
 message JournalRequest {

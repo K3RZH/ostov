@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ostov_api::{BaseInfo, Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
-use ostov_core::LocalConnector;
+use ostov_core::{LocalConnector, PasswordPolicy};
 
 /// Название и версия встроенной конфигурации для стартовой страницы.
 pub fn config_title() -> Option<(String, String)> {
@@ -23,7 +23,8 @@ fn connector() -> EngineResult<LocalConnector> {
             format!("Встроенная конфигурация не прошла проверку: {first}"),
         )
     })?;
-    Ok(LocalConnector::new(config))
+    // Один компьютер: любой пароль, в том числе пустой (ADR-033).
+    Ok(LocalConnector::new(config).with_password_policy(PasswordPolicy::LOCAL))
 }
 
 /// Что за база в этом файле, не открывая и не записывая в него (для «Добавить существующую»).
@@ -178,21 +179,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    // Просьба Артёма №1: короткий пароль администратора не оставляет базу без администратора.
+    // ADR-033: на одном компьютере подходит любой пароль, в том числе пустой, и вход с ним работает.
     #[test]
-    fn failed_admin_leaves_no_file_and_retry_works() {
-        let (dir, path) = temp_base("short-admin");
-        let admin = |password: &str| NewAdmin {
-            login: "admin".into(),
-            password: password.into(),
-        };
-        assert!(create(&path, None, Some(&admin("коротко"))).is_err());
-        assert!(
-            !std::path::Path::new(&path).exists(),
-            "файл базы остался на диске"
-        );
-        assert!(create(&path, None, Some(&admin("длинный-пароль-1"))).is_ok());
-        let _ = std::fs::remove_dir_all(dir);
+    fn local_base_accepts_any_admin_password() {
+        for (name, password) in [("short-admin", "1234"), ("empty-admin", "")] {
+            let (dir, path) = temp_base(name);
+            let admin = NewAdmin {
+                login: "admin".into(),
+                password: password.into(),
+            };
+            let created = create(&path, None, Some(&admin));
+            assert!(created.is_ok(), "пароль «{password}»: {:?}", created.err());
+            drop(created);
+            let user = open(&path).and_then(|engine| engine.login("admin", password));
+            assert!(matches!(user, Ok(ref u) if u.login == "admin"), "{user:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     // Просьба Артёма №5: первым пользователем не-администратор отклоняется, вход не включается.

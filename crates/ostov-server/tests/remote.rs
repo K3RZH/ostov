@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ostov_api::{EngineError, ErrorCode};
+use ostov_api::{Connector, EngineError, ErrorCode};
 use ostov_core::local::warehouse_model;
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_to_pb, from_status, pb};
@@ -83,7 +83,11 @@ fn postgres(schema: &'static str) -> Option<Connect> {
 }
 
 async fn start(name: &str, connect: Option<Connect>) -> Running {
-    let dir = temp(name);
+    start_in(temp(name), connect).await
+}
+
+/// Сервер в готовой папке: там может уже лежать `base.db`, созданная заранее.
+async fn start_in(dir: PathBuf, connect: Option<Connect>) -> Running {
     let connect = connect.unwrap_or_else(|| sqlite(&dir));
     let hub = tokio::task::spawn_blocking(move || Hub::start(Base::new(connect, model())))
         .await
@@ -267,6 +271,39 @@ async fn two_users_at_once_each_with_own_rights() {
     let names: Vec<&str> = meta.objects.iter().map(|o| o.name.as_str()).collect();
     assert_eq!(names, ["goods"]);
 
+    // Смена пароля: кладовщику нельзя; его сессия закрывается, свою администратор не теряет.
+    let password = |login: &str, password: &str| pb::UserPassword {
+        login: login.into(),
+        password: password.into(),
+    };
+    let denied = error(
+        c.admin_set_user_password(authed(password("boss", "keeper-took-it-1"), &keeper))
+            .await,
+    );
+    assert_eq!(denied.code, ErrorCode::Forbidden);
+    c.admin_set_user_password(authed(password("keeper", "keeper-password-2"), &boss))
+        .await
+        .unwrap();
+    assert_eq!(
+        error(c.list(authed(list("goods"), &keeper)).await).code,
+        ErrorCode::BadCredentials
+    );
+    assert_eq!(
+        error(c.login(creds(KEEPER)).await).code,
+        ErrorCode::BadCredentials
+    );
+    let keeper = c
+        .login(creds(("keeper", "keeper-password-2")))
+        .await
+        .unwrap()
+        .into_inner()
+        .token;
+    c.admin_set_user_password(authed(password("boss", "admin-password-2"), &boss))
+        .await
+        .unwrap();
+    c.list(authed(list("goods"), &boss)).await.unwrap();
+    c.list(authed(list("goods"), &keeper)).await.unwrap();
+
     // Отключённый выходит сразу, а администратор работает дальше.
     c.admin_set_user_active(authed(
         pb::UserActive {
@@ -384,4 +421,139 @@ async fn client_must_trust_the_server_certificate() {
     let again = Tls::load_or_create(&s.dir.join("tls"), &["localhost".to_owned()]).unwrap();
     let first = std::fs::read_to_string(s.dir.join("tls").join(ostov_server::CERT_FILE)).unwrap();
     assert_eq!(again.cert_pem, first);
+}
+
+/// ADR-033: база с одного компьютера, где пароли заданы по мягкой политике, на сервере.
+#[tokio::test]
+async fn weak_passwords_from_local_base_do_not_pass_server() {
+    let dir = temp("weak");
+    let path = dir.join("base.db").to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let local = ostov_core::LocalConnector::new(model())
+            .with_password_policy(ostov_core::PasswordPolicy::LOCAL);
+        let engine = local.create_local(&path, None, None).unwrap();
+        engine.create_first_admin(ADMIN.0, ADMIN.1).unwrap();
+        for (login, password) in [("keeper", "1234"), ("cook", "")] {
+            engine
+                .admin_add_user(&ostov_api::NewUser {
+                    login: login.into(),
+                    display_name: "Кладовщик".into(),
+                    role: "storekeeper".into(),
+                    password: password.into(),
+                })
+                .unwrap();
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut s = start_in(dir, None).await;
+    let c = &mut s.client;
+    for weak in [("keeper", "1234"), ("cook", "")] {
+        let err = error(c.login(creds(weak)).await);
+        assert_eq!(err.code, ErrorCode::Forbidden, "{weak:?}");
+        assert!(err.message.contains("сменить"), "{}", err.message);
+    }
+    let boss = c.login(creds(ADMIN)).await.unwrap().into_inner().token;
+    let password = |login: &str, password: &str| pb::UserPassword {
+        login: login.into(),
+        password: password.into(),
+    };
+    // На сервере новый пароль тоже только от 12 символов.
+    let short = error(
+        c.admin_set_user_password(authed(password("keeper", "12345"), &boss))
+            .await,
+    );
+    assert_eq!(short.code, ErrorCode::Validation);
+    c.admin_set_user_password(authed(password("keeper", KEEPER.1), &boss))
+        .await
+        .unwrap();
+    let keeper = c.login(creds(KEEPER)).await.unwrap().into_inner().token;
+    c.list(authed(list("goods"), &keeper)).await.unwrap();
+    // Новый пользователь на сервере с коротким или пустым паролем не создаётся.
+    for weak in ["", "1234"] {
+        let err = error(
+            c.admin_add_user(authed(
+                pb::NewUser {
+                    login: "temp".into(),
+                    display_name: "Временный".into(),
+                    role: "storekeeper".into(),
+                    password: weak.into(),
+                },
+                &boss,
+            ))
+            .await,
+        );
+        assert_eq!(err.code, ErrorCode::Validation);
+    }
+}
+
+/// У единственного администратора слабый пароль из режима 1: войти некому, помогает
+/// только сброс из консоли сервера.
+#[tokio::test]
+async fn console_reset_unlocks_server_with_weak_admin() {
+    let dir = temp("reset");
+    let path = dir.join("base.db").to_string_lossy().into_owned();
+    let base_dir = dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let local = ostov_core::LocalConnector::new(model())
+            .with_password_policy(ostov_core::PasswordPolicy::LOCAL);
+        let engine = local.create_local(&path, None, None).unwrap();
+        engine.create_first_admin(ADMIN.0, "").unwrap();
+        drop(engine);
+        let base = Base::new(sqlite(&base_dir), model());
+        let short = base.reset_password(ADMIN.0, "1234").unwrap_err();
+        assert_eq!(short.code, ErrorCode::Validation);
+        let missing = base.reset_password("nobody", ADMIN.1).unwrap_err();
+        assert_eq!(missing.code, ErrorCode::NotFound);
+        base.reset_password(ADMIN.0, ADMIN.1).unwrap();
+    })
+    .await
+    .unwrap();
+
+    let mut s = start_in(dir, None).await;
+    let c = &mut s.client;
+    assert_eq!(
+        error(c.login(creds((ADMIN.0, ""))).await).code,
+        ErrorCode::BadCredentials
+    );
+    let boss = c.login(creds(ADMIN)).await.unwrap().into_inner().token;
+    let journal = c
+        .admin_journal(authed(
+            pb::JournalRequest {
+                after_key: None,
+                size: 100,
+            },
+            &boss,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        journal
+            .entries
+            .iter()
+            .any(|e| e.action == "Смена пароля" && e.user == "консоль сервера")
+    );
+}
+
+#[tokio::test]
+async fn console_reset_does_not_create_empty_base() {
+    let dir = temp("reset-empty");
+    let base_dir = dir.clone();
+    let err = tokio::task::spawn_blocking(move || {
+        Base::new(sqlite(&base_dir), model())
+            .reset_password(ADMIN.0, ADMIN.1)
+            .unwrap_err()
+    })
+    .await
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::NotFound);
+    let tables = {
+        let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(dir.join("base.db")).unwrap();
+        db.query("SELECT name FROM sqlite_master WHERE type = 'table'", &[])
+            .unwrap()
+    };
+    assert!(tables.is_empty(), "{tables:?}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

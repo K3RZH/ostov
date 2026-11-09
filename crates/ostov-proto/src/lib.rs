@@ -13,6 +13,35 @@ pub mod pb {
     tonic::include_proto!("ostov.v1");
 }
 
+impl std::fmt::Debug for pb::Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("login", &self.login)
+            .field("password", &"***")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for pb::NewUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewUser")
+            .field("login", &self.login)
+            .field("display_name", &self.display_name)
+            .field("role", &self.role)
+            .field("password", &"***")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for pb::UserPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserPassword")
+            .field("login", &self.login)
+            .field("password", &"***")
+            .finish()
+    }
+}
+
 mod convert;
 mod status;
 #[cfg(test)]

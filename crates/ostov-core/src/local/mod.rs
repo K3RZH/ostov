@@ -21,6 +21,7 @@ use ostov_api::{
     BaseInfo, BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo,
     ListPage, NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
+use ostov_sec::PasswordPolicy;
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
 
@@ -47,6 +48,8 @@ pub struct LocalEngine {
     titles: TitleColumns,
     /// Кто вошёл и есть ли в базе пользователи.
     access: Mutex<access::Access>,
+    /// Какой пароль можно задать и пускать ли со слабым (ADR-033). По умолчанию строго.
+    password_policy: PasswordPolicy,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
 }
@@ -73,8 +76,15 @@ impl LocalEngine {
             config,
             milestones: Mutex::new(HashMap::new()),
             access: Mutex::new(access::Access { users, user: None }),
+            password_policy: PasswordPolicy::STRICT,
             _lock: None,
         }
+    }
+
+    /// Мягкая политика — только для режима 1; сервер всегда строгий.
+    pub fn with_password_policy(mut self, policy: PasswordPolicy) -> Self {
+        self.password_policy = policy;
+        self
     }
 
     /// Новая база Ostov в пустой базе данных любого драйвера (так её будет создавать и сервер).
@@ -796,6 +806,12 @@ impl Engine for LocalEngine {
         self.guarded("AdminJournal", || self.run_admin_journal(after_key, size))
     }
 
+    fn admin_set_user_password(&self, login: &str, password: &str) -> EngineResult<()> {
+        self.guarded("AdminSetUserPassword", || {
+            self.run_admin_set_user_password(login, password)
+        })
+    }
+
     fn admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
         self.guarded("AdminSetUserActive", || {
             self.run_admin_set_user_active(login, active)
@@ -1140,6 +1156,7 @@ fn decimal_to_api(d: ostov_store::Decimal) -> ostov_api::Value {
 pub struct LocalConnector {
     model: Option<ostov_model::Config>,
     rules: Option<Arc<dyn Rules + Send + Sync>>,
+    password_policy: PasswordPolicy,
 }
 
 impl std::fmt::Debug for LocalConnector {
@@ -1156,7 +1173,14 @@ impl LocalConnector {
         Self {
             model: Some(model),
             rules: None,
+            password_policy: PasswordPolicy::STRICT,
         }
+    }
+
+    /// Режим 1 передаёт `PasswordPolicy::LOCAL`: любой пароль, в том числе пустой (ADR-033).
+    pub fn with_password_policy(mut self, policy: PasswordPolicy) -> Self {
+        self.password_policy = policy;
+        self
     }
 
     /// Свои правила документов вместо встроенных, например из Python (`ostov-py`).
@@ -1205,7 +1229,9 @@ impl Connector for LocalConnector {
         let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
-            LocalEngine::new(Box::new(db), config).locked(lock),
+            LocalEngine::new(Box::new(db), config)
+                .with_password_policy(self.password_policy)
+                .locked(lock),
         ))
     }
 
@@ -1217,7 +1243,9 @@ impl Connector for LocalConnector {
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
-        let engine = LocalEngine::new(Box::new(db), config).locked(lock);
+        let engine = LocalEngine::new(Box::new(db), config)
+            .with_password_policy(self.password_policy)
+            .locked(lock);
         if let Some(admin) = admin
             && let Err(e) = engine.create_first_admin(&admin.login, &admin.password)
         {

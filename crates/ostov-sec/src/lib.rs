@@ -15,7 +15,7 @@ use ostov_store::Driver;
 
 pub use error::SecError;
 pub use journal::{Action, Change, Entry, JournalPage, JournalQuery, JournalRow};
-pub use password::Password;
+pub use password::{Password, PasswordPolicy};
 pub use rights::{rights, system_rights};
 pub use sessions::Sessions;
 pub use users::{

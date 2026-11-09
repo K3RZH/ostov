@@ -19,7 +19,8 @@ use ostov_store::Driver;
 
 const USAGE: &str = "ostov-server --config <папка конфигурации> [--listen 0.0.0.0:7700] \
 [--tls <папка сертификата>] [--host <имя>]...\nБаза: переменная OSTOV_DB_URL — строка \
-подключения PostgreSQL или sqlite:<файл>.";
+подключения PostgreSQL или sqlite:<файл>.\nСброс пароля: ostov-server --config <папка> \
+--reset-password <логин> — новый пароль спросит с клавиатуры, сервер не запускается.";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
@@ -28,6 +29,8 @@ struct Args {
     tls: PathBuf,
     /// Имена и адреса, на которые выписан сертификат: по ним клиенты подключаются.
     hosts: Vec<String>,
+    /// Не запускать сервер, а сменить пароль этому пользователю.
+    reset_password: Option<String>,
 }
 
 impl Args {
@@ -36,6 +39,7 @@ impl Args {
         let mut listen = SocketAddr::from(([0, 0, 0, 0], 7700));
         let mut tls = PathBuf::from("tls");
         let mut hosts = Vec::new();
+        let mut reset_password = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("после {arg} нужно значение"));
             match arg.as_str() {
@@ -48,6 +52,7 @@ impl Args {
                 }
                 "--tls" => tls = PathBuf::from(value()?),
                 "--host" => hosts.push(value()?),
+                "--reset-password" => reset_password = Some(value()?),
                 "--help" | "-h" => return Err(USAGE.to_owned()),
                 other => return Err(format!("непонятный параметр {other}\n{USAGE}")),
             }
@@ -66,6 +71,7 @@ impl Args {
             listen,
             tls,
             hosts,
+            reset_password,
         })
     }
 }
@@ -142,6 +148,9 @@ fn run() -> Result<(), String> {
     if let Some(rules) = rules {
         base = base.with_rules(rules);
     }
+    if let Some(login) = &args.reset_password {
+        return reset_password(&base, login);
+    }
     // До рантайма: Hub ходит в базу синхронно.
     let hub = Hub::start(base).map_err(|e| format!("{} ({})", e.message, e.details))?;
     let tls = Tls::load_or_create(&args.tls, &args.hosts).map_err(|e| e.to_string())?;
@@ -164,6 +173,33 @@ fn run() -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())
     })
+}
+
+/// Пароль с клавиатуры, а не в параметрах: иначе он останется в истории команд и в списке
+/// процессов.
+fn reset_password(base: &Base, login: &str) -> Result<(), String> {
+    let first = ask(&format!("Новый пароль для {login} (от 12 символов): "))?;
+    let second = ask("Ещё раз: ")?;
+    if first != second {
+        return Err("пароли не совпадают, ничего не изменено".into());
+    }
+    base.reset_password(login, &first).map_err(|e| e.message)?;
+    println!(
+        "Ostov: пароль пользователя {login} сменён. Если сервер запущен, перезапустите его: \
+         иначе открытые сессии этого пользователя доживут до конца по времени."
+    );
+    Ok(())
+}
+
+fn ask(prompt: &str) -> Result<String, String> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| format!("не удалось прочитать пароль: {e}"))?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 fn main() -> ExitCode {
@@ -201,6 +237,9 @@ mod tests {
         assert_eq!(args.listen, SocketAddr::from(([127, 0, 0, 1], 7801)));
         assert_eq!(args.tls, PathBuf::from("tls"));
         assert_eq!(args.hosts[..3], ["server.local", "localhost", "127.0.0.1"]);
+        assert_eq!(args.reset_password, None);
+        let reset = parse(&["--config", "c", "--reset-password", "boss"]).unwrap();
+        assert_eq!(reset.reset_password.as_deref(), Some("boss"));
 
         assert!(parse(&[]).unwrap_err().contains("папка конфигурации"));
         assert!(parse(&["--config"]).unwrap_err().contains("нужно значение"));

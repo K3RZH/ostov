@@ -92,6 +92,10 @@ pub trait Engine: Send + Sync {
     fn admin_set_user_active(&self, _login: &str, _active: bool) -> EngineResult<()> {
         Err(EngineError::not_implemented("AdminSetUserActive"))
     }
+    /// Новый пароль пользователю от администратора: его сессии на сервере закрываются.
+    fn admin_set_user_password(&self, _login: &str, _password: &str) -> EngineResult<()> {
+        Err(EngineError::not_implemented("AdminSetUserPassword"))
+    }
     fn admin_journal(
         &self,
         _after_key: Option<&str>,

@@ -18,7 +18,8 @@ export component UserDialog inherits Rectangle {
 
     private property <bool> mismatch: root.repeat != "" && root.password != root.repeat;
     // Что мешает добавить: серая кнопка без причины выглядит как сломанная. Правила пароля
-    // (длина, пустой ли) интерфейс не знает: их проверяет ядро и показывает свою ошибку.
+    // (длина, пустой ли) интерфейс не знает: их проверяет ядро. Пустой пароль можно на одном
+    // компьютере (ADR-033), на сервере его отклонит ядро.
     private property <string> missing: root.login == "" ? "Введите логин."
         : root.password != root.repeat ? "Пароли не совпадают."
         : "";

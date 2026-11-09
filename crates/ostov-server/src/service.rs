@@ -213,6 +213,23 @@ impl Remote for Service {
         .await
     }
 
+    async fn admin_set_user_password(&self, req: Request<pb::UserPassword>) -> Reply<pb::Empty> {
+        let hub = Arc::clone(&self.hub);
+        let token = token(&req);
+        let u = req.into_inner();
+        blocking(move || {
+            let engine = hub.session(token.as_deref())?;
+            engine.admin_set_user_password(&u.login, &u.password)?;
+            // Сессии того, кому сменили пароль, закрываются; свою администратор не теряет.
+            let login = u.login.trim().to_lowercase();
+            if engine.current_user().is_none_or(|me| me.login != login) {
+                hub.user_disabled(&login);
+            }
+            Ok(pb::Empty {})
+        })
+        .await
+    }
+
     async fn admin_set_user_active(&self, req: Request<pb::UserActive>) -> Reply<pb::Empty> {
         let hub = Arc::clone(&self.hub);
         self.with(req, move |e, u| {

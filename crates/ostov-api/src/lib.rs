@@ -16,4 +16,4 @@ pub use error::{EngineError, EngineResult, ErrorCode};
 pub use types::*;
 
 /// Версия протокола: сверяется при подключении (ИТ-06).
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
