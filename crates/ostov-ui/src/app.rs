@@ -283,6 +283,46 @@ fn add_recent(app: &AppWindow, db: RecentDb) {
     app.set_selected_recent(0);
 }
 
+/// «Убрать из списка»: забывается запись, запомненный логин и (у сервера) копия сертификата.
+/// Файл базы и сама база на сервере не трогаются. Список сохраняется первым: если файл не
+/// записался, в окне остаётся то, что лежит на диске, а не то, что вернулось бы после перезапуска.
+fn forget_recent(app: &AppWindow, row: i32) {
+    // Ответ ядра на открытие вернётся к строке, которой уже нет.
+    if app.get_start_busy() {
+        return;
+    }
+    let recent = app.get_recent();
+    let Some(position) = index(row) else { return };
+    let Some(db) = recent.row_data(position) else {
+        return;
+    };
+    app.set_start_error("".into());
+    let rows = crate::recent::remove(recent.iter(), db.server, &db.path);
+    if let Err(message) = crate::recent::save(&rows) {
+        app.set_start_error(message.into());
+        return;
+    }
+    crate::recent::remember_login(&db.path, None);
+    if db.server
+        && let Err(error) = crate::remote_base::forget_certificate(&db.path)
+    {
+        app.set_start_error(error.message.into());
+    }
+    let selected = crate::recent::selection_after_remove(position, rows.len());
+    app.set_recent(ModelRc::new(VecModel::from(rows)));
+    app.set_selected_recent(i32::try_from(selected).unwrap_or(0));
+}
+
+/// Подключает подтверждение «Убрать из списка» (окно в app-window.slint) к `forget_recent`.
+pub fn wire_forget(app: &AppWindow) {
+    let weak = app.as_weak();
+    app.on_forget_confirmed(move |row| {
+        if let Some(app) = weak.upgrade() {
+            forget_recent(&app, row);
+        }
+    });
+}
+
 /// Пользователь в шапке: имя из сессии ядра. База без пользователей вход не спрашивает.
 fn show_user(app: &AppWindow, user: Option<&SessionInfo>, roles: &[RoleInfo]) {
     let name = user.map(|user| {
@@ -966,6 +1006,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     apply_settings(&app, Settings::load());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
+    wire_forget(&app);
     if let Some((title, version)) = crate::local_base::config_title() {
         app.set_config_name(title.into());
         app.set_config_info(format!("Конфигурация · версия {version}").into());

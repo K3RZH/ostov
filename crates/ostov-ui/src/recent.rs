@@ -53,15 +53,25 @@ fn clean(text: &str) -> String {
 
 /// Ставит базу первой; та же база (тот же путь или адрес) второй раз не попадает.
 pub fn push_front(rows: impl IntoIterator<Item = RecentDb>, db: RecentDb) -> Vec<RecentDb> {
-    let rest: Vec<RecentDb> = rows
-        .into_iter()
-        .filter(|row| !(row.server == db.server && row.path == db.path))
-        .collect();
+    let rest = remove(rows, db.server, &db.path);
     let mut result = Vec::with_capacity(rest.len() + 1);
     result.push(db);
     result.extend(rest);
     result.truncate(MAX_RECENT);
     result
+}
+
+/// Убирает базу из списка: забывается только запись, файл базы и сервер остаются как были.
+pub fn remove(rows: impl IntoIterator<Item = RecentDb>, server: bool, path: &str) -> Vec<RecentDb> {
+    rows.into_iter()
+        .filter(|row| !(row.server == server && row.path == path))
+        .collect()
+}
+
+/// Какую строку выбрать после удаления: ту, что встала на место убранной, а у последней
+/// предыдущую. Список пуст: 0.
+pub fn selection_after_remove(removed: usize, len: usize) -> usize {
+    removed.min(len.saturating_sub(1))
 }
 
 /// Читает список; файла нет или он не читается: список пуст.
@@ -189,6 +199,31 @@ mod tests {
         let rows = push_front(rows, local("b снова", "/b"));
         let paths: Vec<_> = rows.iter().map(|db| db.path.to_string()).collect();
         assert_eq!(paths, ["/b", "/a"]);
+    }
+
+    #[test]
+    fn remove_drops_only_that_base() {
+        let rows = vec![
+            local("a", "/a"),
+            RecentDb {
+                server: true,
+                ..local("a на сервере", "/a")
+            },
+            local("b", "/b"),
+        ];
+        let rows = remove(rows, false, "/a");
+        let names: Vec<_> = rows.iter().map(|db| db.name.to_string()).collect();
+        assert_eq!(names, ["a на сервере", "b"]);
+        assert_eq!(remove(rows.clone(), false, "/нет"), rows);
+    }
+
+    #[test]
+    fn selection_moves_to_neighbour_row() {
+        assert_eq!(selection_after_remove(0, 2), 0);
+        assert_eq!(selection_after_remove(1, 2), 1);
+        // Убрали последнюю строку: выбор уходит на предыдущую.
+        assert_eq!(selection_after_remove(3, 3), 2);
+        assert_eq!(selection_after_remove(0, 0), 0);
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { UserDialog } from "screens/user-dialog.slint";
 import { PasswordDialog } from "screens/password-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
+import { ConfirmDialog } from "components/confirm-dialog.slint";
 
 // Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
 // дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
@@ -29,6 +30,12 @@ export component AppWindow inherits Window {
     in property <string> start-error <=> start-page.error;
     in property <bool> start-busy <=> start-page.busy;
     callback open <=> start-page.open;
+
+    // «Убрать из списка»: запись забывается, файл базы и сама база на сервере остаются. Что убирать,
+    // знает выбранная строка; подтверждение отдаёт Rust (src/app.rs) её номер.
+    in-out property <bool> forgetting;
+    callback forget-confirmed(int);
+    private property <RecentDb> forgotten: root.recent[root.selected-recent];
 
     // Окно «Создать базу»: состояние формы живёт здесь, окно показывается поверх выбора базы.
     in-out property <bool> creating;
@@ -187,6 +194,7 @@ export component AppWindow inherits Window {
         config-info: root.config-info;
         create-database => { root.creating = true; }
         add-existing => { root.adding = true; }
+        forget => { root.forgetting = true; }
     }
 
     login-page := LoginPage {
@@ -305,6 +313,24 @@ export component AppWindow inherits Window {
         cancelled => { root.adding = false; root.add-error = ""; }
         choose-file => { root.choose-file(); }
         choose-cert => { root.choose-cert-add(); }
+    }
+
+    if root.forgetting && root.page == 0 : ConfirmDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        title: "Убрать базу из списка?";
+        text: "«" + root.forgotten.name + "» исчезнет из списка. "
+            + (root.forgotten.server
+                ? "База на сервере не изменится. Вернуть её в список можно кнопкой «Добавить существующую…»: понадобится файл server.crt."
+                : "Файл базы останется на диске: удалить его можно только средствами системы, например файловым менеджером. Вернуть базу в список можно кнопкой «Добавить существующую…».");
+        accept-text: "Убрать";
+        accepted => {
+            root.forgetting = false;
+            root.forget-confirmed(root.selected-recent);
+        }
+        cancelled => { root.forgetting = false; }
     }
 
     if root.settings-open : SettingsDialog {

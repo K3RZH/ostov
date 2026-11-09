@@ -83,6 +83,15 @@ pub fn store_certificate(address: &str, pem: &str) -> EngineResult<()> {
     store_certificate_in(&certificates_dir()?, address, pem)
 }
 
+/// Удаляет сохранённую копию сертификата сервера. Сервер при этом не меняется; если копии нет,
+/// это не ошибка.
+///
+/// # Errors
+/// Папку настроек не найти или файл не удалить.
+pub fn forget_certificate(address: &str) -> EngineResult<()> {
+    forget_certificate_in(&certificates_dir()?, address)
+}
+
 /// Сертификат сервера, сохранённый при добавлении.
 ///
 /// # Errors
@@ -96,6 +105,16 @@ fn store_certificate_in(dir: &Path, address: &str, pem: &str) -> EngineResult<()
         .map_err(|error| unavailable(format!("Не удалось создать папку сертификатов: {error}.")))?;
     std::fs::write(dir.join(certificate_name(address)), pem)
         .map_err(|error| unavailable(format!("Не удалось сохранить сертификат сервера: {error}.")))
+}
+
+fn forget_certificate_in(dir: &Path, address: &str) -> EngineResult<()> {
+    match std::fs::remove_file(dir.join(certificate_name(address))) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(unavailable(format!(
+            "Не удалось удалить сохранённый сертификат сервера: {error}."
+        ))),
+    }
 }
 
 fn stored_certificate_in(dir: &Path, address: &str) -> EngineResult<String> {
@@ -142,6 +161,21 @@ mod tests {
             Some(pem.as_str())
         );
         assert!(stored_certificate_in(&dir, "other:7700").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn forgotten_certificate_is_gone_and_others_stay() {
+        let dir = temp_dir("forget");
+        let pem = format!("{PEM_MARK}\nabc\n-----END CERTIFICATE-----\n");
+        assert!(store_certificate_in(&dir, "srv:7700", &pem).is_ok());
+        assert!(store_certificate_in(&dir, "srv:7701", &pem).is_ok());
+        assert!(forget_certificate_in(&dir, "srv:7700").is_ok());
+        assert!(stored_certificate_in(&dir, "srv:7700").is_err());
+        assert!(stored_certificate_in(&dir, "srv:7701").is_ok());
+        // Повторное удаление и сертификат, которого не было, ошибкой не считаются.
+        assert!(forget_certificate_in(&dir, "srv:7700").is_ok());
+        assert!(forget_certificate_in(&dir, "нет:1").is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 
