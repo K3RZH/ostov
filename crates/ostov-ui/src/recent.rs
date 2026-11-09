@@ -87,6 +87,62 @@ pub fn save(rows: &[RecentDb]) -> Result<(), String> {
         .map_err(|error| format!("Список баз не сохранён: {error}."))
 }
 
+/// Файл запомненных логинов: строка `ключ<TAB>логин`, ключ это путь к базе или адрес сервера.
+const USERS_FILE: &str = "users.conf";
+
+/// Разбирает файл запомненных логинов; битые строки пропускает.
+pub fn parse_logins(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, login) = line.split_once('\t')?;
+            (!key.is_empty() && !login.is_empty() && !login.contains('\t'))
+                .then(|| (key.to_owned(), login.to_owned()))
+        })
+        .collect()
+}
+
+fn logins_to_text(rows: &[(String, String)]) -> String {
+    rows.iter()
+        .map(|(key, login)| format!("{}\t{}\n", clean(key), clean(login)))
+        .collect()
+}
+
+/// Ставит или убирает логин для базы (`None` забывает его); остальные записи сохраняются.
+pub fn with_login(
+    rows: Vec<(String, String)>,
+    key: &str,
+    login: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = rows.into_iter().filter(|(k, _)| k != key).collect();
+    if let Some(login) = login.filter(|login| !login.is_empty()) {
+        rows.push((key.to_owned(), login.to_owned()));
+    }
+    rows
+}
+
+/// Логин, который пользователь просил запомнить для этой базы. Пароль не хранится никогда.
+pub fn remembered_login(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(crate::settings::config_file(USERS_FILE)?).ok()?;
+    parse_logins(&text)
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, login)| login)
+}
+
+/// Запоминает логин для базы или забывает его. Ошибку записи не показываем: это удобство.
+pub fn remember_login(key: &str, login: Option<&str>) {
+    let Some(path) = crate::settings::config_file(USERS_FILE) else {
+        return;
+    };
+    let rows = std::fs::read_to_string(&path)
+        .map(|text| parse_logins(&text))
+        .unwrap_or_default();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, logins_to_text(&with_login(rows, key, login)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +189,17 @@ mod tests {
         let rows = push_front(rows, local("b снова", "/b"));
         let paths: Vec<_> = rows.iter().map(|db| db.path.to_string()).collect();
         assert_eq!(paths, ["/b", "/a"]);
+    }
+
+    #[test]
+    fn remembered_logins_replace_and_forget() {
+        let rows = parse_logins("/a.sqlite\tann\nsrv:7700\tbob\nмусор\n");
+        assert_eq!(rows.len(), 2);
+        let rows = with_login(rows, "/a.sqlite", Some("kate"));
+        assert!(rows.contains(&("/a.sqlite".to_owned(), "kate".to_owned())));
+        assert_eq!(rows.iter().filter(|(k, _)| k == "/a.sqlite").count(), 1);
+        let rows = with_login(rows, "srv:7700", None);
+        assert!(!rows.iter().any(|(k, _)| k == "srv:7700"));
+        assert_eq!(parse_logins(&logins_to_text(&rows)), rows);
     }
 }

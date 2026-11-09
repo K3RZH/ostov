@@ -1,5 +1,5 @@
 //! Логика переходов между страницами приложения: выбор базы, вход, главная.
-//! Локальная база открывается и проверяет вход через ядро; сервер подключим позже.
+//! Локальная база и сервер открываются через ядро (`Connector`), вход проверяет ядро.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -71,7 +71,7 @@ pub fn configure_login(
             window.set_change_text("Сменить".into());
             window.set_show_login(true);
             window.set_hint("".into());
-            window.set_remember_text("Запомнить сервер".into());
+            window.set_remember_text("Запомнить пользователя".into());
         }
         LoginKind::ServerFirstRun => {
             window.set_heading("Первая настройка сервера".into());
@@ -391,6 +391,8 @@ pub fn current_settings(window: &AppWindow) -> Settings {
 #[derive(Default)]
 struct Session {
     name: String,
+    /// Путь к файлу базы или адрес сервера: по нему запоминается логин.
+    key: String,
     server: bool,
     /// Текущий вид страницы входа (у базы «пароль и пользователи» их два подряд).
     stage: Option<LoginKind>,
@@ -426,9 +428,7 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
     screens.receipts.after(app, &screens.shell.borrow());
     match &session.engine {
         Some(engine) => screens.receipts.attach(engine.clone()),
-        None => screens
-            .receipts
-            .show_error("Работа с сервером в интерфейсе ещё не подключена."),
+        None => screens.receipts.show_error("База не открыта."),
     }
     let roles = session.meta.as_ref().map_or_else(Vec::new, |meta| {
         meta.roles.iter().map(|role| role.as_str().into()).collect()
@@ -478,6 +478,7 @@ fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, scr
             };
             *session.borrow_mut() = Session {
                 name: db.name.to_string(),
+                key: db.path.to_string(),
                 stage: Some(kind),
                 engine: Some(engine),
                 meta,
@@ -490,18 +491,95 @@ fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, scr
                 return;
             }
             configure_login(&app, kind, &db.name, &db.path);
+            prefill_login(&app, &db.path);
             show_page(&app, PAGE_LOGIN);
         },
     );
 }
 
-/// Вход в локальную базу: пароль проверяет ядро, задержку после неудач тоже держит оно (СТ-32).
-fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Screens) {
-    let Some(engine) = session.borrow().engine.clone() else {
+/// Подставляет на страницу входа логин, который просили запомнить для этой базы. Пароль не
+/// запоминается никогда.
+fn prefill_login(app: &AppWindow, key: &str) {
+    if let Some(login) = crate::recent::remembered_login(key) {
+        app.set_login(login.into());
+    }
+    app.set_remember(true);
+}
+
+/// Подключается к серверу в фоне и спрашивает `hello`: первый запуск (нужен администратор) или
+/// обычный вход. Сертификат берётся из сохранённого при добавлении сервера.
+fn open_remote(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>) {
+    app.set_start_busy(true);
+    let address = db.path.to_string();
+    let weak = app.as_weak();
+    let session = session.clone();
+    call_in_background(
+        move || {
+            let pem = crate::remote_base::stored_certificate(&address)?;
+            crate::remote_base::check(&address, &pem)
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_start_busy(false);
+            let (engine, hello) = match result {
+                Ok(connected) => connected,
+                Err(error) => {
+                    app.set_start_error(error.message.into());
+                    return;
+                }
+            };
+            let kind = if hello.first_run {
+                LoginKind::ServerFirstRun
+            } else {
+                LoginKind::Server
+            };
+            *session.borrow_mut() = Session {
+                name: db.name.to_string(),
+                key: db.path.to_string(),
+                server: true,
+                stage: Some(kind),
+                engine: Some(engine),
+                ..Session::default()
+            };
+            configure_login(&app, kind, &db.name, &db.path);
+            if kind == LoginKind::Server {
+                prefill_login(&app, &db.path);
+            }
+            show_page(&app, PAGE_LOGIN);
+        },
+    );
+}
+
+/// Закрывает сессию с базой. Сервер просим завершить сессию (иначе токен живёт до простоя);
+/// локальная база закрывается, когда ядро выпускают из рук: так освобождается файл.
+fn release(session: Session) {
+    if let (true, Some(engine)) = (session.server, session.engine) {
+        call_in_background(move || engine.logout(), |_| {});
+    }
+}
+
+/// Вход: пароль проверяет ядро и держит задержку после неудач (СТ-32). На первом запуске
+/// сервера вместо входа создаётся администратор (СТ-36).
+fn submit_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Screens) {
+    let (engine, kind, key) = {
+        let session = session.borrow();
+        (
+            session.engine.clone(),
+            session.stage.unwrap_or(LoginKind::LocalUser),
+            session.key.clone(),
+        )
+    };
+    let Some(engine) = engine else {
         return;
     };
+    let first_run = kind == LoginKind::ServerFirstRun;
     let login = app.get_login().trim().to_owned();
     let password = app.get_password().to_string();
+    if first_run && password != app.get_repeat().as_str() {
+        app.set_error("Пароли не совпадают.".into());
+        return;
+    }
+    let remember = (!first_run && app.get_remember()).then(|| login.clone());
     app.set_error("".into());
     app.set_locked(true);
     app.set_button_text("Проверяем…".into());
@@ -511,7 +589,11 @@ fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: 
     let asked = engine.clone();
     call_in_background(
         move || {
-            let user = engine.login(&login, &password)?;
+            let user = if first_run {
+                engine.create_first_admin(&login, &password)?
+            } else {
+                engine.login(&login, &password)?
+            };
             let meta = engine.get_meta()?;
             Ok((user, meta))
         },
@@ -527,9 +609,12 @@ fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: 
                 return;
             }
             app.set_locked(false);
-            app.set_button_text(button_text(LoginKind::LocalUser).into());
+            app.set_button_text(button_text(kind).into());
             match result {
                 Ok((user, meta)) => {
+                    if !first_run {
+                        crate::recent::remember_login(&key, remember.as_deref());
+                    }
                     show_user(&app, Some(&user));
                     {
                         let mut session = session.borrow_mut();
@@ -541,6 +626,7 @@ fn submit_local_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: 
                 }
                 Err(error) => {
                     app.set_password("".into());
+                    app.set_repeat("".into());
                     app.set_error(error.message.into());
                 }
             }
@@ -584,6 +670,7 @@ fn create_local(app: &AppWindow, db: RecentDb) {
 fn reset_create(app: &AppWindow) {
     app.set_new_name("".into());
     app.set_new_address("".into());
+    app.set_new_cert("".into());
     app.set_new_admin_login("".into());
     app.set_new_admin_password("".into());
     app.set_new_admin_repeat("".into());
@@ -620,9 +707,91 @@ fn add_local(app: &AppWindow, db: RecentDb) {
 fn reset_add(app: &AppWindow) {
     app.set_add_file("".into());
     app.set_add_address("".into());
+    app.set_add_cert("".into());
     app.set_add_name("".into());
     app.set_add_error("".into());
     app.set_adding(false);
+}
+
+/// Первый запуск сервера из окна «Создать базу»: создаёт администратора и сохраняет сертификат.
+/// Пароль не короче 12 символов проверяет сервер (СТ-32), его ошибка показывается в окне.
+fn create_remote_base(app: &AppWindow, db: RecentDb) {
+    let cert_file = app.get_new_cert().trim().to_owned();
+    let admin = NewAdmin {
+        login: app.get_new_admin_login().trim().to_owned(),
+        password: app.get_new_admin_password().to_string(),
+    };
+    let address = db.path.to_string();
+    app.set_create_error("".into());
+    app.set_create_busy(true);
+    let weak = app.as_weak();
+    call_in_background(
+        move || {
+            let pem = crate::remote_base::read_certificate(&cert_file)?;
+            // Сессию закрываем сразу: открывать сервер будет «Открыть», как любую базу.
+            crate::remote_base::create(&address, &pem, &admin)?;
+            crate::remote_base::store_certificate(&address, &pem)
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_create_busy(false);
+            match result {
+                Ok(()) => {
+                    add_recent(&app, db);
+                    reset_create(&app);
+                }
+                Err(error) => app.set_create_error(error.message.into()),
+            }
+        },
+    );
+}
+
+/// Добавляет сервер: проверяет адрес и сертификат подключением и сохраняет сертификат.
+fn add_remote(app: &AppWindow, db: RecentDb) {
+    let cert_file = app.get_add_cert().trim().to_owned();
+    let address = db.path.to_string();
+    app.set_add_error("".into());
+    app.set_add_busy(true);
+    let weak = app.as_weak();
+    call_in_background(
+        move || {
+            let pem = crate::remote_base::read_certificate(&cert_file)?;
+            crate::remote_base::check(&address, &pem)?;
+            crate::remote_base::store_certificate(&address, &pem)
+        },
+        move |result| {
+            let Some(app) = weak.upgrade() else { return };
+            app.set_add_busy(false);
+            match result {
+                Ok(()) => {
+                    add_recent(&app, db);
+                    reset_add(&app);
+                }
+                Err(error) => app.set_add_error(error.message.into()),
+            }
+        },
+    );
+}
+
+/// Системное окно выбора сертификата сервера; результат попадает в окно «Создать» или «Добавить».
+fn pick_certificate(app: slint::Weak<AppWindow>, for_create: bool) {
+    let _ = slint::spawn_local(async move {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .set_title("Сертификат сервера")
+            .add_filter("Сертификат", &["crt", "pem", "cer"])
+            .pick_file()
+            .await
+        else {
+            return;
+        };
+        let Some(app) = app.upgrade() else { return };
+        let path = short_home(&file.path().to_string_lossy());
+        if for_create {
+            app.set_new_cert(path.into());
+        } else {
+            app.set_add_cert(path.into());
+        }
+    });
 }
 
 /// Запускает приложение: выбор базы → вход → главная. Ядро подключается позже через Engine API.
@@ -799,11 +968,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 open_local(&app, db, &session, &screens);
                 return;
             }
-            // Сервер подключается через ostov-client (RemoteConnector), это следующий шаг.
-            app.set_start_error(
-                "Подключение к серверу в интерфейсе ещё не сделано: пока открываются только файлы баз."
-                    .into(),
-            );
+            open_remote(&app, db, &session);
         }
     });
 
@@ -814,14 +979,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let Some(app) = app.upgrade() else { return };
             let kind = session.borrow().stage.unwrap_or(LoginKind::None);
             match kind {
-                LoginKind::LocalUser => submit_local_login(&app, &session, &screens),
-                // Без ядра вход не пускаем: сервер (ostov-client) и пароль файла (В-2) ещё не
-                // подключены, а поддельная проверка на этом пути опасна.
-                LoginKind::Server
-                | LoginKind::ServerFirstRun
-                | LoginKind::LocalPassword
-                | LoginKind::None => {
-                    app.set_error("Этот вход ещё не подключён к ядру.".into());
+                LoginKind::LocalUser | LoginKind::Server | LoginKind::ServerFirstRun => {
+                    submit_login(&app, &session, &screens);
+                }
+                // Пароль файла ядро пока не поддерживает (В-2), поддельной проверки нет.
+                LoginKind::LocalPassword | LoginKind::None => {
+                    app.set_error("Пароль файла базы пока не поддерживается ядром.".into());
                 }
             }
         }
@@ -834,7 +997,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         move || {
             let Some(app) = app.upgrade() else { return };
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
-            *session.borrow_mut() = Session::default();
+            release(std::mem::take(&mut *session.borrow_mut()));
             receipts.detach();
             app.set_password("".into());
             app.set_repeat("".into());
@@ -878,18 +1041,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         show_status(&app, &error.message);
                         return;
                     }
-                    let name = {
+                    let (name, key, kind) = {
                         let mut session = session.borrow_mut();
                         session.meta = None;
                         session.admin = false;
                         session.logged_in = false;
-                        session.stage = Some(LoginKind::LocalUser);
-                        session.name.clone()
+                        let kind = if session.server {
+                            LoginKind::Server
+                        } else {
+                            LoginKind::LocalUser
+                        };
+                        session.stage = Some(kind);
+                        (session.name.clone(), session.key.clone(), kind)
                     };
                     // Данные прошлого пользователя уходят с экрана: у следующего другие права.
                     screens.receipts.detach();
                     screens.users.clear();
-                    configure_login(&app, LoginKind::LocalUser, &name, "");
+                    configure_login(&app, kind, &name, &key);
+                    prefill_login(&app, &key);
                     show_page(&app, PAGE_LOGIN);
                 },
             );
@@ -907,9 +1076,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 app.get_new_address().trim(),
             );
             if db.server {
-                // Базу на сервере создаст первый вход (create_remote), пока только запоминаем адрес.
-                add_recent(&app, db);
-                reset_create(&app);
+                create_remote_base(&app, db);
                 return;
             }
             create_local(&app, db);
@@ -1012,6 +1179,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
 
+    app.on_choose_cert_new({
+        let app = app.as_weak();
+        move || pick_certificate(app.clone(), true)
+    });
+    app.on_choose_cert_add({
+        let app = app.as_weak();
+        move || pick_certificate(app.clone(), false)
+    });
+
     app.on_add_confirmed({
         let app = app.as_weak();
         move || {
@@ -1023,8 +1199,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 app.get_add_name().trim(),
             );
             if db.server {
-                add_recent(&app, db);
-                reset_add(&app);
+                add_remote(&app, db);
                 return;
             }
             add_local(&app, db);

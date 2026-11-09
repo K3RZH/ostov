@@ -33,6 +33,7 @@ export component AppWindow inherits Window {
     in-out property <string> new-name;
     in-out property <string> new-folder: "~/Ostov";
     in-out property <string> new-address;
+    in-out property <string> new-cert;
     in-out property <string> new-admin-login;
     in-out property <string> new-admin-password;
     in-out property <string> new-admin-repeat;
@@ -44,17 +45,20 @@ export component AppWindow inherits Window {
     in property <bool> create-busy;
     callback create-confirmed();
     callback choose-folder();
+    callback choose-cert-new();
 
     // Окно «Добавить существующую базу».
     in-out property <bool> adding;
     in-out property <bool> add-server;
     in-out property <string> add-file;
     in-out property <string> add-address;
+    in-out property <string> add-cert;
     in-out property <string> add-name;
     in-out property <string> add-error;
     in property <bool> add-busy;
     callback add-confirmed();
     callback choose-file();
+    callback choose-cert-add();
 
     // Окно «Новый пользователь».
     in-out property <bool> adding-user;
@@ -95,6 +99,7 @@ export component AppWindow inherits Window {
     in property <string> password-label <=> login-page.password-label;
     in-out property <string> repeat <=> login-page.repeat;
     in-out property <string> login <=> login-page.login;
+    in-out property <bool> remember <=> login-page.remember;
     in-out property <string> password <=> login-page.password;
     callback submit <=> login-page.submit;
     callback change-source <=> login-page.change-source;
@@ -246,6 +251,7 @@ export component AppWindow inherits Window {
         db-name <=> root.new-name;
         folder <=> root.new-folder;
         address <=> root.new-address;
+        cert <=> root.new-cert;
         admin-login <=> root.new-admin-login;
         admin-password <=> root.new-admin-password;
         admin-repeat <=> root.new-admin-repeat;
@@ -257,6 +263,7 @@ export component AppWindow inherits Window {
         busy: root.create-busy;
         confirmed => { root.create-confirmed(); }
         choose-folder => { root.choose-folder(); }
+        choose-cert => { root.choose-cert-new(); }
         cancelled => {
             root.creating = false;
             root.create-error = "";
@@ -275,12 +282,14 @@ export component AppWindow inherits Window {
         server <=> root.add-server;
         file <=> root.add-file;
         address <=> root.add-address;
+        cert <=> root.add-cert;
         db-name <=> root.add-name;
         error: root.add-error;
         busy: root.add-busy;
         confirmed => { root.add-confirmed(); }
         cancelled => { root.adding = false; root.add-error = ""; }
         choose-file => { root.choose-file(); }
+        choose-cert => { root.choose-cert-add(); }
     }
 
     if root.settings-open : SettingsDialog {

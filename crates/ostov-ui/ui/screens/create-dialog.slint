@@ -62,6 +62,7 @@ export component CreateDialog inherits Rectangle {
     in-out property <string> db-name;
     in-out property <string> folder;
     in-out property <string> address;
+    in-out property <string> cert;
     in-out property <string> admin-login;
     in-out property <string> admin-password;
     in-out property <string> admin-repeat;
@@ -75,6 +76,7 @@ export component CreateDialog inherits Rectangle {
     callback confirmed();
     callback cancelled();
     callback choose-folder();
+    callback choose-cert();
 
     // Администратор нужен серверу всегда (СТ-36) и локальной базе, если включены пользователи.
     private property <bool> need-admin: root.server || root.protect-users;
@@ -85,7 +87,7 @@ export component CreateDialog inherits Rectangle {
         || (root.admin-login != "" && root.admin-password != "" && root.admin-password == root.admin-repeat);
     private property <bool> valid: root.db-name != ""
         && root.admin-ok
-        && (root.server ? root.address != "" : root.folder != "" && root.file-ok);
+        && (root.server ? root.address != "" && root.cert != "" : root.folder != "" && root.file-ok);
 
     background: Theme.scrim;
 
@@ -147,6 +149,20 @@ export component CreateDialog inherits Rectangle {
                         label: "Адрес сервера";
                         placeholder: "server.local:7700";
                         text <=> root.address;
+                    }
+                    if root.server : HorizontalLayout {
+                        spacing: Theme.space-8;
+                        TextField {
+                            label: "Сертификат сервера (server.crt)";
+                            placeholder: "файл, который сервер создал при первом запуске";
+                            text <=> root.cert;
+                            horizontal-stretch: 1;
+                        }
+                        VerticalLayout {
+                            width: 112px;
+                            alignment: end;
+                            Button { text: "Выбрать…"; clicked => { root.choose-cert(); } }
+                        }
                     }
                     TextField {
                         label: "Название базы";
@@ -239,7 +255,7 @@ export component CreateDialog inherits Rectangle {
                 }
             }
 
-            ErrorBanner { text: root.error; }
+            if root.error != "" : ErrorBanner { text: root.error; }
 
             HorizontalLayout {
                 spacing: Theme.space-12;

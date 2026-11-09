@@ -115,7 +115,7 @@ export component StartPage inherits Rectangle {
                             chosen => { root.selected-recent = index; }
                         }
                     }
-                    ErrorBanner { text: root.error; }
+                    if root.error != "" : ErrorBanner { text: root.error; }
                     if root.recent.length > 0 : HorizontalLayout {
                         spacing: Theme.space-8;
                         Button {
