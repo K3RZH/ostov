@@ -18,6 +18,8 @@ import { WindowBar } from "components/window-bar.slint";
 export component AppWindow inherits Window {
     in-out property <int> page: 0;
     in property <string> config-name;
+    // Версия программы из Cargo.toml: задаёт Rust (src/app.rs), руками не пишем.
+    in property <string> app-version;
     in property <string> config-info;
 
     // Выбор базы
@@ -165,6 +167,7 @@ export component AppWindow inherits Window {
     background: Theme.bg;
 
     start-page := StartPage {
+        app-version: "Версия " + root.app-version;
         x: 0px;
         y: root.chrome-height;
         width: root.width;
@@ -187,6 +190,7 @@ export component AppWindow inherits Window {
     }
 
     main-page := MainPage {
+        app-version: "v" + root.app-version;
         x: 0px;
         y: root.chrome-height;
         width: root.width;

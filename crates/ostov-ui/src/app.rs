@@ -959,6 +959,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     let app = AppWindow::new()?;
     apply_settings(&app, Settings::load());
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
     if let Some((title, version)) = crate::local_base::config_title() {
         app.set_config_name(title.into());

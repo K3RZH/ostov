@@ -33,6 +33,7 @@ where
 /// Окно приложения на нужной странице: размер как в приложении (главная больше остальных).
 fn app_window(page: i32) -> Result<ostov_ui::AppWindow, Box<dyn std::error::Error>> {
     let window = ostov_ui::AppWindow::new()?;
+    window.set_app_version(env!("CARGO_PKG_VERSION").into());
     let (width, height) = if page == 2 {
         (1440.0, 900.0)
     } else {
