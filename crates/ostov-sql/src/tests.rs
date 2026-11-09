@@ -612,3 +612,16 @@ fn long_operator_chains_are_errors_not_stack_overflow() {
         SqlError::TooComplex
     );
 }
+
+#[test]
+fn nul_in_text_is_rejected() {
+    let query = "SELECT name FROM goods WHERE name = :n";
+    assert_eq!(
+        sqlite(query, &[("n", text("Мука\0"))]).unwrap_err(),
+        SqlError::NulInText
+    );
+    assert_eq!(
+        pg("SELECT name FROM goods WHERE name = 'a\0b'", &[]).unwrap_err(),
+        SqlError::NulInText
+    );
+}

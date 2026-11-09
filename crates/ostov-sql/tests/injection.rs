@@ -17,7 +17,8 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{SqliteBase, run, text};
+use common::{SqliteBase, run, text, try_prepare};
+use ostov_sql::SqlError;
 use ostov_store::Driver;
 use ostov_store::drivers::postgres::PostgresDialect;
 use ostov_store::drivers::sqlite::SqliteDialect;
@@ -174,6 +175,13 @@ fn comments_do_not_reach_output() {
 
 fn params_stay_data(db: &mut dyn Driver) {
     for payload in IN_PARAMS {
+        // Символ с кодом 0 PostgreSQL в тексте не принимает: отказ ещё до базы, на обеих.
+        if payload.contains('\0') {
+            let query = "SELECT id, name FROM goods WHERE name = :name";
+            let err = try_prepare(&*db, query, &[("name", text(payload))]).unwrap_err();
+            assert_eq!(err, SqlError::NulInText);
+            continue;
+        }
         let rows = run(
             db,
             "SELECT id, name FROM goods WHERE name = :name",

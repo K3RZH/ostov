@@ -507,6 +507,7 @@ impl Translator<'_> {
             })?;
         self.used.insert(name.to_owned());
         let kind = match value {
+            Value::Text(text) if text.contains('\0') => return Err(SqlError::NulInText),
             Value::Text(_) => Some(FieldKind::Text),
             _ => None,
         };
@@ -706,6 +707,7 @@ impl Translator<'_> {
                 text: format!("{text}L"),
             }),
             // Строку из запроса тоже передаём параметром: в выходной SQL текст не склеивается.
+            ast::Value::SingleQuotedString(s) if s.contains('\0') => Err(SqlError::NulInText),
             ast::Value::SingleQuotedString(s) => Ok((self.literal_text(s), Some(FieldKind::Text))),
             ast::Value::Null => Ok(("NULL".to_owned(), None)),
             ast::Value::Placeholder(raw) => self.param(raw),
