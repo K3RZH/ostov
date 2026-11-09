@@ -388,7 +388,10 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
             .show_error("Работа с сервером в интерфейсе ещё не подключена."),
     }
     let roles = session.meta.as_ref().map_or_else(Vec::new, |meta| {
-        meta.roles.iter().map(|role| role.as_str().into()).collect()
+        meta.roles
+            .iter()
+            .map(|role| role.name.as_str().into())
+            .collect()
     });
     app.set_roles(ModelRc::new(VecModel::<slint::SharedString>::from(roles)));
     screens.users.clear();
@@ -1166,6 +1169,7 @@ mod tests {
             login: "u".into(),
             display_name: "".into(),
             roles: roles.iter().map(|role| (*role).to_owned()).collect(),
+            system: Default::default(),
         };
         assert!(is_admin(Some(&user(&["admin"]))));
         assert!(!is_admin(Some(&user(&["storekeeper"]))));
