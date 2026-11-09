@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OpenFlags, params_from_iter};
 
 use crate::driver::{Dialect, Driver, Row, StoreError, Value};
 
@@ -43,6 +43,17 @@ impl SqliteDriver {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        add_functions(&conn)?;
+        Ok(Self {
+            conn,
+            depth: crate::Depth::default(),
+        })
+    }
+
+    /// Только чтение: файл не меняется, даже режим журнала.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
         add_functions(&conn)?;
         Ok(Self {
             conn,

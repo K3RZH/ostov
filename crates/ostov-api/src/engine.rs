@@ -1,8 +1,10 @@
+use std::fmt;
 use std::sync::Arc;
 
 use crate::{
-    BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry, ListPage,
-    ListQuery, Meta, NewUser, ObjectData, PostAction, ReportQuery, Saved, SessionInfo, UserInfo,
+    BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
+    ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, ReportQuery, Saved, SessionInfo,
+    UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -111,14 +113,27 @@ pub trait Engine: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewAdmin {
     pub login: String,
     pub password: String,
 }
 
+impl fmt::Debug for NewAdmin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewAdmin")
+            .field("login", &self.login)
+            .field("password", &"***")
+            .finish()
+    }
+}
+
 /// Открывает или создаёт базу и возвращает готовый `Engine`.
 pub trait Connector: Send + Sync {
+    /// Проверка файла без записи в него: база ли это Ostov и под какую конфигурацию.
+    fn check_local(&self, _path: &str) -> EngineResult<BaseInfo> {
+        Err(EngineError::not_implemented("CheckLocal"))
+    }
     fn open_local(
         &self,
         _path: &str,

@@ -152,6 +152,12 @@ impl pb::LoginReply {
             display_name: session.display_name,
             roles: session.roles,
             token,
+            system: Some(pb::SystemRights {
+                closed_period: session.system.closed_period,
+                set_closing_date: session.system.set_closing_date,
+                admin: session.system.admin,
+                update_config: session.system.update_config,
+            }),
         }
     }
 }
@@ -162,6 +168,15 @@ pub fn session_from_pb(r: pb::LoginReply) -> (api::SessionInfo, String) {
         login: r.login,
         display_name: r.display_name,
         roles: r.roles,
+        system: r
+            .system
+            .map(|s| api::SystemRights {
+                closed_period: s.closed_period,
+                set_closing_date: s.set_closing_date,
+                admin: s.admin,
+                update_config: s.update_config,
+            })
+            .unwrap_or_default(),
     };
     (session, r.token)
 }
@@ -297,7 +312,14 @@ impl From<api::Meta> for pb::Meta {
                     rights: Some(o.rights.into()),
                 })
                 .collect(),
-            roles: m.roles,
+            roles: m
+                .roles
+                .into_iter()
+                .map(|r| pb::Role {
+                    name: r.name,
+                    title: r.title,
+                })
+                .collect(),
         }
     }
 }
@@ -336,7 +358,14 @@ impl TryFrom<pb::Meta> for api::Meta {
         Ok(Self {
             menu: m.menu.into_iter().map(Into::into).collect(),
             objects,
-            roles: m.roles,
+            roles: m
+                .roles
+                .into_iter()
+                .map(|r| api::RoleInfo {
+                    name: r.name,
+                    title: r.title,
+                })
+                .collect(),
         })
     }
 }

@@ -93,9 +93,14 @@ fn demo_matches_config_folder() {
 #[test]
 fn get_meta_for_warehouse() {
     let meta = Meta::new(&load(&repo_config()).unwrap());
+    let roles: Vec<(&str, &str)> = meta
+        .roles
+        .iter()
+        .map(|r| (r.name.as_str(), r.title.as_str()))
+        .collect();
     assert_eq!(
-        meta.roles,
-        vec!["storekeeper".to_owned(), "admin".to_owned()]
+        roles,
+        [("storekeeper", "Кладовщик"), ("admin", "Администратор")]
     );
 
     let [section] = meta.menu.as_slice() else {

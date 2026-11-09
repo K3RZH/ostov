@@ -1,5 +1,5 @@
 //! Ядро на живом PostgreSQL через `Engine`, как его зовёт интерфейс.
-//! Идут, только если задан `OSTOV_PG_URL`; каждый тест — в своей чистой схеме.
+//! Идут, только если задан `OSTOV_PG_URL`, иначе видны как ignored; каждый тест — в своей схеме.
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
@@ -121,6 +121,7 @@ fn report(engine: &dyn Engine, name: &str, params: &[(&str, Value)]) -> Vec<Fiel
 }
 
 #[test]
+#[cfg_attr(not(pg_url), ignore = "нужен OSTOV_PG_URL")]
 fn warehouse_on_postgres() {
     let Some(engine) = install("ostov_t_flow") else {
         return;
@@ -254,6 +255,7 @@ fn warehouse_on_postgres() {
 }
 
 #[test]
+#[cfg_attr(not(pg_url), ignore = "нужен OSTOV_PG_URL")]
 fn restructure_on_postgres() {
     let schema = "ostov_t_restructure";
     let Some(engine) = install(schema) else {
@@ -310,6 +312,7 @@ fn restructure_on_postgres() {
 }
 
 #[test]
+#[cfg_attr(not(pg_url), ignore = "нужен OSTOV_PG_URL")]
 fn users_on_postgres() {
     let schema = "ostov_t_users";
     let Some(engine) = install(schema) else {

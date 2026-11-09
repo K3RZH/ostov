@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 // ---------------------------------------------------------------- значения
 
@@ -43,11 +44,24 @@ pub struct SessionInfo {
     pub login: String,
     pub display_name: String,
     pub roles: Vec<String>,
+    /// Системные права роли: по `system.admin` интерфейс показывает «Администрирование».
+    pub system: SystemRights,
+}
+
+/// Что видно в файле базы без записи в него: для «Добавить существующую».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseInfo {
+    /// Имя конфигурации, под которую создана база.
+    pub config_name: String,
+    pub file_password: bool,
+    /// В базе есть пользователи: после открытия нужен вход.
+    pub login_required: bool,
 }
 
 /// Метаданные — те же типы, что строит `ostov-meta` из конфигурации: одно описание на всех.
 pub use ostov_model::{
-    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, Rights, TablePartDef,
+    FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, Rights, RoleInfo, SystemRights,
+    TablePartDef,
 };
 
 // ---------------------------------------------------------------- списки
@@ -153,12 +167,23 @@ pub struct UserInfo {
 }
 
 /// Пароль идёт только по защищённому каналу, хэш считает ядро.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NewUser {
     pub login: String,
     pub display_name: String,
     pub role: String,
     pub password: String,
+}
+
+impl fmt::Debug for NewUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewUser")
+            .field("login", &self.login)
+            .field("display_name", &self.display_name)
+            .field("role", &self.role)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

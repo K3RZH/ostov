@@ -18,8 +18,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
-    BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo, ListPage,
-    NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
+    BaseInfo, BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, HelloInfo,
+    ListPage, NewAdmin, ObjectData, PROTOCOL_VERSION, PostAction, ReportQuery, Row, Saved,
 };
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Value};
@@ -1107,24 +1107,38 @@ impl LocalConnector {
 const BASE_TABLE: &str = "ostov_base";
 
 impl Connector for LocalConnector {
+    fn check_local(&self, path: &str) -> EngineResult<BaseInfo> {
+        if !Path::new(path).exists() {
+            return Err(not_found(path));
+        }
+        let mut db = SqliteDriver::open_read_only(path).map_err(|e| error(e.into()))?;
+        let config_name = base_config(&mut db, path)?;
+        let login_required = ostov_sec::has_users(&mut db).unwrap_or(false);
+        Ok(BaseInfo {
+            config_name,
+            file_password: false,
+            login_required,
+        })
+    }
+
     fn open_local(&self, path: &str, file_password: Option<&str>) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         if !Path::new(path).exists() {
-            return Err(EngineError::new(
-                ErrorCode::NotFound,
-                format!("файла базы {path} нет"),
-            ));
+            return Err(not_found(path));
         }
         let lock = lock_base(path)?;
         let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
-        let sql = format!("SELECT value FROM {BASE_TABLE} WHERE key = 'config'");
-        if db.query(&sql, &[]).is_err() {
+        let stored = base_config(&mut db, path)?;
+        let config = self.config()?;
+        if stored != config.name {
             return Err(EngineError::new(
                 ErrorCode::Incompatible,
-                format!("{path} — не база Ostov"),
+                format!(
+                    "{path} — база конфигурации «{stored}», а открыта «{}»",
+                    config.name
+                ),
             ));
         }
-        let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
             LocalEngine::new(Box::new(db), config).locked(lock),
@@ -1140,10 +1154,47 @@ impl Connector for LocalConnector {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
         let engine = LocalEngine::new(Box::new(db), config).locked(lock);
-        if let Some(admin) = admin {
-            engine.create_first_admin(&admin.login, &admin.password)?;
+        if let Some(admin) = admin
+            && let Err(e) = engine.create_first_admin(&admin.login, &admin.password)
+        {
+            // База без администратора никому не нужна: убираем файл, чтобы можно было повторить.
+            drop(engine);
+            remove_base(path);
+            return Err(e);
         }
         Ok(Arc::new(engine))
+    }
+}
+
+fn not_found(path: &str) -> EngineError {
+    EngineError::new(ErrorCode::NotFound, format!("файла базы {path} нет"))
+}
+
+/// Имя конфигурации из служебной таблицы; нет таблицы — файл не база Ostov.
+fn base_config(db: &mut SqliteDriver, path: &str) -> EngineResult<String> {
+    let sql = format!("SELECT value FROM {BASE_TABLE} WHERE key = 'config'");
+    let rows = db.query(&sql, &[]).ok();
+    match rows
+        .as_deref()
+        .and_then(|r| r.first())
+        .and_then(|r| r.first())
+    {
+        Some(Value::Text(name)) => Ok(name.clone()),
+        _ => Err(EngineError::new(
+            ErrorCode::Incompatible,
+            format!("{path} — не база Ostov"),
+        )),
+    }
+}
+
+fn remove_base(path: &str) {
+    for file in [
+        path.to_owned(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+        format!("{path}.lock"),
+    ] {
+        let _ = std::fs::remove_file(file);
     }
 }
 

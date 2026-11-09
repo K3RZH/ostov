@@ -1321,6 +1321,7 @@ fn first_admin_turns_login_on() {
     let session = engine.create_first_admin("Boss", ADMIN_PASSWORD).unwrap();
     assert_eq!(session.login, "boss");
     assert_eq!(session.roles, vec!["admin".to_owned()]);
+    assert!(session.system.admin);
     assert_eq!(
         engine
             .create_first_admin("boss2", ADMIN_PASSWORD)
@@ -2016,4 +2017,117 @@ fn batch_is_all_or_nothing() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden);
     assert_eq!(err.message, "Запись 1: Нет права на создание «Товары».");
+}
+
+#[test]
+fn failed_first_admin_leaves_no_base() {
+    let base = Base::new("short-password");
+    let admin = ostov_api::NewAdmin {
+        login: "boss".into(),
+        password: "short".into(),
+    };
+    let err = LocalConnector::default()
+        .create_local(&base.path, None, Some(&admin))
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(!std::path::Path::new(&base.path).exists());
+    // Файла нет — можно повторить с нормальным паролем.
+    let admin = ostov_api::NewAdmin {
+        password: ADMIN_PASSWORD.into(),
+        ..admin
+    };
+    LocalConnector::default()
+        .create_local(&base.path, None, Some(&admin))
+        .unwrap();
+}
+
+#[test]
+fn first_user_must_be_admin() {
+    let base = Base::new("first-keeper");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    let keeper = ostov_api::NewUser {
+        login: "keeper".into(),
+        display_name: "Кладовщик".into(),
+        role: "storekeeper".into(),
+        password: KEEPER_PASSWORD.into(),
+    };
+    assert_eq!(
+        engine.admin_add_user(&keeper).unwrap_err().code,
+        ErrorCode::Validation
+    );
+    assert!(!engine.hello().unwrap().login_required);
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine.admin_add_user(&keeper).unwrap();
+    let session = engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert!(!session.system.admin);
+}
+
+#[test]
+fn passwords_hidden_in_debug() {
+    let admin = ostov_api::NewAdmin {
+        login: "boss".into(),
+        password: ADMIN_PASSWORD.into(),
+    };
+    let user = ostov_api::NewUser {
+        login: "keeper".into(),
+        display_name: "Кладовщик".into(),
+        role: "storekeeper".into(),
+        password: KEEPER_PASSWORD.into(),
+    };
+    assert!(!format!("{admin:?}").contains(ADMIN_PASSWORD));
+    assert!(!format!("{user:?}").contains(KEEPER_PASSWORD));
+}
+
+#[test]
+fn checking_base_does_not_write() {
+    let base = Base::new("check");
+    {
+        let engine = base.create();
+        add(&*engine, "goods", "Мука");
+    }
+    let before = std::fs::read(&base.path).unwrap();
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "Склад");
+    assert!(!info.login_required);
+    assert!(!info.file_password);
+    assert_eq!(std::fs::read(&base.path).unwrap(), before);
+
+    let other = base.dir.join("other.db").to_string_lossy().into_owned();
+    std::fs::write(&other, b"").unwrap();
+    let err = LocalConnector::default().check_local(&other).err().unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+    assert_eq!(std::fs::read(&other).unwrap(), b"");
+    let missing = format!("{}.missing", base.path);
+    let err = LocalConnector::default()
+        .check_local(&missing)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::NotFound);
+}
+
+#[test]
+fn base_of_other_configuration_is_not_touched() {
+    let base = Base::new("other-config");
+    let mut model = super::warehouse_model();
+    model.title = "Рецептуры".into();
+    model.documents.clear();
+    model.registers.clear();
+    model.menu.clear();
+    drop(
+        LocalConnector::new(model)
+            .create_local(&base.path, None, None)
+            .unwrap(),
+    );
+    let before = std::fs::read(&base.path).unwrap();
+    let info = LocalConnector::default().check_local(&base.path).unwrap();
+    assert_eq!(info.config_name, "Рецептуры");
+    let err = LocalConnector::default()
+        .open_local(&base.path, None)
+        .err()
+        .unwrap();
+    assert_eq!(err.code, ErrorCode::Incompatible);
+    assert_eq!(std::fs::read(&base.path).unwrap(), before);
 }

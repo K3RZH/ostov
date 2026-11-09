@@ -117,6 +117,14 @@ message LoginReply {
   repeated string roles = 3;
   // Токен сессии: клиент шлёт его в заголовке `authorization: Bearer <token>`.
   string token = 4;
+  SystemRights system = 5;
+}
+
+message SystemRights {
+  bool closed_period = 1;
+  bool set_closing_date = 2;
+  bool admin = 3;
+  bool update_config = 4;
 }
 
 enum FieldType {
@@ -177,10 +185,17 @@ message MenuItem {
   repeated MenuItem children = 4;
 }
 
+message Role {
+  string name = 1;
+  string title = 2;
+}
+
 message Meta {
   repeated MenuItem menu = 1;
   repeated ObjectMeta objects = 2;
-  repeated string roles = 3;
+  // Было `repeated string roles`, до заголовков ролей.
+  reserved 3;
+  repeated Role roles = 4;
 }
 
 // ---------------------------------------------------------------- списки и объекты

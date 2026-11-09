@@ -150,7 +150,16 @@ fn meta_survives_the_wire() {
                 ..api::Rights::default()
             },
         }],
-        roles: vec!["admin".into(), "storekeeper".into()],
+        roles: vec![
+            api::RoleInfo {
+                name: "admin".into(),
+                title: "Администратор".into(),
+            },
+            api::RoleInfo {
+                name: "storekeeper".into(),
+                title: "Кладовщик".into(),
+            },
+        ],
     };
     let back: api::Meta = wire(pb::Meta::from(meta.clone())).try_into().unwrap();
     assert_eq!(back, meta);
@@ -175,6 +184,10 @@ fn small_types_survive_the_wire() {
         login: "boss".into(),
         display_name: "Начальник".into(),
         roles: vec!["admin".into()],
+        system: api::SystemRights {
+            admin: true,
+            ..api::SystemRights::default()
+        },
     };
     let reply = wire(pb::LoginReply::new(session.clone(), "токен".into()));
     assert_eq!(crate::session_from_pb(reply), (session, "токен".to_owned()));
