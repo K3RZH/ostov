@@ -1773,14 +1773,22 @@ fn failed_logins_are_counted_and_slowed_down() {
     let engine = with_admin(&base);
     engine.logout().unwrap();
     for _ in 0..4 {
-        let started = std::time::Instant::now();
         engine.login("boss", "wrong-password-1").unwrap_err();
-        assert!(started.elapsed() < std::time::Duration::from_millis(900));
     }
-    // Пятая ошибка подряд — ответ с задержкой: счётчик пережил откаты.
+    // Пятая ошибка подряд — ответ с задержкой. Сверху время не ограничиваем: хэш в debug под
+    // нагрузкой сам идёт больше секунды. Что первые четыре без задержки, проверяет
+    // `ostov_sec::delay_secs`, здесь — что счётчик пережил откаты.
     let started = std::time::Instant::now();
     engine.login("boss", "wrong-password-1").unwrap_err();
     assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let failed = ostov_store::Driver::query(
+        &mut db,
+        "SELECT failed FROM ostov_users WHERE login = 'boss'",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(failed, vec![vec![ostov_store::Value::Int(5)]]);
 
     engine.login("boss", ADMIN_PASSWORD).unwrap();
     let failed = journal(&*engine)
