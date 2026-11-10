@@ -162,7 +162,8 @@ pub struct ReportQuery {
 }
 
 /// Ответ на запрос конфигурации (SQL через платформу, СТ-13): не больше 1000 строк.
-/// Деньги — `Decimal`, ссылки — `Ref` без названия, `posted` и `deleted` — целые 0 и 1.
+/// Деньги — `Decimal`, даты — `Date`. Колонка, взятая прямо из поля-ссылки на справочник, —
+/// `Ref` с названием; `posted` и `deleted` — `Bool`, как в списках.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueryResult {
     pub columns: Vec<String>,

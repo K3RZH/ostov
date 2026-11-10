@@ -2400,7 +2400,10 @@ fn query_reads_money_refs_and_dates() {
             text("Мука"),
             dec(10_000, 3),
             dec(150, 2),
-            refer(flour)
+            Value::Ref {
+                id: flour,
+                title: Some("Мука".into())
+            }
         ]]
     );
     // Целый параметр рядом с деньгами — целые рубли, а не копейки.
@@ -2412,7 +2415,7 @@ fn query_reads_money_refs_and_dates() {
         [vec![
             Value::Date("2026-10-30".into()),
             Value::Int(1),
-            Value::Int(1)
+            Value::Bool(true)
         ]]
     );
     let found = sql(

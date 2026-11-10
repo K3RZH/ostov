@@ -579,6 +579,12 @@ fn query_function(py: Python<'_>, link: Link) -> PyResult<Bound<'_, PyCFunction>
                 Some(Err(e @ CoreError::Query(SqlError::NoRight { .. }))) => {
                     Err(raise(py, "UserError", &e.to_string()))
                 }
+                // Текст базы бывает английским и техническим: он уходит в трассировку.
+                Some(Err(e @ CoreError::Store(_))) => Err(raise_noted(
+                    py,
+                    "ошибка базы данных при выполнении запроса",
+                    &e.to_string(),
+                )),
                 Some(Err(e)) => Err(raise(py, "QueryError", &e.to_string())),
                 None => Err(raise(py, "QueryError", "ядро не ответило на запрос")),
             }
@@ -614,8 +620,11 @@ fn rows_to_py(py: Python<'_>, found: &QueryRows) -> PyResult<Py<PyAny>> {
     let rows = PyList::empty(py);
     for row in &found.rows {
         let values = PyList::empty(py);
-        for value in row {
-            values.append(plain(py, Some(value))?)?;
+        for (column, value) in found.columns.iter().zip(row) {
+            match value {
+                FieldValue::Int(n) if column.flag => values.append(*n != 0)?,
+                _ => values.append(plain(py, Some(value))?)?,
+            }
         }
         rows.append(values)?;
     }
@@ -626,6 +635,16 @@ fn rows_to_py(py: Python<'_>, found: &QueryRows) -> PyResult<Py<PyAny>> {
 fn raise(py: Python<'_>, class: &str, message: &str) -> PyErr {
     runtime(py)
         .and_then(|rt| rt.getattr(class)?.call1((message,)))
+        .map_or_else(|e| e, PyErr::from_value)
+}
+
+fn raise_noted(py: Python<'_>, message: &str, note: &str) -> PyErr {
+    runtime(py)
+        .and_then(|rt| {
+            let error = rt.getattr("QueryError")?.call1((message,))?;
+            error.call_method1("add_note", (note,))?;
+            Ok(error)
+        })
         .map_or_else(|e| e, PyErr::from_value)
 }
 

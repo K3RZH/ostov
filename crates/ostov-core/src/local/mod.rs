@@ -261,6 +261,14 @@ fn row_to_api(fields: &crate::Fields) -> ostov_api::Fields {
     values
 }
 
+/// Значение колонки запроса: отметки `posted` и `deleted` — флажки, как в списках.
+fn query_value(column: &ostov_sql::Column, value: &crate::FieldValue) -> ostov_api::Value {
+    match value {
+        crate::FieldValue::Int(n) if column.flag => ostov_api::Value::Bool(*n != 0),
+        other => value_to_api(other),
+    }
+}
+
 fn broken() -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
@@ -922,22 +930,40 @@ impl Engine for LocalEngine {
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
-            let found = crate::query::run(
-                &mut **self.db(),
-                &self.config.model,
-                &can_read,
-                sql,
-                &params,
-            )
-            .map_err(error)?;
-            Ok(ostov_api::QueryResult {
-                columns: found.columns.into_iter().map(|c| c.name).collect(),
-                rows: found
-                    .rows
-                    .iter()
-                    .map(|row| row.iter().map(value_to_api).collect())
-                    .collect(),
-            })
+            let mut db = self.db();
+            let found = crate::query::run(&mut **db, &self.config.model, &can_read, sql, &params)
+                .map_err(error)?;
+            // Названия ссылок — тем же путём, что в списках: строки по именам колонок.
+            let refs: Vec<FieldDef> = found
+                .columns
+                .iter()
+                .filter_map(|c| Some(FieldDef::reference(&c.name, c.target.as_deref()?)))
+                .collect();
+            let mut rows: Vec<ostov_api::Fields> = found
+                .rows
+                .iter()
+                .map(|row| {
+                    found
+                        .columns
+                        .iter()
+                        .zip(row)
+                        .map(|(c, v)| (c.name.clone(), query_value(c, v)))
+                        .collect()
+                })
+                .collect();
+            let mut values: Vec<&mut ostov_api::Fields> = rows.iter_mut().collect();
+            self.fill_titles(&mut **db, &refs, &mut values)?;
+            let columns: Vec<String> = found.columns.into_iter().map(|c| c.name).collect();
+            let rows = rows
+                .into_iter()
+                .map(|mut row| {
+                    columns
+                        .iter()
+                        .map(|c| row.remove(c).unwrap_or(ostov_api::Value::Null))
+                        .collect()
+                })
+                .collect();
+            Ok(ostov_api::QueryResult { columns, rows })
         })
     }
 
