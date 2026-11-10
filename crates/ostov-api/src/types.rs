@@ -76,6 +76,13 @@ pub struct Row {
     pub values: Fields,
 }
 
+/// Ключ сортировки списка после первого.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortKey {
+    pub field: String,
+    pub descending: bool,
+}
+
 /// Окно списка (Дизайн §3.1): сортировка, поиск и отбор идут в базе.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListQuery {
@@ -83,6 +90,8 @@ pub struct ListQuery {
     /// Поле сортировки; `None` — по id. Пустые значения всегда в конце.
     pub order: Option<String>,
     pub descending: bool,
+    /// Следующие ключи сортировки по порядку важности; без `order` нельзя.
+    pub then_by: Vec<SortKey>,
     /// Подстрока по текстовым полям.
     pub search: Option<String>,
     /// Отбор: только проведённые (`Some(true)`) или только черновики (`Some(false)`).
@@ -199,6 +208,13 @@ impl fmt::Debug for NewUser {
             .field("password", &"***")
             .finish()
     }
+}
+
+/// Страница журнала: записи и ключ следующей; `None` — дальше записей нет.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalPage {
+    pub entries: Vec<JournalEntry>,
+    pub next_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

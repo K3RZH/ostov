@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ostov_api::{
     BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
-    JournalEntry, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
+    JournalPage, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
     PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserInfo,
 };
 use ostov_proto::pb::engine_client::EngineClient;
@@ -357,13 +357,16 @@ impl Engine for RemoteEngine {
         Ok(())
     }
 
-    fn admin_journal(&self, after_key: Option<&str>, size: u32) -> EngineResult<Vec<JournalEntry>> {
+    fn admin_journal_page(&self, after_key: Option<&str>, size: u32) -> EngineResult<JournalPage> {
         let j = pb::JournalRequest {
             after_key: after_key.map(str::to_owned),
             size,
         };
         let list = self.call(j, |mut c, r| async move { c.admin_journal(r).await })?;
-        Ok(list.entries.into_iter().map(Into::into).collect())
+        Ok(JournalPage {
+            entries: list.entries.into_iter().map(Into::into).collect(),
+            next_key: list.next_key,
+        })
     }
 
     fn admin_backup(&self, target: &str) -> EngineResult<JobId> {

@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 
 use ostov_api::{
     Connector, Engine, ErrorCode, Fields, ListQuery, NewAdmin, ObjectData, PostAction, ReportQuery,
-    Value,
+    SortKey, Value,
 };
 use ostov_client::RemoteConnector;
 use ostov_core::local::warehouse_model;
@@ -210,6 +210,26 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
     assert_eq!(err.message, "В запросе можно только SELECT");
+
+    // Ключ следующей страницы журнала и сортировка по нескольким колонкам — тоже по сети.
+    let page = engine.admin_journal_page(None, 2).unwrap();
+    assert_eq!(page.entries.len(), 2);
+    let next = engine
+        .admin_journal_page(page.next_key.as_deref(), 1000)
+        .unwrap();
+    assert!(next.next_key.is_none());
+    assert!(next.entries.iter().all(|e| e.id < page.entries[1].id));
+    let sorted = engine
+        .list(&ListQuery {
+            order: Some("supplier".into()),
+            then_by: vec![SortKey {
+                field: "date".into(),
+                descending: true,
+            }],
+            ..query("receipt")
+        })
+        .unwrap();
+    assert_eq!(sorted.rows.len(), 1);
 
     let meta = engine.get_meta().unwrap();
     assert_eq!(meta.objects.len(), 5);

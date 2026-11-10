@@ -248,3 +248,158 @@ fn milestones_are_built_lazily_and_jumps_in_any_order_land_right() {
         }
     }
 }
+
+fn shelf() -> Catalog {
+    Catalog::new(
+        "shelf",
+        vec![
+            FieldDef::new("name", FieldKind::Text),
+            FieldDef::new("grp", FieldKind::Text),
+            FieldDef::new("price", FieldKind::Decimal { scale: 2 }),
+        ],
+    )
+    .unwrap()
+}
+
+/// 90 строк: три группы и пустая, цены с повторами и пустыми.
+fn shelf_db() -> SqliteDriver {
+    let mut db = memory_db();
+    let cat = shelf();
+    cat.create_table(&mut db).unwrap();
+    in_transaction(&mut db, |db| {
+        for i in 1..=90 {
+            let grp = match i % 4 {
+                0 => FieldValue::Null,
+                n => text(["a", "b", "c"][n - 1]),
+            };
+            let price = if i % 5 == 0 {
+                FieldValue::Null
+            } else {
+                dec(&format!("{}.00", i % 3))
+            };
+            cat.insert(
+                db,
+                &fields(&[
+                    ("name", text(&format!("n{i}"))),
+                    ("grp", grp),
+                    ("price", price),
+                ]),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    db
+}
+
+#[test]
+fn sorted_by_several_keys_across_pages_and_jumps() {
+    use std::cmp::{Ordering, Reverse};
+
+    let mut db = shelf_db();
+    let cat = shelf();
+    let query = ListQuery {
+        order: Some("grp".into()),
+        then_by: vec![("price".into(), true)],
+        ..ListQuery::default()
+    };
+    // Эталон: группа по возрастанию, цена по убыванию, пустые в конце каждого ключа, потом id.
+    let all = list(&mut db, &cat, &ListQuery::default(), None, 1000)
+        .unwrap()
+        .rows;
+    let key = |r: &ListRow| {
+        let grp = match &r.fields["grp"] {
+            FieldValue::Text(t) => Some(t.clone()),
+            _ => None,
+        };
+        let price = match &r.fields["price"] {
+            FieldValue::Decimal(d) => Some(*d),
+            _ => None,
+        };
+        (
+            grp.is_none(),
+            grp,
+            price.is_none(),
+            price.map(Reverse),
+            r.id,
+        )
+    };
+    let mut expected: Vec<ListRow> = all.clone();
+    expected.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap_or(Ordering::Equal));
+    let expected: Vec<i64> = expected.iter().map(|r| r.id).collect();
+
+    for size in [1, 3, 7, 1000] {
+        let mut got = Vec::new();
+        let mut after = None;
+        loop {
+            let page = list(&mut db, &cat, &query, after.as_deref(), size).unwrap();
+            got.extend(ids(&page));
+            match page.next_key {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(got, expected, "окно {size}");
+    }
+
+    let mut marks = Milestones::build(&mut db, &cat, &query, 5).unwrap();
+    for position in [0, 4, 5, 17, 44, 85, 89] {
+        let page = marks.seek(&mut db, &cat, position, 6).unwrap();
+        let from = usize::try_from(position).unwrap();
+        let to = (from + 6).min(expected.len());
+        assert_eq!(ids(&page), expected[from..to], "позиция {position}");
+    }
+}
+
+#[test]
+fn bad_sort_keys_are_errors() {
+    let mut db = shelf_db();
+    let cat = shelf();
+    for (query, why) in [
+        (
+            ListQuery {
+                then_by: vec![("price".into(), false)],
+                ..ListQuery::default()
+            },
+            "без первого",
+        ),
+        (
+            ListQuery {
+                order: Some("grp".into()),
+                then_by: vec![("grp".into(), true)],
+                ..ListQuery::default()
+            },
+            "дважды",
+        ),
+        (
+            ListQuery {
+                order: Some("grp".into()),
+                then_by: vec![("colour".into(), true)],
+                ..ListQuery::default()
+            },
+            "нет поля colour",
+        ),
+    ] {
+        let err = list(&mut db, &cat, &query, None, 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(why), "{err}");
+    }
+    // Ключ страницы от другой сортировки не подходит.
+    let one = ListQuery {
+        order: Some("grp".into()),
+        ..ListQuery::default()
+    };
+    let key = list(&mut db, &cat, &one, None, 3)
+        .unwrap()
+        .next_key
+        .unwrap();
+    let two = ListQuery {
+        then_by: vec![("price".into(), false)],
+        ..one
+    };
+    let err = list(&mut db, &cat, &two, Some(&key), 3)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("другой сортировки"), "{err}");
+}

@@ -287,10 +287,17 @@ const FILTER_SEP: char = '\u{1e}';
 const PAIR_SEP: char = '\u{1d}';
 
 fn token(object: &str, q: &ListQuery) -> EngineResult<String> {
+    // Следующие ключи: «1поле» по убыванию, «0поле» по возрастанию; имена полей — ASCII.
+    let then_by: Vec<String> = q
+        .then_by
+        .iter()
+        .map(|(field, desc)| format!("{}{field}", u8::from(*desc)))
+        .collect();
     Ok(format!(
-        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
+        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
         q.order.as_deref().unwrap_or(""),
         u8::from(q.descending),
+        then_by.join(&PAIR_SEP.to_string()),
         flag(q.posted),
         flag(q.deleted),
         encode_filter(&q.filter)?,
@@ -299,16 +306,36 @@ fn token(object: &str, q: &ListQuery) -> EngineResult<String> {
 }
 
 fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
-    let parts: Vec<&str> = token.splitn(7, SEP).collect();
-    let [object, order, descending, posted, deleted, filter, search] = parts.as_slice() else {
+    let parts: Vec<&str> = token.splitn(8, SEP).collect();
+    let [
+        object,
+        order,
+        descending,
+        then_by,
+        posted,
+        deleted,
+        filter,
+        search,
+    ] = parts.as_slice()
+    else {
         return Err(bad_token());
     };
     let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    let then_by = then_by
+        .split(PAIR_SEP)
+        .filter(|key| !key.is_empty())
+        .map(|key| match key.split_at_checked(1) {
+            Some(("0", field)) => Ok((field.to_owned(), false)),
+            Some(("1", field)) => Ok((field.to_owned(), true)),
+            _ => Err(bad_token()),
+        })
+        .collect::<EngineResult<_>>()?;
     Ok((
         (*object).to_owned(),
         ListQuery {
             order: some(order),
             descending: *descending == "1",
+            then_by,
             search: some(search),
             posted: unflag(posted),
             deleted: unflag(deleted),
@@ -417,6 +444,11 @@ impl LocalEngine {
         let query = ListQuery {
             order: q.order.clone(),
             descending: q.descending,
+            then_by: q
+                .then_by
+                .iter()
+                .map(|k| (k.field.clone(), k.descending))
+                .collect(),
             search: q.search.clone(),
             posted: q.posted,
             deleted: q.deleted,
@@ -827,11 +859,11 @@ impl Engine for LocalEngine {
         self.guarded("AdminAddUser", || self.run_admin_add_user(user))
     }
 
-    fn admin_journal(
+    fn admin_journal_page(
         &self,
         after_key: Option<&str>,
         size: u32,
-    ) -> EngineResult<Vec<ostov_api::JournalEntry>> {
+    ) -> EngineResult<ostov_api::JournalPage> {
         self.guarded("AdminJournal", || self.run_admin_journal(after_key, size))
     }
 
