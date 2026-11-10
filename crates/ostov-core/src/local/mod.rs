@@ -261,6 +261,14 @@ fn row_to_api(fields: &crate::Fields) -> ostov_api::Fields {
     values
 }
 
+/// Значение колонки запроса: отметки `posted` и `deleted` — флажки, как в списках.
+fn query_value(column: &ostov_sql::Column, value: &crate::FieldValue) -> ostov_api::Value {
+    match value {
+        crate::FieldValue::Int(n) if column.flag => ostov_api::Value::Bool(*n != 0),
+        other => value_to_api(other),
+    }
+}
+
 fn broken() -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
@@ -279,10 +287,17 @@ const FILTER_SEP: char = '\u{1e}';
 const PAIR_SEP: char = '\u{1d}';
 
 fn token(object: &str, q: &ListQuery) -> EngineResult<String> {
+    // Следующие ключи: «1поле» по убыванию, «0поле» по возрастанию; имена полей — ASCII.
+    let then_by: Vec<String> = q
+        .then_by
+        .iter()
+        .map(|(field, desc)| format!("{}{field}", u8::from(*desc)))
+        .collect();
     Ok(format!(
-        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
+        "{object}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
         q.order.as_deref().unwrap_or(""),
         u8::from(q.descending),
+        then_by.join(&PAIR_SEP.to_string()),
         flag(q.posted),
         flag(q.deleted),
         encode_filter(&q.filter)?,
@@ -291,16 +306,36 @@ fn token(object: &str, q: &ListQuery) -> EngineResult<String> {
 }
 
 fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
-    let parts: Vec<&str> = token.splitn(7, SEP).collect();
-    let [object, order, descending, posted, deleted, filter, search] = parts.as_slice() else {
+    let parts: Vec<&str> = token.splitn(8, SEP).collect();
+    let [
+        object,
+        order,
+        descending,
+        then_by,
+        posted,
+        deleted,
+        filter,
+        search,
+    ] = parts.as_slice()
+    else {
         return Err(bad_token());
     };
     let some = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    let then_by = then_by
+        .split(PAIR_SEP)
+        .filter(|key| !key.is_empty())
+        .map(|key| match key.split_at_checked(1) {
+            Some(("0", field)) => Ok((field.to_owned(), false)),
+            Some(("1", field)) => Ok((field.to_owned(), true)),
+            _ => Err(bad_token()),
+        })
+        .collect::<EngineResult<_>>()?;
     Ok((
         (*object).to_owned(),
         ListQuery {
             order: some(order),
             descending: *descending == "1",
+            then_by,
             search: some(search),
             posted: unflag(posted),
             deleted: unflag(deleted),
@@ -409,6 +444,11 @@ impl LocalEngine {
         let query = ListQuery {
             order: q.order.clone(),
             descending: q.descending,
+            then_by: q
+                .then_by
+                .iter()
+                .map(|k| (k.field.clone(), k.descending))
+                .collect(),
             search: q.search.clone(),
             posted: q.posted,
             deleted: q.deleted,
@@ -819,11 +859,11 @@ impl Engine for LocalEngine {
         self.guarded("AdminAddUser", || self.run_admin_add_user(user))
     }
 
-    fn admin_journal(
+    fn admin_journal_page(
         &self,
         after_key: Option<&str>,
         size: u32,
-    ) -> EngineResult<Vec<ostov_api::JournalEntry>> {
+    ) -> EngineResult<ostov_api::JournalPage> {
         self.guarded("AdminJournal", || self.run_admin_journal(after_key, size))
     }
 
@@ -922,22 +962,40 @@ impl Engine for LocalEngine {
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
-            let found = crate::query::run(
-                &mut **self.db(),
-                &self.config.model,
-                &can_read,
-                sql,
-                &params,
-            )
-            .map_err(error)?;
-            Ok(ostov_api::QueryResult {
-                columns: found.columns.into_iter().map(|c| c.name).collect(),
-                rows: found
-                    .rows
-                    .iter()
-                    .map(|row| row.iter().map(value_to_api).collect())
-                    .collect(),
-            })
+            let mut db = self.db();
+            let found = crate::query::run(&mut **db, &self.config.model, &can_read, sql, &params)
+                .map_err(error)?;
+            // Названия ссылок — тем же путём, что в списках: строки по именам колонок.
+            let refs: Vec<FieldDef> = found
+                .columns
+                .iter()
+                .filter_map(|c| Some(FieldDef::reference(&c.name, c.target.as_deref()?)))
+                .collect();
+            let mut rows: Vec<ostov_api::Fields> = found
+                .rows
+                .iter()
+                .map(|row| {
+                    found
+                        .columns
+                        .iter()
+                        .zip(row)
+                        .map(|(c, v)| (c.name.clone(), query_value(c, v)))
+                        .collect()
+                })
+                .collect();
+            let mut values: Vec<&mut ostov_api::Fields> = rows.iter_mut().collect();
+            self.fill_titles(&mut **db, &refs, &mut values)?;
+            let columns: Vec<String> = found.columns.into_iter().map(|c| c.name).collect();
+            let rows = rows
+                .into_iter()
+                .map(|mut row| {
+                    columns
+                        .iter()
+                        .map(|c| row.remove(c).unwrap_or(ostov_api::Value::Null))
+                        .collect()
+                })
+                .collect();
+            Ok(ostov_api::QueryResult { columns, rows })
         })
     }
 

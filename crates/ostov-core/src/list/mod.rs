@@ -59,6 +59,8 @@ pub struct ListQuery {
     /// Поле сортировки; `None` — по id. Пустые значения всегда в конце.
     pub order: Option<String>,
     pub descending: bool,
+    /// Следующие ключи сортировки: поле и «по убыванию». Без `order` нельзя.
+    pub then_by: Vec<(String, bool)>,
     /// Поиск подстроки по текстовым полям.
     pub search: Option<String>,
     /// Только проведённые (`Some(true)`) или только черновики (`Some(false)`).
@@ -126,9 +128,10 @@ pub fn list_titled(
 struct Plan {
     table: String,
     fields: Vec<FieldDef>,
-    /// Номер поля сортировки в `fields`.
-    order: Option<usize>,
-    descending: bool,
+    /// Ключи сортировки: номер поля в `fields` и «по убыванию».
+    keys: Vec<(usize, bool)>,
+    /// Последний ключ — id, в направлении первого ключа.
+    id_descending: bool,
     search: Option<String>,
     /// Если строка поиска — число, ищем ещё и по целым полям (номер документа).
     search_number: Option<i64>,
@@ -146,15 +149,28 @@ impl Plan {
         titles: &TitleColumns,
     ) -> Result<Self, CoreError> {
         let fields = source.list_fields();
-        let order = match &query.order {
-            None => None,
-            Some(name) => Some(fields.iter().position(|f| &f.name == name).ok_or_else(|| {
+        if query.order.is_none() && !query.then_by.is_empty() {
+            return Err(CoreError::Invalid(
+                "следующие ключи сортировки без первого (order)".into(),
+            ));
+        }
+        let mut keys: Vec<(usize, bool)> = Vec::with_capacity(query.then_by.len() + 1);
+        let first = query.order.iter().map(|name| (name, query.descending));
+        let rest = query.then_by.iter().map(|(name, desc)| (name, *desc));
+        for (name, desc) in first.chain(rest) {
+            let i = fields.iter().position(|f| &f.name == name).ok_or_else(|| {
                 CoreError::Invalid(format!(
                     "в {} нет поля {name} для сортировки",
                     source.table()
                 ))
-            })?),
-        };
+            })?;
+            if keys.iter().any(|(k, _)| *k == i) {
+                return Err(CoreError::Invalid(format!(
+                    "поле {name} в сортировке дважды"
+                )));
+            }
+            keys.push((i, desc));
+        }
         if query.posted.is_some() && !fields.iter().any(|f| f.name == "posted") {
             return Err(CoreError::Invalid(format!(
                 "{} не проводится: отбора по проведению нет",
@@ -184,8 +200,8 @@ impl Plan {
         Ok(Self {
             table: source.table().to_owned(),
             fields,
-            order,
-            descending: query.descending,
+            keys,
+            id_descending: query.descending,
             search: raw.map(|s| like_pattern(&s.to_lowercase())),
             search_number: raw.and_then(|s| s.parse().ok()),
             posted: query.posted,
@@ -232,8 +248,8 @@ impl Plan {
             let id = d.quote_ident("id");
             let mut cols = vec![id.clone()];
             cols.extend(self.fields.iter().map(|f| d.quote_ident(&f.name)));
-            // Значение сортировки — последней колонкой: из него строится ключ страницы.
-            if let Some(i) = self.order {
+            // Значения сортировки — последними колонками: из них строится ключ страницы.
+            for &(i, _) in &self.keys {
                 cols.push(self.sort_expr(d, i));
             }
 
@@ -272,10 +288,10 @@ impl Plan {
                 )));
             };
             let mut values: Vec<Value> = values.collect();
-            let sort_value = self.order.map(|_| values.pop().unwrap_or(Value::Null));
+            let sort_values = values.split_off(values.len().saturating_sub(self.keys.len()));
             last = Some(Cursor {
                 id,
-                value: sort_value,
+                values: sort_values,
             });
             rows.push(ListRow {
                 id,
@@ -286,53 +302,63 @@ impl Plan {
     }
 
     fn order_sql(&self, d: &dyn ostov_store::Dialect) -> String {
-        let dir = if self.descending { "DESC" } else { "ASC" };
-        let id = d.quote_ident("id");
-        match self.order {
-            None => format!("{id} {dir}"),
-            Some(i) => {
+        let dir = |desc: bool| if desc { "DESC" } else { "ASC" };
+        let mut parts: Vec<String> = self
+            .keys
+            .iter()
+            .map(|&(i, desc)| {
                 let col = self.sort_expr(d, i);
-                format!("({col} IS NULL), {col} {dir}, {id} {dir}")
-            }
-        }
+                format!("({col} IS NULL), {col} {}", dir(desc))
+            })
+            .collect();
+        parts.push(format!(
+            "{} {}",
+            d.quote_ident("id"),
+            dir(self.id_descending)
+        ));
+        parts.join(", ")
     }
 
-    // Пустые значения стоят в конце при любом направлении, поэтому после пустого
-    // идут только пустые с большим (меньшим) id.
+    // Строка после ключа: больше по первому ключу, или равна ему и больше по следующему,
+    // и так до id. Пустые значения стоят в конце при любом направлении, поэтому после
+    // пустого по ключу идут только пустые.
     fn after_sql(
         &self,
         d: &dyn ostov_store::Dialect,
         after: &Cursor,
         params: &mut Vec<Value>,
     ) -> Result<String, CoreError> {
-        let cmp = if self.descending { "<" } else { ">" };
-        let id = d.quote_ident("id");
+        if after.values.len() != self.keys.len() {
+            return Err(CoreError::Invalid(
+                "ключ страницы от другой сортировки".into(),
+            ));
+        }
+        let cmp = |desc: bool| if desc { "<" } else { ">" };
         let mut param = |v: Value| {
             params.push(v);
             d.placeholder(params.len())
         };
-        Ok(match (self.order, &after.value) {
-            (None, None) => format!("{id} {cmp} {}", param(Value::Int(after.id))),
-            (Some(i), Some(Value::Null)) => {
-                let col = self.sort_expr(d, i);
-                format!(
-                    "({col} IS NULL AND {id} {cmp} {})",
-                    param(Value::Int(after.id))
-                )
-            }
-            (Some(i), Some(value)) => {
-                let col = self.sort_expr(d, i);
-                let a = param(value.clone());
-                let b = param(value.clone());
-                let c = param(Value::Int(after.id));
-                format!("({col} IS NULL OR {col} {cmp} {a} OR ({col} = {b} AND {id} {cmp} {c}))")
-            }
-            _ => {
-                return Err(CoreError::Invalid(
-                    "ключ страницы от другой сортировки".into(),
-                ));
-            }
-        })
+        let id = d.quote_ident("id");
+        let mut sql = format!(
+            "{id} {} {}",
+            cmp(self.id_descending),
+            param(Value::Int(after.id))
+        );
+        for (&(i, desc), value) in self.keys.iter().zip(&after.values).rev() {
+            let col = self.sort_expr(d, i);
+            sql = match value {
+                Value::Null => format!("({col} IS NULL AND {sql})"),
+                value => {
+                    let a = param(value.clone());
+                    let b = param(value.clone());
+                    format!(
+                        "({col} IS NULL OR {col} {} {a} OR ({col} = {b} AND {sql}))",
+                        cmp(desc)
+                    )
+                }
+            };
+        }
+        Ok(sql)
     }
 
     /// Название, на которое указывает ссылка: таблица справочника и её поле-название.

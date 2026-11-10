@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
-    ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult, ReportQuery, Saved,
-    SessionInfo, UserInfo,
+    JournalPage, ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult,
+    ReportQuery, Saved, SessionInfo, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -100,11 +100,15 @@ pub trait Engine: Send + Sync {
     fn admin_set_user_password(&self, _login: &str, _password: &str) -> EngineResult<()> {
         Err(EngineError::not_implemented("AdminSetUserPassword"))
     }
-    fn admin_journal(
+    /// Записи журнала без ключа следующей страницы; новое — `admin_journal_page`.
+    fn admin_journal(&self, after_key: Option<&str>, size: u32) -> EngineResult<Vec<JournalEntry>> {
+        Ok(self.admin_journal_page(after_key, size)?.entries)
+    }
+    fn admin_journal_page(
         &self,
         _after_key: Option<&str>,
         _size: u32,
-    ) -> EngineResult<Vec<JournalEntry>> {
+    ) -> EngineResult<JournalPage> {
         Err(EngineError::not_implemented("AdminJournal"))
     }
     fn admin_backup(&self, _target: &str) -> EngineResult<JobId> {

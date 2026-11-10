@@ -65,11 +65,15 @@ fn simple_select_on_both_dialects() {
         vec![
             Column {
                 name: "name".into(),
-                kind: Some(FieldKind::Text)
+                kind: Some(FieldKind::Text),
+                target: None,
+                flag: false,
             },
             Column {
                 name: "unit".into(),
-                kind: Some(FieldKind::Text)
+                kind: Some(FieldKind::Text),
+                target: None,
+                flag: false,
             },
         ]
     );
@@ -708,4 +712,30 @@ fn nul_in_text_is_rejected() {
         pg("SELECT name FROM goods WHERE name = 'a\0b'", &[]).unwrap_err(),
         SqlError::NulInText
     );
+}
+
+#[test]
+fn columns_know_refs_and_flags() {
+    let q = "SELECT l.goods, r.posted AS done, deleted, r.supplier AS who, COUNT(l.id) AS n              FROM receipt r JOIN receipt.lines l ON l.doc_id = r.id              GROUP BY l.goods, r.posted, r.deleted, r.supplier";
+    let columns = sqlite(q, &[]).unwrap().columns;
+    let origin: Vec<_> = columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.target.as_deref(), c.flag))
+        .collect();
+    assert_eq!(
+        origin,
+        [
+            ("goods", Some("goods"), false),
+            ("done", None, true),
+            ("deleted", None, true),
+            ("who", Some("suppliers"), false),
+            ("n", None, false),
+        ]
+    );
+    // У регистра отметок нет, ссылки есть.
+    let columns = sqlite("SELECT goods, kind FROM stock", &[])
+        .unwrap()
+        .columns;
+    assert_eq!(columns[0].target.as_deref(), Some("goods"));
+    assert!(!columns[1].flag);
 }

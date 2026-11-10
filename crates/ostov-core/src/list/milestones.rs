@@ -74,7 +74,7 @@ impl Milestones {
         let sql = {
             let d = db.dialect();
             let mut cols = vec![d.quote_ident("id")];
-            if let Some(i) = plan.order {
+            for &(i, _) in &plan.keys {
                 cols.push(plan.sort_expr(d, i));
             }
             let mut filters: Vec<String> = plan.filter_sql(d, &mut params).into_iter().collect();
@@ -112,7 +112,7 @@ impl Milestones {
             };
             self.keys.push(Cursor {
                 id,
-                value: plan.order.map(|_| values.next().unwrap_or(Value::Null)),
+                values: values.collect(),
             });
         }
         if read < need {

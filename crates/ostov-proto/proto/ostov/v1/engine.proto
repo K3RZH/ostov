@@ -221,6 +221,13 @@ message ListQuery {
   uint32 size = 8;
   // Точный отбор: поле → значение.
   map<string, Value> filter = 9;
+  // Следующие ключи сортировки после order.
+  repeated SortKey then_by = 10;
+}
+
+message SortKey {
+  string field = 1;
+  bool descending = 2;
 }
 
 message Row {
@@ -377,6 +384,8 @@ message JournalEntry {
 
 message JournalList {
   repeated JournalEntry entries = 1;
+  // Ключ следующей страницы; нет — записи кончились.
+  optional string next_key = 2;
 }
 
 message BackupRequest {

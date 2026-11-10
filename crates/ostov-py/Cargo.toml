@@ -25,6 +25,8 @@ pyo3 = { version = "=0.30.1", optional = true }
 # Тесты: модель «Склада» из настоящего config/ и золотой тест на движке ядра.
 ostov-api = { path = "../ostov-api" }
 ostov-meta = { path = "../ostov-meta" }
+# ctx.query на PostgreSQL, если задан OSTOV_PG_URL.
+ostov-store = { path = "../ostov-store", features = ["postgres"] }
 
 [[example]]
 name = "probe"

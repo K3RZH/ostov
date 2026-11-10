@@ -11,9 +11,14 @@ pub(crate) struct Table {
     pub title: String,
     pub physical: String,
     pub columns: Vec<(String, FieldKind)>,
+    /// Поле-ссылка → на что ссылается.
+    pub targets: Vec<(String, String)>,
     /// Объект, право на чтение которого нужно; у регистров права нет.
     pub right: Option<(String, String)>,
 }
+
+/// Отметки объектов: в базе 0 и 1.
+const FLAGS: [&str; 2] = ["posted", "deleted"];
 
 impl Table {
     pub fn column(&self, name: &str) -> Option<FieldKind> {
@@ -22,6 +27,25 @@ impl Table {
             .find(|(n, _)| n == name)
             .map(|(_, k)| *k)
     }
+
+    pub fn target(&self, name: &str) -> Option<String> {
+        self.targets
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.clone())
+    }
+
+    /// `posted` и `deleted` справочников и документов; у регистров таких колонок нет.
+    pub fn is_flag(&self, name: &str) -> bool {
+        self.right.is_some() && FLAGS.contains(&name) && self.column(name).is_some()
+    }
+}
+
+fn targets<'a>(fields: impl IntoIterator<Item = &'a FieldDef>) -> Vec<(String, String)> {
+    fields
+        .into_iter()
+        .filter_map(|f| Some((f.name.clone(), f.target.clone()?)))
+        .collect()
 }
 
 fn user(fields: &[FieldDef]) -> impl Iterator<Item = (String, FieldKind)> + '_ {
@@ -50,6 +74,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                             ("deleted", FieldKind::Int),
                         ]))
                         .collect(),
+                    targets: targets(&c.fields),
                     right: Some((c.name.clone(), c.title.clone())),
                 });
             }
@@ -66,6 +91,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                             ("deleted", FieldKind::Int),
                         ]))
                         .collect(),
+                    targets: targets(&d.fields),
                     right: Some((d.name.clone(), d.title.clone())),
                 });
             }
@@ -84,6 +110,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                             ("kind", FieldKind::Int),
                         ]))
                         .collect(),
+                    targets: targets(r.dimensions.iter().chain(&r.resources)),
                     right: None,
                 });
             }
@@ -110,6 +137,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                         ("line_no", FieldKind::Int),
                     ]))
                     .collect(),
+                targets: targets(&p.fields),
                 right: Some((d.name.clone(), d.title.clone())),
             })
         }

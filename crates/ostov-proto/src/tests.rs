@@ -66,6 +66,16 @@ fn lists_and_reports_survive_the_wire() {
         object: "receipt".into(),
         order: Some("supplier".into()),
         descending: true,
+        then_by: vec![
+            api::SortKey {
+                field: "date".into(),
+                descending: false,
+            },
+            api::SortKey {
+                field: "number".into(),
+                descending: true,
+            },
+        ],
         search: Some("мельн".into()),
         posted: Some(false),
         deleted: None,

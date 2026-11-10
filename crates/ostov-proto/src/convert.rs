@@ -398,6 +398,14 @@ impl From<api::ListQuery> for pb::ListQuery {
             object: q.object,
             order: q.order,
             descending: q.descending,
+            then_by: q
+                .then_by
+                .into_iter()
+                .map(|k| pb::SortKey {
+                    field: k.field,
+                    descending: k.descending,
+                })
+                .collect(),
             search: q.search,
             posted: q.posted,
             deleted: q.deleted,
@@ -416,6 +424,14 @@ impl TryFrom<pb::ListQuery> for api::ListQuery {
             object: q.object,
             order: q.order,
             descending: q.descending,
+            then_by: q
+                .then_by
+                .into_iter()
+                .map(|k| api::SortKey {
+                    field: k.field,
+                    descending: k.descending,
+                })
+                .collect(),
             search: q.search,
             posted: q.posted,
             deleted: q.deleted,

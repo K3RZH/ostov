@@ -141,11 +141,8 @@ fn issue(warehouse: i64, goods: i64, qty: i64) -> ObjectData {
     document(warehouse, None, line)
 }
 
-#[test]
-fn on_post_reads_base_with_ctx_query() {
-    let base = Base::new("ctx-query", ISSUE);
-    let engine = base.create(model(), None);
-    let (main, flour) = stocked(&*engine);
+fn reads_base_with_ctx_query(engine: &dyn Engine) {
+    let (main, flour) = stocked(engine);
     let id = engine
         .save("issue", &issue(main, flour, 3_000), PostAction::Post)
         .unwrap()
@@ -159,6 +156,33 @@ fn on_post_reads_base_with_ctx_query() {
         )
         .unwrap();
     assert_eq!(found.rows, [vec![dec(3_000, 3)]]);
+}
+
+#[test]
+fn on_post_reads_base_with_ctx_query() {
+    let base = Base::new("ctx-query", ISSUE);
+    reads_base_with_ctx_query(&*base.create(model(), None));
+}
+
+#[test]
+#[cfg_attr(not(pg_url), ignore = "нужен OSTOV_PG_URL")]
+fn on_post_reads_base_with_ctx_query_on_postgres() {
+    use ostov_store::Driver;
+    let url = std::env::var("OSTOV_PG_URL").unwrap();
+    let mut db = ostov_store::drivers::postgres::PostgresDriver::connect(&url).unwrap();
+    for sql in [
+        "DROP SCHEMA IF EXISTS py_ctx_query CASCADE",
+        "CREATE SCHEMA py_ctx_query",
+        "SET search_path TO py_ctx_query",
+    ] {
+        db.execute(sql, &[]).unwrap();
+    }
+    let base = Base::new("ctx-query-pg", ISSUE);
+    let model = model();
+    let rules = base.scripts.load(&model).unwrap();
+    let config = ostov_core::local::Config::from_model_with(&model, &rules).unwrap();
+    let engine = ostov_core::LocalEngine::install(Box::new(db), config).unwrap();
+    reads_base_with_ctx_query(&engine);
 }
 
 #[test]
@@ -226,4 +250,28 @@ fn query_in_rule_has_rights_of_who_posts() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Validation);
     assert_eq!(err.message, "Нет права на просмотр «Поступление»");
+}
+
+#[test]
+fn base_error_in_query_is_short_for_user_and_full_in_trace() {
+    // Переполнение проходит проверку ostov-sql, но не базу: SQLite даст дробь, PostgreSQL — ошибку.
+    let script = "def on_post(doc, ctx):\n    ctx.query(\"SELECT id + 9223372036854775807 AS big FROM goods\")\n";
+    let base = Base::new("ctx-query-db", script);
+    let engine = base.create(model(), None);
+    let (main, flour) = stocked(&*engine);
+    let err = engine
+        .save("issue", &issue(main, flour, 1_000), PostAction::Post)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(
+        err.message
+            .ends_with("QueryError: ошибка базы данных при выполнении запроса"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.details.contains("неподдерживаемый тип"),
+        "{}",
+        err.details
+    );
 }

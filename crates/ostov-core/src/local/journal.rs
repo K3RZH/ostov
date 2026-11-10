@@ -3,7 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ostov_api::{EngineError, EngineResult, ErrorCode, JournalEntry};
+use ostov_api::{EngineError, EngineResult, ErrorCode, JournalEntry, JournalPage};
 use ostov_sec::{Action, Change};
 use ostov_store::Driver;
 
@@ -78,7 +78,7 @@ impl LocalEngine {
         &self,
         after_key: Option<&str>,
         size: u32,
-    ) -> EngineResult<Vec<JournalEntry>> {
+    ) -> EngineResult<JournalPage> {
         self.need_system(|s| s.admin, "администрирование")?;
         let after_id = match after_key {
             None => None,
@@ -92,7 +92,7 @@ impl LocalEngine {
             ..ostov_sec::JournalQuery::default()
         };
         let page = ostov_sec::journal::list(&mut **self.db(), &query).map_err(sec_error)?;
-        Ok(page
+        let entries = page
             .rows
             .into_iter()
             .map(|row| {
@@ -115,7 +115,11 @@ impl LocalEngine {
                     details: row.details,
                 }
             })
-            .collect())
+            .collect();
+        Ok(JournalPage {
+            entries,
+            next_key: page.next_after_id.map(|id| id.to_string()),
+        })
     }
 }
 

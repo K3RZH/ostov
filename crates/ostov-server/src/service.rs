@@ -251,12 +251,11 @@ impl Remote for Service {
 
     async fn admin_journal(&self, req: Request<pb::JournalRequest>) -> Reply<pb::JournalList> {
         self.with(req, |e, j| {
-            let entries = e
-                .admin_journal(j.after_key.as_deref(), j.size)?
-                .into_iter()
-                .map(Into::into)
-                .collect();
-            Ok(pb::JournalList { entries })
+            let page = e.admin_journal_page(j.after_key.as_deref(), j.size)?;
+            Ok(pb::JournalList {
+                entries: page.entries.into_iter().map(Into::into).collect(),
+                next_key: page.next_key,
+            })
         })
         .await
     }

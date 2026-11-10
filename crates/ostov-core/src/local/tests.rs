@@ -2400,7 +2400,10 @@ fn query_reads_money_refs_and_dates() {
             text("Мука"),
             dec(10_000, 3),
             dec(150, 2),
-            refer(flour)
+            Value::Ref {
+                id: flour,
+                title: Some("Мука".into())
+            }
         ]]
     );
     // Целый параметр рядом с деньгами — целые рубли, а не копейки.
@@ -2412,7 +2415,7 @@ fn query_reads_money_refs_and_dates() {
         [vec![
             Value::Date("2026-10-30".into()),
             Value::Int(1),
-            Value::Int(1)
+            Value::Bool(true)
         ]]
     );
     let found = sql(
@@ -2554,4 +2557,30 @@ fn posting_rule_reads_base_in_its_transaction() {
         &[("doc", text("issue"))],
     );
     assert_eq!(found.rows, [vec![dec(3_000, 3)]]);
+}
+
+#[test]
+fn journal_page_says_when_it_ends() {
+    let base = Base::new("journal-pages");
+    let engine = with_admin(&base);
+    for name in ["Мука", "Сахар", "Соль"] {
+        add(&*engine, "goods", name);
+    }
+    let all = journal(&*engine);
+    assert!(all.len() >= 4, "{all:?}");
+    // Страницы по 2: ключ есть, пока записи не кончились, и нет пустой последней страницы.
+    for size in [1, 2, u32::try_from(all.len()).unwrap()] {
+        let mut paged = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = engine.admin_journal_page(after.as_deref(), size).unwrap();
+            assert!(!page.entries.is_empty(), "пустая страница при size {size}");
+            paged.extend(page.entries);
+            match page.next_key {
+                Some(key) => after = Some(key),
+                None => break,
+            }
+        }
+        assert_eq!(paged, all, "size {size}");
+    }
 }

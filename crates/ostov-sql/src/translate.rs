@@ -252,9 +252,12 @@ impl Translator<'_> {
                 SelectItem::UnnamedExpr(e) => {
                     let (text, kind) = self.expr(e)?;
                     sql.push_str(&text);
+                    let (target, flag) = self.origin(e);
                     Column {
                         name: result_name(e, i),
                         kind,
+                        target,
+                        flag,
                     }
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
@@ -262,7 +265,13 @@ impl Translator<'_> {
                     let alias = ident(alias)?;
                     sql.push_str(&text);
                     self.aliases.push(alias.clone());
-                    Column { name: alias, kind }
+                    let (target, flag) = self.origin(expr);
+                    Column {
+                        name: alias,
+                        kind,
+                        target,
+                        flag,
+                    }
                 }
                 SelectItem::ExprWithAliases { expr, .. } => {
                     return Err(forbidden("несколько псевдонимов у колонки", expr.span()));
@@ -580,6 +589,35 @@ impl Translator<'_> {
             number.scale = scale;
         }
         Ok(Some(FieldKind::Decimal { scale }))
+    }
+
+    /// Колонка результата — само поле: на что ссылается и отметка ли это.
+    /// Имя уже проверено в `expr`, здесь только ищем его таблицу.
+    fn origin(&self, e: &Expr) -> (Option<String>, bool) {
+        let found = match e {
+            Expr::Identifier(id) => ident(id).ok().and_then(|name| {
+                let mut tables = self
+                    .sources
+                    .iter()
+                    .filter(|s| s.table.column(&name).is_some());
+                let source = tables.next()?;
+                tables.next().is_none().then_some((source, name))
+            }),
+            Expr::CompoundIdentifier(ids) => {
+                let parts: Option<Vec<String>> = ids.iter().map(|id| ident(id).ok()).collect();
+                parts.and_then(|parts| {
+                    let (column, prefix) = parts.split_last()?;
+                    let binding = prefix.join(".");
+                    let source = self.sources.iter().find(|s| s.name == binding)?;
+                    Some((source, column.clone()))
+                })
+            }
+            _ => None,
+        };
+        match found {
+            Some((source, name)) => (source.table.target(&name), source.table.is_flag(&name)),
+            None => (None, false),
+        }
     }
 
     fn literal_text(&mut self, text: &str) -> String {

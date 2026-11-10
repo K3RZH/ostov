@@ -58,6 +58,10 @@ pub struct Column {
     pub name: String,
     /// Тип поля метаданных; `None` — выражение (COUNT и т. п.), тогда целое.
     pub kind: Option<ostov_model::FieldKind>,
+    /// Колонка — само поле-ссылка: на что оно ссылается (`goods`). Ядро подставит названия.
+    pub target: Option<String>,
+    /// Колонка — сама отметка `posted` или `deleted`: в базе 0 и 1, наружу — да или нет.
+    pub flag: bool,
 }
 
 /// Проверяет запрос и переводит его под диалект.
