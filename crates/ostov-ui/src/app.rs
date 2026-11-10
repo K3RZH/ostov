@@ -1013,6 +1013,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     slint::set_xdg_app_id("ostov")?;
 
     let app = AppWindow::new()?;
+    crate::shortcuts::install(app.window());
     apply_settings(&app, Settings::load());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));

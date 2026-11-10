@@ -13,11 +13,17 @@ export component TextField inherits VerticalLayout {
     in property <bool> enabled: true;
     in-out property <string> text;
     callback edited(string);
+    // Enter в поле: окно запускает своё основное действие.
+    callback accepted();
 
     private property <bool> has-error: root.error != "";
     private property <bool> focused: input.has-focus && root.enabled;
 
     spacing: Theme.space-4;
+
+    public function take-focus() {
+        input.focus();
+    }
 
     if root.label != "" : Text {
         text: root.label;
@@ -68,6 +74,7 @@ export component TextField inherits VerticalLayout {
                     read-only: root.read-only;
                     text <=> root.text;
                     edited => { root.edited(self.text); }
+                    accepted => { root.accepted(); }
                 }
 
                 if root.text == "" && root.placeholder != "" : Text {

@@ -1,9 +1,10 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
 import { Segment } from "../components/segment.slint";
 
 // Базовые настройки интерфейса: тема и скругление. Применяются сразу, сохраняет Rust.
-export component SettingsDialog inherits Rectangle {
+export component SettingsDialog inherits Dialog {
     in property <bool> dark;
     in property <int> radius-mode;
     in property <int> density-mode;
@@ -14,9 +15,9 @@ export component SettingsDialog inherits Rectangle {
     callback font-chosen(int);
     callback closed();
 
-    background: Theme.scrim;
-
-    TouchArea { clicked => { root.closed(); } }
+    enter-pressed => { root.closed(); }
+    escape-pressed => { root.closed(); }
+    scrim-clicked => { root.closed(); }
 
     card := Rectangle {
         width: min(480px, root.width - 2 * Theme.space-24);

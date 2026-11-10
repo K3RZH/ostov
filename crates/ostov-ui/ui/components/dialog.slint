@@ -1,0 +1,35 @@
+import { Theme } from "../theme.slint";
+
+// Основа окна поверх экрана: затемняет область, забирает щелчки и клавиши. Enter запускает
+// основное действие, Esc отмену. Фокус берёт при появлении: иначе клавиши уходили бы
+// элементу под затемнением. Кнопка в фокусе обрабатывает Enter сама, поле ввода зовёт `submit`.
+export component Dialog inherits FocusScope {
+    // Доступно ли основное действие (условие то же, что у основной кнопки).
+    in property <bool> enter-enabled: true;
+    callback enter-pressed();
+    callback escape-pressed();
+    callback scrim-clicked();
+
+    public function submit() {
+        if (root.enter-enabled) {
+            root.enter-pressed();
+        }
+    }
+
+    init => { self.focus(); }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.escape-pressed();
+            return accept;
+        }
+        if (event.text == Key.Return) {
+            root.submit();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle { background: Theme.scrim; }
+    TouchArea { clicked => { root.scrim-clicked(); } }
+    @children
+}

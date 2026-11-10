@@ -1,11 +1,12 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
 import { TextField } from "../components/text-field.slint";
 import { Segment } from "../components/segment.slint";
 import { ErrorBanner } from "../components/error-banner.slint";
 
 // Окно «Новый пользователь»: логин, имя, роль, пароль с повтором.
-export component UserDialog inherits Rectangle {
+export component UserDialog inherits Dialog {
     in property <[string]> roles;
     in property <string> error;
     in-out property <string> login;
@@ -25,9 +26,9 @@ export component UserDialog inherits Rectangle {
         : "";
     private property <bool> valid: root.missing == "";
 
-    background: Theme.scrim;
-
-    TouchArea { }
+    enter-enabled: root.valid;
+    enter-pressed => { root.confirmed(); }
+    escape-pressed => { root.cancelled(); }
 
     card := Rectangle {
         width: min(640px, root.width - 2 * Theme.space-24);
@@ -49,8 +50,8 @@ export component UserDialog inherits Rectangle {
                 font-weight: 700;
                 color: Theme.text;
             }
-            TextField { label: "Логин"; text <=> root.login; }
-            TextField { label: "Имя"; text <=> root.user-name; }
+            TextField { label: "Логин"; text <=> root.login; accepted => { root.submit(); } }
+            TextField { label: "Имя"; text <=> root.user-name; accepted => { root.submit(); } }
             VerticalLayout {
                 spacing: Theme.space-8;
                 Text { text: "Роль"; font-size: Theme.font-caption; font-weight: 600; color: Theme.text; }
@@ -63,8 +64,9 @@ export component UserDialog inherits Rectangle {
                     }
                 }
             }
-            TextField { label: "Пароль"; password: true; text <=> root.password; }
+            TextField { label: "Пароль"; password: true; text <=> root.password; accepted => { root.submit(); } }
             TextField {
+                accepted => { root.submit(); }
                 label: "Повторите пароль";
                 password: true;
                 text <=> root.repeat;

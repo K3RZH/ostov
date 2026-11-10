@@ -17,7 +17,9 @@ ostov-core = { path = "../ostov-core" }
 ostov-client = { path = "../ostov-client" }
 # Встроенная конфигурация «Склад» (ostov_meta::demo), пока нет выбора папки конфигурации.
 ostov-meta = { path = "../ostov-meta" }
-slint = "1.18.1"
+# unstable-winit-030: перехват событий клавиатуры до Slint (src/shortcuts.rs). API нестабильный,
+# при обновлении Slint проверить сборку этого модуля.
+slint = { version = "1.18.1", features = ["unstable-winit-030"] }
 # Системное окно выбора папки (на Linux через xdg-portal, в GNOME родное окно).
 rfd = "0.17.2"
 

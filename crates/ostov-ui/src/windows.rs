@@ -632,6 +632,7 @@ impl Windows {
         dragging: bool,
     ) {
         let Ok(window) = AppWindow::new() else { return };
+        crate::shortcuts::install(window.window());
         prepare_host_window(&window, current_settings(main));
         if dragging {
             window.set_keep_on_top(true);

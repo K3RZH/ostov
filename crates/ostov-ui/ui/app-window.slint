@@ -183,6 +183,28 @@ export component AppWindow inherits Window {
     default-font-family: "Open Sans";
     background: Theme.bg;
 
+    // Клавиатура без мыши: на выборе базы фокус у списка, на входе у поля пароля. Диалог при
+    // закрытии уносит фокус с собой, поэтому после него фокус возвращается странице. На остальных
+    // страницах фокус снимается: иначе Enter достался бы полю пароля уже скрытой страницы входа.
+    function restore-focus() {
+        if (root.creating || root.adding || root.forgetting || root.settings-open) {
+            return;
+        }
+        if (root.page == 0) {
+            start-page.take-focus();
+        } else if (root.page == 1) {
+            login-page.take-focus();
+        } else {
+            start-page.park-focus();
+        }
+    }
+    init => { root.restore-focus(); }
+    changed page => { root.restore-focus(); }
+    changed creating => { root.restore-focus(); }
+    changed adding => { root.restore-focus(); }
+    changed forgetting => { root.restore-focus(); }
+    changed settings-open => { root.restore-focus(); }
+
     start-page := StartPage {
         app-version: "Версия " + root.app-version;
         x: 0px;

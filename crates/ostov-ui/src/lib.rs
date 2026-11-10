@@ -27,6 +27,7 @@ pub mod recent;
 pub mod remote_base;
 pub mod settings;
 pub mod shell;
+pub mod shortcuts;
 pub mod sorting;
 pub mod users;
 pub mod values;

@@ -1,11 +1,12 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
 import { TextField } from "../components/text-field.slint";
 import { ModeOption } from "create-dialog.slint";
 import { ErrorBanner } from "../components/error-banner.slint";
 
 // Окно «Добавить существующую базу»: готовый файл на этом компьютере или база на сервере.
-export component AddDialog inherits Rectangle {
+export component AddDialog inherits Dialog {
     in-out property <bool> server;
     in-out property <string> file;
     in-out property <string> address;
@@ -21,9 +22,9 @@ export component AddDialog inherits Rectangle {
 
     private property <bool> valid: root.server ? root.address != "" && root.db-name != "" && root.cert != "" : root.file != "";
 
-    background: Theme.scrim;
-
-    TouchArea { }
+    enter-enabled: root.valid && !root.busy;
+    enter-pressed => { root.confirmed(); }
+    escape-pressed => { root.cancelled(); }
 
     card := Rectangle {
         width: min(560px, root.width - 2 * Theme.space-24);
@@ -66,6 +67,7 @@ export component AddDialog inherits Rectangle {
             if !root.server : HorizontalLayout {
                 spacing: Theme.space-8;
                 TextField {
+                    accepted => { root.submit(); }
                     label: "Файл базы";
                     text <=> root.file;
                     horizontal-stretch: 1;
@@ -77,6 +79,7 @@ export component AddDialog inherits Rectangle {
                 }
             }
             if root.server : TextField {
+                accepted => { root.submit(); }
                 label: "Адрес сервера";
                 placeholder: "server.local:7700";
                 text <=> root.address;
@@ -84,6 +87,7 @@ export component AddDialog inherits Rectangle {
             if root.server : HorizontalLayout {
                 spacing: Theme.space-8;
                 TextField {
+                    accepted => { root.submit(); }
                     label: "Сертификат сервера (server.crt)";
                     placeholder: "файл, который сервер создал при первом запуске";
                     text <=> root.cert;
@@ -96,6 +100,7 @@ export component AddDialog inherits Rectangle {
                 }
             }
             if root.server : TextField {
+                accepted => { root.submit(); }
                 label: "Название в списке";
                 text <=> root.db-name;
             }

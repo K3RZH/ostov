@@ -103,6 +103,39 @@ export component StartPage inherits Rectangle {
 
     background: Theme.bg;
 
+    // Фокус клавиатуры на списке баз: окно зовёт при показе страницы и после закрытия диалога.
+    public function take-focus() {
+        keys.focus();
+    }
+
+    // Забирает фокус у любого элемента окна и отпускает его: клавиши не уходят скрытой странице.
+    public function park-focus() {
+        keys.focus();
+        keys.clear-focus();
+    }
+
+    // Стрелки выбирают базу, Enter открывает выбранную.
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (!root.visible || root.recent.length == 0 || root.busy) {
+                return reject;
+            }
+            if (event.text == Key.Return) {
+                root.open();
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.selected-recent = max(0, root.selected-recent - 1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.selected-recent = min(root.recent.length - 1, root.selected-recent + 1);
+                return accept;
+            }
+            return reject;
+        }
+    }
+
     HorizontalLayout {
         BrandPanel {
             config-name: root.config-name;
