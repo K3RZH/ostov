@@ -4,6 +4,7 @@ import { IconButton } from "../components/icon-button.slint";
 import { WindowControls } from "../components/window-controls.slint";
 import { UserRow } from "users-view.slint";
 import { TabHost, TabItem } from "tab-host.slint";
+import { HomeSection } from "home-view.slint";
 import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 import { NavPanel, NavRow } from "../components/nav-panel.slint";
 
@@ -17,6 +18,9 @@ component Separator inherits Rectangle {
 // База, режим и пользователь приходят из Rust (src/app.rs) после открытия базы.
 export component MainPage inherits Rectangle {
     in property <string> base-name;
+    // Название конфигурации и карточки разделов для экрана «Главная».
+    in property <string> config-name;
+    in property <[HomeSection]> home-sections;
     in property <string> database-name;
     in property <string> mode-text;
     in property <string> user-text;
@@ -110,9 +114,13 @@ export component MainPage inherits Rectangle {
                     alignment: center;
                     Text { text: root.base-name; font-size: Theme.font-body; color: Theme.text-muted; }
                 }
-                // Поиск по системе, «+», уведомления и справка вернутся вместе с командами ядра
-                // (глобальный поиск, фоновые задачи); пока их нет, кнопок без действия нет тоже.
                 Rectangle { horizontal-stretch: 1; }
+                // Поиск, «создать», уведомления и справка ждут команд ядра (глобальный поиск,
+                // фоновые задачи), поэтому пока выключены.
+                VerticalLayout { alignment: center; IconButton { icon: "search"; enabled: false; } }
+                VerticalLayout { alignment: center; IconButton { icon: "plus"; enabled: false; } }
+                VerticalLayout { alignment: center; IconButton { icon: "bell"; enabled: false; } }
+                VerticalLayout { alignment: center; IconButton { icon: "help"; enabled: false; } }
                 VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
@@ -146,6 +154,10 @@ export component MainPage inherits Rectangle {
                 active-tab: root.active-tab;
                 users: root.users;
                 user-message: root.user-message;
+                config-name: root.config-name;
+                base-name: root.base-name;
+                home-sections: root.home-sections;
+                nav-clicked(id) => { root.nav-clicked(id); }
                 tab-selected(i) => { root.tab-selected(i); }
                 tab-closed(i) => { root.tab-closed(i); }
                 tab-detached(i) => { root.tab-detached(i); }

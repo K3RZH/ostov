@@ -17,7 +17,7 @@ use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
 use crate::users::Directory;
-use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
+use crate::{AppWindow, HomeItem, HomeSection, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
@@ -165,9 +165,34 @@ pub fn nav_items(rows: Vec<crate::shell::NavRowData>) -> Vec<NavRow> {
         .collect()
 }
 
+/// Карточки разделов для экрана «Главная».
+pub fn set_home(window: &AppWindow, shell: &Shell) {
+    let sections: Vec<HomeSection> = shell
+        .home_sections()
+        .into_iter()
+        .map(|section| HomeSection {
+            title: section.title.into(),
+            icon: section.icon.into(),
+            items: ModelRc::new(VecModel::from(
+                section
+                    .items
+                    .into_iter()
+                    .map(|item| HomeItem {
+                        id: i32::try_from(item.id).unwrap_or_default(),
+                        title: item.title.into(),
+                        icon: item.icon.into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    window.set_home_sections(ModelRc::new(VecModel::from(sections)));
+}
+
 pub fn refresh(window: &AppWindow, shell: &Shell) {
     let tabs = tab_items(shell.tabs());
     window.set_nav(ModelRc::new(VecModel::from(nav_items(shell.nav_rows()))));
+    set_home(window, shell);
     set_tabs(window, tabs);
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }

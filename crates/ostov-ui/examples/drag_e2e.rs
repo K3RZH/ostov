@@ -129,13 +129,13 @@ impl Rig {
         self.shell.borrow().tabs().len()
     }
 
-    /// Первая вкладка, которую можно вынести в окно.
+    /// Первая вкладка, которую можно вынести в окно («Главная» остаётся в главном окне).
     fn movable(&self) -> usize {
         self.shell
             .borrow()
             .tabs()
             .iter()
-            .position(|t| t.view != "receipts")
+            .position(|t| t.view != "receipts" && !t.is_home())
             .unwrap_or(0)
     }
 
@@ -256,7 +256,7 @@ fn main() {
     {
         let before = rig.windows.debug_state();
         let main_tabs = rig.shell.borrow().tabs().len();
-        let (x, y) = tab_center(&rig.main, 0);
+        let (x, y) = tab_center(&rig.main, rig.movable());
         press(&rig.main, x, y);
         for step in 1..=12 {
             mv(&rig.main, x + step as f32 * 3.0, y + step as f32 * 7.0);
@@ -285,7 +285,7 @@ fn main() {
         let id = rig.windows.debug_state().0[0];
         let host = rig.windows.host(id).unwrap();
         let target = tab_center(&host, 0);
-        let (x, y) = tab_center(&rig.main, 0);
+        let (x, y) = tab_center(&rig.main, rig.movable());
         let drop_at = to_other(&host, &rig.main, (target.0 + 30.0, target.1));
         let host_tabs_before = rig.windows.debug_state().2[0];
         press(&rig.main, x, y);
@@ -395,6 +395,34 @@ fn main() {
             rig.consistent("после вытаскивания списка", total);
         } else {
             println!("  (вкладки со списком нет)");
+        }
+    }
+
+    println!("\nсценарий 7: «Главную» вынести нельзя");
+    {
+        let windows = rig.windows.debug_state().0.len();
+        let main_tabs = rig.main_tabs();
+        let home = rig.shell.borrow().tabs().iter().position(|t| t.is_home());
+        rig.check("«Главная» в главном окне", home.is_some(), String::new());
+        if let Some(home) = home {
+            let (x, y) = tab_center(&rig.main, home);
+            press(&rig.main, x, y);
+            for step in 1..=20 {
+                mv(&rig.main, x + step as f32 * 3.0, y + step as f32 * 6.0);
+            }
+            release(&rig.main, x + 60.0, y + 120.0);
+            let after = rig.windows.debug_state().0.len();
+            rig.check(
+                "окон не прибавилось",
+                after == windows,
+                format!("{windows} -> {after}"),
+            );
+            let now = rig.main_tabs();
+            rig.check(
+                "вкладки главного окна те же",
+                now == main_tabs,
+                format!("{now}"),
+            );
         }
     }
 

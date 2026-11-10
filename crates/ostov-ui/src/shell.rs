@@ -56,6 +56,23 @@ pub struct NavRowData {
     pub favorite: bool,
 }
 
+/// Пункт карточки раздела на «Главной»: узел навигации, который открывается щелчком.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeItemData {
+    /// Номер узла: тот же, что у строки дерева, поэтому щелчок идёт тем же путём.
+    pub id: usize,
+    pub title: String,
+    pub icon: &'static str,
+}
+
+/// Карточка раздела верхнего уровня на «Главной».
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeSectionData {
+    pub title: String,
+    pub icon: &'static str,
+    pub items: Vec<HomeItemData>,
+}
+
 /// Документ или элемент во вкладке и в состоянии форм: объект конфигурации и `id` в ядре.
 /// Номер документа сюда не входит: он только для заголовка, а у разных объектов совпадает.
 ///
@@ -99,6 +116,13 @@ pub struct Tab {
     pub modified: bool,
 }
 
+impl Tab {
+    /// Вкладка «Главной»: в главном окне её нельзя закрыть и вынести в другое окно.
+    pub fn is_home(&self) -> bool {
+        self.view == HOME_VIEW
+    }
+}
+
 pub struct Shell {
     nodes: Vec<NavNode>,
     expanded: HashSet<usize>,
@@ -126,6 +150,16 @@ fn known_icon(name: Option<&str>, fallback: &'static str) -> &'static str {
 
 /// Вид вкладки с универсальным списком объекта (`list_ui.rs`).
 pub const LIST_VIEW: &str = "list";
+
+/// Вид вкладки «Главной» (`ui/screens/home-view.slint`).
+pub const HOME_VIEW: &str = "home";
+
+/// «Главная»: первый узел любого дерева.
+fn home_node() -> NavNode {
+    let mut home = node("Главная", "home", None, false);
+    home.view = HOME_VIEW;
+    home
+}
 
 /// Экран вкладки объекта: универсальный список. У поступлений пока свой экран
 /// (`receipts_ui.rs`, временный): он уйдёт, когда универсальный список получит форму документа.
@@ -192,7 +226,7 @@ impl Shell {
     /// которые у пользователя нет прав) и «Администрирование» с теми экранами, на которые есть
     /// системное право. Разделы верхнего уровня раскрыты.
     pub fn from_meta(meta: &Meta, rights: SystemRights) -> Self {
-        let mut nodes = vec![node("Главная", "home", None, false)];
+        let mut nodes = vec![home_node()];
         let mut expanded = HashSet::new();
         for item in &meta.menu {
             if item.object.is_none() {
@@ -216,7 +250,7 @@ impl Shell {
 
     /// Только «Главная»: до открытия базы.
     pub fn empty() -> Self {
-        Self::new(vec![node("Главная", "home", None, false)], HashSet::new())
+        Self::new(vec![home_node()], HashSet::new())
     }
     pub fn new(nodes: Vec<NavNode>, expanded: HashSet<usize>) -> Self {
         let mut shell = Self {
@@ -233,7 +267,7 @@ impl Shell {
     /// (`examples/`), приложение строит дерево из метаданных.
     pub fn demo() -> Self {
         let mut nodes = vec![
-            node("Главная", "home", None, false),                    // 0
+            home_node(),                                             // 0
             node("Избранное", "star", None, true),                   // 1
             node("Склад", "warehouse", None, true),                  // 2
             node("Поступления товаров", "stock-in", Some(2), false), // 3
@@ -329,6 +363,35 @@ impl Shell {
                     selected: !node.is_group && selected == Some(target),
                     favorite: node.favorite,
                 }
+            })
+            .collect()
+    }
+
+    /// Карточки «Главной»: по одной на раздел верхнего уровня, в них пункты раздела (вложенные
+    /// группы раскрыты до пунктов). Свёрнутость дерева не влияет. Раздел без пунктов
+    /// пропускается: ядро убрало их по правам, пустая карточка никуда не ведёт.
+    pub fn home_sections(&self) -> Vec<HomeSectionData> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, section)| section.parent.is_none() && section.is_group)
+            .filter_map(|(id, section)| {
+                let mut order = Vec::new();
+                self.tree_order(Some(id), &mut order);
+                let items: Vec<HomeItemData> = order
+                    .into_iter()
+                    .filter(|&item| !self.nodes[item].is_group)
+                    .map(|item| HomeItemData {
+                        id: item,
+                        title: self.nodes[item].title.clone(),
+                        icon: self.nodes[item].icon,
+                    })
+                    .collect();
+                (!items.is_empty()).then(|| HomeSectionData {
+                    title: section.title.clone(),
+                    icon: section.icon,
+                    items,
+                })
             })
             .collect()
     }
@@ -505,10 +568,12 @@ impl Shell {
         }
     }
 
-    /// Забирает вкладку из окна (для переноса в другое окно); активная вкладка выбирается как при закрытии.
+    /// Забирает вкладку из окна (для переноса в другое окно или на другое место); активная вкладка
+    /// выбирается как при закрытии. Забрать можно и «Главную»: чтобы она не покидала главное окно,
+    /// следит `Workspace`.
     pub fn take_tab(&mut self, index: usize) -> Option<Tab> {
         let tab = self.tabs.get(index)?.clone();
-        self.close_tab(index);
+        self.remove_tab(index);
         Some(tab)
     }
 
@@ -522,7 +587,15 @@ impl Shell {
         at
     }
 
+    /// Закрывает вкладку. «Главная» остаётся всегда: её закрытие игнорируется.
     pub fn close_tab(&mut self, index: usize) {
+        if self.tabs.get(index).is_some_and(Tab::is_home) {
+            return;
+        }
+        self.remove_tab(index);
+    }
+
+    fn remove_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
         }
@@ -822,10 +895,139 @@ mod tests {
         shell.click(4);
         shell.close_tab(2);
         assert_eq!(shell.active_tab(), 1);
-        shell.close_tab(0);
+        shell.close_tab(1);
         assert_eq!(shell.active_tab(), 0);
+        // «Главная» остаётся: последняя вкладка не закрывается.
         shell.close_tab(0);
-        assert!(shell.tabs().is_empty());
+        assert_eq!(shell.tabs().len(), 1);
         assert_eq!(shell.active_tab(), 0);
+    }
+
+    #[test]
+    fn first_tab_shows_the_home_screen() {
+        for shell in [
+            Shell::empty(),
+            Shell::demo(),
+            Shell::from_meta(&warehouse_meta(), SystemRights::default()),
+        ] {
+            let tab = &shell.tabs()[0];
+            assert_eq!(tab.view, HOME_VIEW);
+            assert!(tab.is_home());
+            assert!(!tab.preview);
+        }
+    }
+
+    #[test]
+    fn home_tab_cannot_be_closed() {
+        let mut shell = Shell::demo();
+        shell.click(3);
+        shell.select_tab(0);
+        shell.close_tab(0);
+        assert_eq!(shell.tabs().len(), 2);
+        assert!(shell.tabs()[0].is_home());
+        assert_eq!(shell.active_tab(), 0);
+        // Остальные вкладки закрываются как раньше.
+        shell.close_tab(1);
+        assert_eq!(shell.tabs().len(), 1);
+    }
+
+    #[test]
+    fn home_clicked_in_navigation_selects_the_existing_tab() {
+        let mut shell = Shell::demo();
+        shell.click(3);
+        shell.click(0);
+        assert_eq!(shell.tabs().len(), 2);
+        assert_eq!(shell.active_tab(), 0);
+    }
+
+    #[test]
+    fn home_cards_follow_the_configuration_menu() {
+        let meta = warehouse_meta();
+        let shell = Shell::from_meta(&meta, SystemRights::default());
+        let sections = shell.home_sections();
+        assert_eq!(sections.len(), meta.menu.len());
+        for (section, menu) in sections.iter().zip(&meta.menu) {
+            assert_eq!(section.title, menu.title);
+        }
+        // Каждый объект меню есть в карточках, а пункт открывает тот же объект, что и навигация.
+        let mut shell = shell;
+        for object in &meta.objects {
+            let item = sections
+                .iter()
+                .flat_map(|section| &section.items)
+                .find(|item| shell.node_for_object(&object.name) == Some(item.id));
+            assert!(item.is_some(), "нет пункта «{}» на «Главной»", object.title);
+            if let Some(item) = item {
+                shell.click(item.id);
+                assert_eq!(
+                    shell.tabs().last().map(|tab| tab.object.as_str()),
+                    Some(&*object.name)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn home_cards_include_administration_only_with_rights() {
+        let titles = |rights: SystemRights| -> Vec<String> {
+            Shell::from_meta(&warehouse_meta(), rights)
+                .home_sections()
+                .into_iter()
+                .map(|section| section.title)
+                .collect()
+        };
+        assert!(!titles(SystemRights::default()).contains(&"Администрирование".to_owned()));
+        assert!(titles(SystemRights::ALL).contains(&"Администрирование".to_owned()));
+    }
+
+    #[test]
+    fn home_cards_list_nested_items_and_ignore_collapsed_groups() {
+        let mut shell = Shell::demo();
+        shell.click(2);
+        let sections = shell.home_sections();
+        let warehouse = sections.iter().find(|section| section.title == "Склад");
+        let titles: Vec<&str> = warehouse
+            .map(|section| {
+                section
+                    .items
+                    .iter()
+                    .map(|item| item.title.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Группа «Склад» свёрнута в дереве, но карточка полная; вложенная группа
+        // «Инвентаризация» раскрыта до своих пунктов и сама пунктом не показывается.
+        assert_eq!(
+            titles,
+            [
+                "Поступления товаров",
+                "Расход и списание",
+                "Перемещения",
+                "Акты инвентаризации",
+                "Расхождения",
+            ]
+        );
+    }
+
+    #[test]
+    fn home_cards_skip_empty_sections_and_top_level_items() {
+        let nodes = vec![
+            home_node(),
+            node("Пустой раздел", "folder", None, true),
+            node("Склад", "warehouse", None, true),
+            node("Товары", "box", Some(2), false),
+            node("Рецептуры", "recipe", None, false),
+        ];
+        let shell = Shell::new(nodes, HashSet::new());
+        let sections = shell.home_sections();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Склад");
+        assert_eq!(sections[0].items.len(), 1);
+        assert_eq!(sections[0].items[0].id, 3);
+    }
+
+    #[test]
+    fn empty_shell_has_no_home_cards() {
+        assert!(Shell::empty().home_sections().is_empty());
     }
 }

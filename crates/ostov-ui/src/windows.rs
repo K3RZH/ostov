@@ -11,7 +11,8 @@ use slint::{ComponentHandle, LogicalSize, Model, PhysicalPosition};
 use crate::AppWindow;
 use crate::TabItem;
 use crate::app::{
-    HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_tabs, tab_items,
+    HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_home, set_tabs,
+    tab_items,
 };
 use crate::receipts_ui::ReceiptsUi;
 use crate::shell::{DocKey, Shell, Tab};
@@ -293,6 +294,10 @@ impl Windows {
         let Some(tab) = self.tab_at(shell, source, index) else {
             return;
         };
+        // «Главная» не уходит из главного окна: ни окна-копии, ни подсветки чужих панелей.
+        if source == WindowRef::Main && tab.is_home() {
+            return;
+        }
         let scale = source_window.window().scale_factor();
         let point = pointer_global(source_window, x, y);
         drag_log(&format!(
@@ -613,6 +618,7 @@ impl Windows {
             window.set_nav(slint::ModelRc::new(slint::VecModel::from(nav_items(
                 shell.nav_rows_for(selected),
             ))));
+            set_home(window, &shell);
         }
         window.set_active_tab(i32::try_from(list.active()).unwrap_or_default());
         let title = list
@@ -634,6 +640,9 @@ impl Windows {
         let Ok(window) = AppWindow::new() else { return };
         crate::shortcuts::install(window.window());
         prepare_host_window(&window, current_settings(main));
+        // «Главная» в этом окне показывает название конфигурации и базы.
+        window.set_config_name(main.get_config_name());
+        window.set_base_name(main.get_base_name());
         if dragging {
             window.set_keep_on_top(true);
             window.window().set_size(DRAG_SIZE);
