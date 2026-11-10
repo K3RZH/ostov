@@ -166,6 +166,8 @@ export component MainPage inherits Rectangle {
             height: 24px;
             background: Theme.surface-alt;
             Rectangle {
+                // Без y черта вставала по центру строки, а не по её верхнему краю.
+                y: 0px;
                 height: 1px;
                 background: Theme.border;
             }
@@ -189,13 +191,21 @@ export component MainPage inherits Rectangle {
 
     // Меню пользователя под аватаром: кто вошёл и что можно сделать с сессией.
     user-menu := PopupWindow {
-        x: root.width - MenuMetrics.width - Theme.space-12;
+        x: root.width - self.width - Theme.space-12;
         y: 46px;
-        width: MenuMetrics.width;
-        height: 56px + Theme.space-4 + MenuMetrics.height(2);
+        width: MenuMetrics.width + 2 * Theme.space-4;
+        height: 56px + Theme.space-4 + MenuMetrics.height(2) + 2 * Theme.space-4;
         close-policy: PopupClosePolicy.close-on-click-outside;
 
+        // Общая подложка: без неё между карточками просвечивал экран под меню.
+        Rectangle {
+            border-radius: Shape.surface-radius;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            background: Theme.surface-alt;
+        }
         VerticalLayout {
+            padding: Theme.space-4;
             spacing: Theme.space-4;
             Rectangle {
                 height: 56px;
