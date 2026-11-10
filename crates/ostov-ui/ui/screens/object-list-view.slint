@@ -2,6 +2,8 @@ import { Theme } from "../theme.slint";
 import { Button } from "../components/button.slint";
 import { TextField } from "../components/text-field.slint";
 import { AlertBanner } from "../components/alert-banner.slint";
+import { ConfirmDialog } from "../components/confirm-dialog.slint";
+import { MenuAction } from "../components/context-menu.slint";
 import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
 
 // Данные и события универсального списка объекта. Состояние ведёт Rust (src/list_ui.rs), здесь
@@ -24,8 +26,23 @@ export global ListData {
     in property <int> sort-count;
     in-out property <int> selected-row: -1;
     in-out property <string> query;
+    // Меню строки: Rust строит пункты под строку в menu-opening (вид объекта, права, состояние
+    // строки); выбранный пункт приходит в action. Пустой список: меню не открывается.
+    in property <[MenuAction]> menu-actions;
+    // Ошибка действия над строкой (пусто: нет); закрывается крестиком.
+    in property <string> notice;
+    // Подтверждение опасного действия: окно показывает и скрывает Rust.
+    in property <bool> confirm-open;
+    in property <string> confirm-title;
+    in property <string> confirm-text;
+    in property <string> confirm-accept;
     // Экран открылся или вкладка сменила объект.
     callback show(string);
+    callback menu-opening(int);
+    callback action(int, string);
+    callback dismiss-notice();
+    callback confirm-accepted();
+    callback confirm-cancelled();
     callback sort(int);
     callback query-changed(string);
     callback retry();
@@ -75,6 +92,11 @@ export component ObjectListView inherits Rectangle {
             action-text: "Повторить";
             action => { ListData.retry(); }
         }
+        if ListData.notice != "" : AlertBanner {
+            text: ListData.notice;
+            closable: true;
+            dismissed => { ListData.dismiss-notice(); }
+        }
         ErpGrid {
             vertical-stretch: 1;
             columns: ListData.columns;
@@ -82,7 +104,10 @@ export component ObjectListView inherits Rectangle {
             empty-text: ListData.empty-text;
             sort-dirs: ListData.sort-dirs;
             sort-count: ListData.sort-count;
+            actions: ListData.menu-actions;
             selected-row <=> ListData.selected-row;
+            menu-opening(i) => { ListData.menu-opening(i); }
+            action-chosen(i, id) => { ListData.action(i, id); }
             sort-clicked(i) => { ListData.sort(i); }
             visible-changed(first, last) => { ListData.visible-changed(first, last); }
             resize-begin => { ListData.resize-begin(); }
@@ -97,5 +122,13 @@ export component ObjectListView inherits Rectangle {
                 color: Theme.text-muted;
             }
         }
+    }
+
+    if ListData.confirm-open : ConfirmDialog {
+        title: ListData.confirm-title;
+        text: ListData.confirm-text;
+        accept-text: ListData.confirm-accept;
+        accepted => { ListData.confirm-accepted(); }
+        cancelled => { ListData.confirm-cancelled(); }
     }
 }
