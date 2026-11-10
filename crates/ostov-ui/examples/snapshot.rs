@@ -2,9 +2,9 @@
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
-//! list-goods, list-issue, list-sorted, list-search, list-error, form-catalog, form-document,
-//! form-catalog-narrow, form-document-narrow, form-new-errors, form-date-empty, form-error,
-//! configurator, configurator-fields,
+//! list-goods, list-issue, list-sorted, list-search, list-error, list-confirm, list-notice,
+//! form-catalog, form-document, form-catalog-narrow, form-document-narrow, form-new-errors,
+//! form-date-empty, form-error, configurator, configurator-fields,
 //! configurator-parts, configurator-role, configurator-later, configurator-check.
 
 use std::io::Write;
@@ -165,7 +165,7 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
         ostov_api::SystemRights::ALL,
     )));
     let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
-    let object = if screen == "list-goods" || screen == "list-search" {
+    let object = if matches!(screen, "list-goods" | "list-search" | "list-confirm") {
         "goods"
     } else {
         "issue"
@@ -208,6 +208,17 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
             data.invoke_query_changed("мас".into());
         }
         "list-error" => data.invoke_show("ghost".into()),
+        // Пометка на удаление первого элемента: вопрос перед действием.
+        "list-confirm" => {
+            data.invoke_menu_opening(0);
+            data.invoke_action(0, "delete".into());
+        }
+        // Первый расход проведён: ядро отказывает в пометке, ошибка видна над таблицей.
+        "list-notice" => {
+            data.invoke_menu_opening(0);
+            data.invoke_action(0, "delete".into());
+            data.invoke_confirm_accepted();
+        }
         _ => {}
     }
     pump(800)?;
@@ -332,9 +343,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save(&window, dark, &path)
         }
         "journal" | "period" | "period-error" => admin_screen(&screen, dark, &path),
-        "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error" => {
-            list_screen(&screen, dark, &path)
-        }
+        "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error"
+        | "list-confirm" | "list-notice" => list_screen(&screen, dark, &path),
         "form-catalog"
         | "form-document"
         | "form-catalog-narrow"

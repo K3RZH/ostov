@@ -29,6 +29,7 @@ pub mod receipts;
 pub mod receipts_ui;
 pub mod recent;
 pub mod remote_base;
+pub mod row_actions;
 pub mod settings;
 pub mod shell;
 pub mod shortcuts;

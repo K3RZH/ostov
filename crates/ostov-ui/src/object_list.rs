@@ -8,8 +8,10 @@ use crate::values::display;
 
 /// Служебные поля строки документа (их добавляет ядро, в метаданных шапки их нет).
 const NUMBER_FIELD: &str = "number";
-const POSTED_FIELD: &str = "posted";
-const DELETED_FIELD: &str = "deleted";
+pub(crate) const POSTED_FIELD: &str = "posted";
+pub(crate) const DELETED_FIELD: &str = "deleted";
+/// Версия записи: по ней ядро замечает чужую правку.
+pub(crate) const VERSION_FIELD: &str = "version";
 /// Поле даты документа: в списке стоит сразу после номера, где бы ни было в шапке.
 const DATE_FIELD: &str = "date";
 
@@ -147,6 +149,25 @@ pub fn row_cells(row: &Row, columns: &[ColumnSpec]) -> Vec<String> {
             ColumnContent::Field(kind) => cell(row, &column.field, kind),
         })
         .collect()
+}
+
+/// Как назвать строку человеку: документ «Расход № 7», элемент справочника по его главной
+/// (гибкой) колонке. Нет номера или названия: название объекта.
+pub fn row_label(title: &str, kind: ObjectKind, columns: &[ColumnSpec], row: &Row) -> String {
+    let cells = row_cells(row, columns);
+    let at = |position: Option<usize>| {
+        position
+            .and_then(|index| cells.get(index))
+            .filter(|cell| !cell.is_empty())
+    };
+    match kind {
+        ObjectKind::Document => at(columns
+            .iter()
+            .position(|column| column.content == ColumnContent::Number))
+        .map(|number| format!("{title} № {number}")),
+        ObjectKind::Catalog => at(columns.iter().position(|column| column.flex)).cloned(),
+    }
+    .unwrap_or_else(|| title.to_owned())
 }
 
 fn cell(row: &Row, field: &str, kind: FieldKind) -> String {
@@ -385,6 +406,34 @@ mod tests {
             &columns,
         );
         assert_eq!(cells, ["12,34", "-5,000"]);
+    }
+
+    #[test]
+    fn document_is_named_by_title_and_number() {
+        let meta = demo_object("receipt");
+        let columns = columns_from_meta(&meta);
+        let named = row(&[("number", Value::Int(54))]);
+        assert_eq!(
+            row_label("Поступление", meta.kind, &columns, &named),
+            "Поступление № 54"
+        );
+        // Номера в строке нет: остаётся название объекта.
+        assert_eq!(
+            row_label("Поступление", meta.kind, &columns, &row(&[])),
+            "Поступление"
+        );
+    }
+
+    #[test]
+    fn catalog_element_is_named_by_its_main_column() {
+        let meta = demo_object("goods");
+        let columns = columns_from_meta(&meta);
+        let flour = row(&[("name", Value::Text("Мука".to_owned()))]);
+        assert_eq!(row_label("Товары", meta.kind, &columns, &flour), "Мука");
+        assert_eq!(
+            row_label("Товары", meta.kind, &columns, &row(&[])),
+            "Товары"
+        );
     }
 
     #[test]
