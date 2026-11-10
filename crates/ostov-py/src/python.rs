@@ -3,19 +3,22 @@
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 
 use ostov_core::local::Rules;
 use ostov_core::{
     CoreError, Document, FieldKind, FieldValue, Fields, Movement, MovementKind, Moves, Parts,
-    PostingRule,
+    PostingRule, QueryRows, Reader,
 };
 use ostov_model::{Config, DocumentDef, FieldDef};
+use ostov_sql::{Param, SqlError};
 use ostov_store::Decimal;
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyCFunction, PyDict, PyList, PyTuple};
 
 use crate::{MODULE_PREFIX, PyLoadError, script_path};
 
@@ -24,6 +27,16 @@ const RUNTIME_SOURCE: &str = include_str!("runtime.py");
 static RUNTIME: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
 type Kinds = Vec<(String, FieldKind)>;
+
+/// Запрос из `ctx.query` потоку ядра и канал для ответа.
+type Ask = (
+    String,
+    BTreeMap<String, Param>,
+    Sender<Result<QueryRows, CoreError>>,
+);
+
+/// Связь `ctx.query` с ядром; после `on_post` пустая, поздний вызов — ошибка, а не зависание.
+type Link = Arc<Mutex<Option<Sender<Ask>>>>;
 
 /// Правила документов из `config/documents/*.py`.
 pub struct PyRules {
@@ -249,8 +262,8 @@ fn compile<'py>(
 
 struct PyRule(Arc<Script>);
 
-impl PostingRule for PyRule {
-    fn movements(&self, doc: &Document) -> Result<Moves, CoreError> {
+impl PyRule {
+    fn post(&self, doc: &Document, asks: Option<Sender<Ask>>) -> Result<Moves, CoreError> {
         let script = &self.0;
         let mut moves: Moves = script
             .allowed
@@ -260,15 +273,46 @@ impl PostingRule for PyRule {
         let Some(on_post) = &script.on_post else {
             return Ok(moves);
         };
-        Python::attach(|py| {
+        let link: Link = Arc::new(Mutex::new(asks));
+        let result = Python::attach(|py| {
+            let query = query_function(py, Arc::clone(&link)).map_err(|e| script.error(py, &e))?;
             let rows = script
-                .call_on_post(py, on_post, doc)
+                .call_on_post(py, on_post, doc, query)
                 .map_err(|e| script.error(py, &e))?;
             for (register, kind, values) in rows {
                 let movement = script.movement(&register, &kind, &values)?;
                 moves.entry(register).or_default().push(movement);
             }
             Ok(moves)
+        });
+        link.lock().unwrap_or_else(PoisonError::into_inner).take();
+        result
+    }
+}
+
+impl PostingRule for PyRule {
+    fn movements(&self, doc: &Document) -> Result<Moves, CoreError> {
+        self.post(doc, None)
+    }
+
+    /// `on_post` идёт в своём потоке, а этот держит транзакцию и выполняет его `ctx.query`:
+    /// PyO3 берёт только `'static`-функции, а соединение с базой занято проведением.
+    fn movements_reading(&self, doc: &Document, read: &mut dyn Reader) -> Result<Moves, CoreError> {
+        let (asks, inbox) = mpsc::channel::<Ask>();
+        thread::scope(|s| {
+            let worker = s.spawn(move || self.post(doc, Some(asks)));
+            for (sql, params, answer) in inbox {
+                let _ = answer.send(read.query(&sql, &params));
+            }
+            worker.join().unwrap_or_else(|_| {
+                Err(CoreError::Script {
+                    message: format!(
+                        "Ошибка в логике документа «{}»: поток Python упал",
+                        self.0.title
+                    ),
+                    details: String::new(),
+                })
+            })
         })
     }
 
@@ -335,6 +379,7 @@ impl Script {
         py: Python<'_>,
         function: &Py<PyAny>,
         doc: &Document,
+        query: Bound<'_, PyCFunction>,
     ) -> PyResult<Movements> {
         let service = PyDict::new(py);
         service.set_item("id", doc.id)?;
@@ -358,6 +403,7 @@ impl Script {
                 service,
                 registers,
                 PyList::new(py, &self.allowed)?,
+                query,
             ))?
             .extract()
     }
@@ -488,15 +534,99 @@ fn kinds_dict<'py>(py: Python<'py>, kinds: &Kinds) -> PyResult<Bound<'py, PyDict
 fn fields<'py>(py: Python<'py>, values: &Fields, kinds: &Kinds) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     for (name, _) in kinds {
-        let value = match values.get(name) {
-            None | Some(FieldValue::Null) => py.None().into_bound(py),
-            Some(FieldValue::Int(v) | FieldValue::Ref(v)) => v.into_bound_py_any(py)?,
-            Some(FieldValue::Text(v) | FieldValue::Date(v)) => v.into_bound_py_any(py)?,
-            Some(FieldValue::Decimal(v)) => v.to_string().into_bound_py_any(py)?,
-        };
-        dict.set_item(name, value)?;
+        dict.set_item(name, plain(py, values.get(name))?)?;
     }
     Ok(dict)
+}
+
+fn plain<'py>(py: Python<'py>, value: Option<&FieldValue>) -> PyResult<Bound<'py, PyAny>> {
+    match value {
+        None | Some(FieldValue::Null) => Ok(py.None().into_bound(py)),
+        Some(FieldValue::Int(v) | FieldValue::Ref(v)) => v.into_bound_py_any(py),
+        Some(FieldValue::Text(v) | FieldValue::Date(v)) => v.into_bound_py_any(py),
+        Some(FieldValue::Decimal(v)) => v.to_string().into_bound_py_any(py),
+    }
+}
+
+/// `ctx.query(sql, [(имя, вид, значение)])` → `([(колонка, вид)], строки)`.
+fn query_function(py: Python<'_>, link: Link) -> PyResult<Bound<'_, PyCFunction>> {
+    PyCFunction::new_closure(
+        py,
+        Some(c"query"),
+        None,
+        move |args: &Bound<'_, PyTuple>, _: Option<&Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
+            let py = args.py();
+            let (sql, raw): (String, Vec<(String, String, Option<Plain>)>) = args.extract()?;
+            let params = raw
+                .into_iter()
+                .map(|(name, kind, value)| Ok((name.clone(), param(py, &name, &kind, value)?)))
+                .collect::<PyResult<_>>()?;
+            let sender = link.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let Some(sender) = sender else {
+                return Err(raise(
+                    py,
+                    "QueryError",
+                    "ctx.query доступен только во время on_post",
+                ));
+            };
+            let (answer, reply) = mpsc::channel();
+            let found = match sender.send((sql, params, answer)) {
+                Ok(()) => py.detach(move || reply.recv().ok()),
+                Err(_) => None,
+            };
+            match found {
+                Some(Ok(rows)) => rows_to_py(py, &rows),
+                Some(Err(e @ CoreError::Query(SqlError::NoRight { .. }))) => {
+                    Err(raise(py, "UserError", &e.to_string()))
+                }
+                Some(Err(e)) => Err(raise(py, "QueryError", &e.to_string())),
+                None => Err(raise(py, "QueryError", "ядро не ответило на запрос")),
+            }
+        },
+    )
+}
+
+fn param(py: Python<'_>, name: &str, kind: &str, value: Option<Plain>) -> PyResult<Param> {
+    match (kind, value) {
+        (_, None) => Ok(Param::Null),
+        ("int", Some(Plain::Int(v))) => Ok(Param::Int(v)),
+        ("text", Some(Plain::Text(v))) => Ok(Param::Text(v)),
+        ("decimal", Some(Plain::Text(v))) => match v.parse::<Decimal>() {
+            Ok(d) => Ok(Param::Decimal {
+                units: d.units(),
+                scale: d.scale(),
+            }),
+            Err(e) => Err(raise(py, "QueryError", &format!("параметр {name}: {e}"))),
+        },
+        _ => Err(raise(
+            py,
+            "QueryError",
+            &format!("параметр {name}: неверное значение"),
+        )),
+    }
+}
+
+fn rows_to_py(py: Python<'_>, found: &QueryRows) -> PyResult<Py<PyAny>> {
+    let columns = PyList::empty(py);
+    for column in &found.columns {
+        columns.append((&column.name, column.kind.map_or("int", kind_code)))?;
+    }
+    let rows = PyList::empty(py);
+    for row in &found.rows {
+        let values = PyList::empty(py);
+        for value in row {
+            values.append(plain(py, Some(value))?)?;
+        }
+        rows.append(values)?;
+    }
+    (columns, rows).into_py_any(py)
+}
+
+/// Исключение модуля `ostov` по имени класса.
+fn raise(py: Python<'_>, class: &str, message: &str) -> PyErr {
+    runtime(py)
+        .and_then(|rt| rt.getattr(class)?.call1((message,)))
+        .map_or_else(|e| e, PyErr::from_value)
 }
 
 fn from_plain(kind: FieldKind, value: Option<&Plain>) -> Result<FieldValue, String> {

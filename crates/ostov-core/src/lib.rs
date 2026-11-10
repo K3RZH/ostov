@@ -6,6 +6,7 @@ pub mod list;
 pub mod local;
 pub mod object;
 pub mod posting;
+pub mod query;
 pub mod register;
 pub mod tx;
 
@@ -23,5 +24,6 @@ pub use posting::{
     Moves, Parts, PostingRule, insert_and_post, insert_and_post_to, post, post_to, save, save_to,
     unpost, unpost_from,
 };
+pub use query::{DbReader, QueryRows, Reader};
 pub use register::{AccumulationRegister, Movement, MovementKind};
 pub use tx::in_transaction;

@@ -161,6 +161,14 @@ pub struct ReportQuery {
     pub size: u32,
 }
 
+/// Ответ на запрос конфигурации (SQL через платформу, СТ-13): не больше 1000 строк.
+/// Деньги — `Decimal`, ссылки — `Ref` без названия, `posted` и `deleted` — целые 0 и 1.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobId(pub String);
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use ostov_api::{Engine, Fields, ObjectData, PostAction, Value as ApiValue};
 use ostov_core::LocalEngine;
 use ostov_core::local::Config;
-use ostov_sql::{Prepared, SqlError, prepare};
+use ostov_sql::{Param, Prepared, SqlError, prepare};
 use ostov_store::drivers::postgres::PostgresDriver;
 use ostov_store::drivers::sqlite::SqliteDriver;
 use ostov_store::{Driver, Row, Value};
@@ -192,10 +192,18 @@ pub fn postgres(schema: &str) -> Option<(PostgresDriver, Data)> {
     Some((pg_connect(&url, schema, false), data))
 }
 
-pub fn params(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+pub fn params(pairs: &[(&str, Value)]) -> BTreeMap<String, Param> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .map(|(k, v)| {
+            let p = match v {
+                Value::Null => Param::Null,
+                Value::Int(n) => Param::Int(*n),
+                Value::Text(t) => Param::Text(t.clone()),
+                Value::Bytes(_) => panic!("байты параметром не передаются"),
+            };
+            ((*k).to_owned(), p)
+        })
         .collect()
 }
 

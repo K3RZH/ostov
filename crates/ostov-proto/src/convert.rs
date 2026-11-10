@@ -576,6 +576,36 @@ impl TryFrom<pb::ReportQuery> for api::ReportQuery {
     }
 }
 
+impl From<api::QueryResult> for pb::QueryReply {
+    fn from(r: api::QueryResult) -> Self {
+        Self {
+            columns: r.columns,
+            rows: r
+                .rows
+                .into_iter()
+                .map(|row| pb::QueryLine {
+                    values: row.into_iter().map(pb::Value::from).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<pb::QueryReply> for api::QueryResult {
+    type Error = EngineError;
+
+    fn try_from(r: pb::QueryReply) -> Result<Self> {
+        Ok(Self {
+            columns: r.columns,
+            rows: r
+                .rows
+                .into_iter()
+                .map(|row| row.values.into_iter().map(api::Value::try_from).collect())
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
 // ---------------------------------------------------------------- администрирование
 
 impl From<api::UserInfo> for pb::UserInfo {

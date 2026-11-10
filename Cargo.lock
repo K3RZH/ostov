@@ -3894,6 +3894,7 @@ dependencies = [
  "ostov-api",
  "ostov-model",
  "ostov-sec",
+ "ostov-sql",
  "ostov-store",
 ]
 
@@ -3946,6 +3947,7 @@ dependencies = [
  "ostov-core",
  "ostov-meta",
  "ostov-model",
+ "ostov-sql",
  "ostov-store",
  "pyo3",
 ]

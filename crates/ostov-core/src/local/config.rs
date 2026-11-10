@@ -34,6 +34,8 @@ pub struct Config {
     pub catalogs: BTreeMap<String, Catalog>,
     pub documents: BTreeMap<String, DocumentConfig>,
     pub registers: BTreeMap<String, AccumulationRegister>,
+    /// Модель целиком: по ней `ostov-sql` проверяет запросы.
+    pub model: ostov_model::Config,
 }
 
 /// Откуда брать правила документов. Встроенные — `BuiltinRules`, потом Python (`ostov-py`).
@@ -139,6 +141,7 @@ impl Config {
             catalogs,
             documents,
             registers,
+            model: model.clone(),
         })
     }
 }

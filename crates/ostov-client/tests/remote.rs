@@ -192,6 +192,25 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
         .unwrap();
     assert_eq!(balance.rows[0].values["qty"], dec(2_500, 3));
 
+    // SQL через платформу: деньги и параметры доезжают по сети теми же типами.
+    let found = engine
+        .query(
+            "SELECT s.name, SUM(r.amount) AS total FROM receipt r \
+             JOIN suppliers s ON s.id = r.supplier WHERE r.amount > :min GROUP BY s.name",
+            &fields(&[("min", dec(5, 0))]),
+        )
+        .unwrap();
+    assert_eq!(found.columns, ["name", "total"]);
+    assert_eq!(
+        found.rows,
+        [vec![Value::Text("Мельница".into()), dec(833, 2)]]
+    );
+    let err = engine
+        .query("UPDATE goods SET name = 'x'", &Fields::new())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert_eq!(err.message, "В запросе можно только SELECT");
+
     let meta = engine.get_meta().unwrap();
     assert_eq!(meta.objects.len(), 5);
     engine

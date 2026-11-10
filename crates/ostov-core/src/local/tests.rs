@@ -2368,3 +2368,190 @@ fn nul_in_text_is_validation_not_database_error() {
     assert_eq!(err.code, ErrorCode::Validation);
     assert!(err.message.contains("кодом 0"), "{}", err.message);
 }
+
+fn sql(engine: &dyn Engine, text: &str, params: &[(&str, Value)]) -> ostov_api::QueryResult {
+    engine
+        .query(text, &fields(params))
+        .unwrap_or_else(|e| panic!("{text}: {e:?}"))
+}
+
+#[test]
+fn query_reads_money_refs_and_dates() {
+    let base = Base::new("query");
+    let engine = base.create();
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &receipt(main, mill, &[(flour, 10_000, 150)]),
+            PostAction::Post,
+        )
+        .unwrap();
+
+    let q = "SELECT g.name, l.qty, l.price, l.goods FROM receipt.lines l \
+             JOIN goods g ON g.id = l.goods WHERE l.price >= :min";
+    let found = sql(&*engine, q, &[("min", dec(15, 1))]);
+    assert_eq!(found.columns, ["name", "qty", "price", "goods"]);
+    assert_eq!(
+        found.rows,
+        [vec![
+            text("Мука"),
+            dec(10_000, 3),
+            dec(150, 2),
+            refer(flour)
+        ]]
+    );
+    // Целый параметр рядом с деньгами — целые рубли, а не копейки.
+    assert!(sql(&*engine, q, &[("min", Value::Int(2))]).rows.is_empty());
+
+    let found = sql(&*engine, "SELECT date, number, posted FROM receipt", &[]);
+    assert_eq!(
+        found.rows,
+        [vec![
+            Value::Date("2026-10-30".into()),
+            Value::Int(1),
+            Value::Int(1)
+        ]]
+    );
+    let found = sql(
+        &*engine,
+        "SELECT SUM(amount) AS total FROM receipt WHERE posted = :yes",
+        &[("yes", Value::Bool(true))],
+    );
+    assert_eq!(found.rows, [vec![dec(1_500, 2)]]);
+
+    let err = engine
+        .query("DELETE FROM goods", &Fields::new())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert_eq!(err.message, "В запросе можно только SELECT");
+    let err = engine
+        .query(
+            "SELECT price FROM receipt.lines WHERE price > :p",
+            &fields(&[("p", dec(1, 3))]),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("«p»"), "{}", err.message);
+}
+
+#[test]
+fn query_checks_rights_of_who_asks() {
+    let base = Base::new("query-rights");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(
+            &base.path,
+            None,
+            Some(&ostov_api::NewAdmin {
+                login: "boss".into(),
+                password: ADMIN_PASSWORD.into(),
+            }),
+        )
+        .unwrap();
+    add(&*engine, "goods", "Мука");
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.logout().unwrap();
+    let err = engine
+        .query("SELECT name FROM goods", &Fields::new())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let found = sql(&*engine, "SELECT name FROM goods", &[]);
+    assert_eq!(found.rows, [vec![text("Мука")]]);
+    let err = engine
+        .query("SELECT number FROM receipt", &Fields::new())
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    assert_eq!(err.message, "Нет права на просмотр «Поступление»");
+}
+
+/// Расход списывает строки, прочитав их запросом: так правило видит базу внутри своей транзакции.
+struct IssueByQuery;
+
+impl crate::PostingRule for IssueByQuery {
+    fn movements(&self, _: &crate::Document) -> Result<crate::Moves, crate::CoreError> {
+        Err(crate::CoreError::Invalid("правилу нужна база".into()))
+    }
+
+    fn movements_reading(
+        &self,
+        doc: &crate::Document,
+        read: &mut dyn crate::Reader,
+    ) -> Result<crate::Moves, crate::CoreError> {
+        let params = [("id".to_owned(), ostov_sql::Param::Int(doc.id))].into();
+        let found = read.query(
+            "SELECT goods, qty FROM issue.lines WHERE doc_id = :id",
+            &params,
+        )?;
+        let stock = found
+            .rows
+            .into_iter()
+            .map(|row| {
+                let [goods, crate::FieldValue::Decimal(qty)] = &row[..] else {
+                    panic!("{row:?}");
+                };
+                crate::Movement {
+                    kind: crate::MovementKind::Issue,
+                    dims: [
+                        ("warehouse".to_owned(), doc.header["warehouse"].clone()),
+                        ("goods".to_owned(), goods.clone()),
+                    ]
+                    .into(),
+                    resources: [("qty".to_owned(), *qty)].into(),
+                }
+            })
+            .collect();
+        Ok([("stock".to_owned(), stock)].into())
+    }
+}
+
+struct QueryRules;
+
+impl super::Rules for QueryRules {
+    fn rule(&self, document: &ostov_model::DocumentDef) -> Option<Box<dyn crate::PostingRule>> {
+        match document.name.as_str() {
+            "issue" => Some(Box::new(IssueByQuery)),
+            _ => super::BuiltinRules.rule(document),
+        }
+    }
+}
+
+#[test]
+fn posting_rule_reads_base_in_its_transaction() {
+    let base = Base::new("rule-query");
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let config = super::Config::from_model_with(&super::warehouse_model(), &QueryRules).unwrap();
+    let engine = super::LocalEngine::install(Box::new(db), config).unwrap();
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &receipt(main, mill, &[(flour, 10_000, 100)]),
+            PostAction::Post,
+        )
+        .unwrap();
+    // Новый документ и проведение — одна транзакция: правило уже видит его строки.
+    let id = engine
+        .save("issue", &issue(main, flour, 3_000), PostAction::Post)
+        .unwrap()
+        .id;
+    engine.post("issue", id).unwrap();
+    let found = sql(
+        &engine,
+        "SELECT SUM(qty) AS qty FROM stock WHERE recorder = :doc",
+        &[("doc", text("issue"))],
+    );
+    assert_eq!(found.rows, [vec![dec(3_000, 3)]]);
+}

@@ -20,6 +20,7 @@ service Engine {
   rpc Post(ObjectRef) returns (Saved);
   rpc Unpost(ObjectRef) returns (Saved);
   rpc RunReport(ReportQuery) returns (ListPage);
+  rpc Query(QueryRequest) returns (QueryReply);
 
   rpc StartImport(JobRequest) returns (JobId);
   rpc StartExport(JobRequest) returns (JobId);
@@ -294,6 +295,21 @@ message ReportQuery {
   Fields params = 2;
   optional string after_key = 3;
   uint32 size = 4;
+}
+
+// SQL через платформу (ostov-sql): только SELECT, параметры :имя.
+message QueryRequest {
+  string sql = 1;
+  Fields params = 2;
+}
+
+message QueryLine {
+  repeated Value values = 1;
+}
+
+message QueryReply {
+  repeated string columns = 1;
+  repeated QueryLine rows = 2;
 }
 
 // ---------------------------------------------------------------- прочее

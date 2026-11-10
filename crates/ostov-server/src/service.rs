@@ -163,6 +163,13 @@ impl Remote for Service {
             .await
     }
 
+    async fn query(&self, req: Request<pb::QueryRequest>) -> Reply<pb::QueryReply> {
+        self.with(req, |e, q| {
+            Ok(e.query(&q.sql, &fields_from_pb(q.params)?)?.into())
+        })
+        .await
+    }
+
     async fn start_import(&self, req: Request<pb::JobRequest>) -> Reply<pb::JobId> {
         self.with(req, |e, j| {
             Ok(pb::JobId {

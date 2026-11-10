@@ -36,6 +36,22 @@ pub fn value_from_api(v: &ostov_api::Value) -> Result<FieldValue, EngineError> {
     })
 }
 
+/// Параметр запроса: даты строкой, ссылки и флажки целым — как они лежат в базе.
+pub fn param_from_api(v: &ostov_api::Value) -> ostov_sql::Param {
+    use ostov_api::Value;
+    use ostov_sql::Param;
+    match v {
+        Value::Null => Param::Null,
+        Value::Int(i) | Value::Ref { id: i, .. } => Param::Int(*i),
+        Value::Bool(b) => Param::Int(i64::from(*b)),
+        Value::Text(s) | Value::Date(s) => Param::Text(s.clone()),
+        Value::Decimal { units, scale } => Param::Decimal {
+            units: *units,
+            scale: *scale,
+        },
+    }
+}
+
 pub fn fields_to_api(fields: &Fields) -> ostov_api::Fields {
     fields
         .iter()
@@ -72,6 +88,8 @@ pub fn error(e: CoreError) -> EngineError {
         CoreError::Incompatible(_) => ErrorCode::Incompatible,
         CoreError::Security(_) | CoreError::Script { .. } => ErrorCode::Internal,
         CoreError::NegativeBalance(_) | CoreError::Invalid(_) => ErrorCode::Validation,
+        CoreError::Query(ostov_sql::SqlError::NoRight { .. }) => ErrorCode::Forbidden,
+        CoreError::Query(_) => ErrorCode::Validation,
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.
             return EngineError {

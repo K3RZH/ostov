@@ -43,6 +43,16 @@ pub struct Prepared {
     pub columns: Vec<Column>,
 }
 
+/// Значение параметра. Число рядом с денежным полем переводится в единицы этого поля:
+/// `price > :min` с `min = 2,5` даст `250` при двух знаках после запятой.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Param {
+    Null,
+    Int(i64),
+    Text(String),
+    Decimal { units: i64, scale: u8 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
@@ -56,7 +66,7 @@ pub struct Column {
 /// табличная часть — по праву документа, регистры без проверки.
 pub fn prepare(
     query: &str,
-    params: &BTreeMap<String, ostov_store::Value>,
+    params: &BTreeMap<String, Param>,
     config: &ostov_model::Config,
     can_read: &dyn Fn(&str) -> bool,
     dialect: &dyn ostov_store::Dialect,

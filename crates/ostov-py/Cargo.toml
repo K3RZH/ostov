@@ -11,12 +11,14 @@ workspace = true
 
 [features]
 # Python только по запросу: без фичи крейт собирается там, где Python не установлен.
-python = ["dep:pyo3"]
+python = ["dep:pyo3", "dep:ostov-sql"]
 
 [dependencies]
 ostov-core = { path = "../ostov-core" }
 ostov-model = { path = "../ostov-model" }
 ostov-store = { path = "../ostov-store" }
+# Параметры ctx.query.
+ostov-sql = { path = "../ostov-sql", optional = true }
 pyo3 = { version = "=0.30.1", optional = true }
 
 [dev-dependencies]

@@ -28,7 +28,7 @@ use ostov_store::{Driver, Value};
 use access::Need;
 use config::Parts;
 pub use config::{BuiltinRules, Config, DocumentConfig, Rules, warehouse, warehouse_model};
-use convert::{error, fields_from_api, fields_to_api, invalid};
+use convert::{error, fields_from_api, fields_to_api, invalid, param_from_api, value_to_api};
 use ostov_sec::Action;
 
 use crate::closing::ClosedPeriodPass;
@@ -162,6 +162,22 @@ impl LocalEngine {
             Object::Document(d) => Ok(d),
             Object::Catalog(_) => Err(invalid(format!("{name} — справочник, он не проводится"))),
         }
+    }
+
+    /// Движения документа; правило читает базу с правами того, кто проводит.
+    fn movements(
+        &self,
+        cfg: &DocumentConfig,
+        db: &mut dyn Driver,
+        doc: &Document,
+        can_read: &dyn Fn(&str) -> bool,
+    ) -> Result<crate::Moves, crate::CoreError> {
+        let mut reader = crate::DbReader {
+            db,
+            model: &self.config.model,
+            can_read,
+        };
+        cfg.rule.movements_reading(doc, &mut reader)
     }
 
     fn forget_lists(&self) {
@@ -605,7 +621,9 @@ impl LocalEngine {
                     None => None,
                 };
                 let registers = self.config.registers_of(cfg);
-                let rule = |doc: &Document| cfg.rule.movements(doc);
+                let can_read = self.can_read();
+                let rule =
+                    |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
                 let doc = match data.id {
                     None if post == PostAction::Post => {
                         posting::insert_and_post_to(db, &cfg.kind, &registers, fields, parts, rule)?
@@ -732,8 +750,11 @@ impl LocalEngine {
         let cfg = self.document(document)?;
         let mut db = self.db();
         let registers = self.config.registers_of(cfg);
+        let can_read = self.can_read();
         in_transaction(&mut **db, |db| {
-            posting::post_to(db, &cfg.kind, &registers, id, |doc| cfg.rule.movements(doc))?;
+            let rule =
+                |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
+            posting::post_to(db, &cfg.kind, &registers, id, rule)?;
             self.journal(db, Action::Post, document, Some(id), &[], "")
         })
         .map_err(|e| self.explain(&mut **db, e))?;
@@ -890,6 +911,33 @@ impl Engine for LocalEngine {
         self.guarded("RunReport", || {
             self.need_system(|_| true, "отчёты")?;
             self.run_run_report(query)
+        })
+    }
+
+    fn query(&self, sql: &str, params: &ostov_api::Fields) -> EngineResult<ostov_api::QueryResult> {
+        self.guarded("Query", || {
+            self.need_system(|_| true, "запросы")?;
+            let params = params
+                .iter()
+                .map(|(k, v)| (k.clone(), param_from_api(v)))
+                .collect();
+            let can_read = self.can_read();
+            let found = crate::query::run(
+                &mut **self.db(),
+                &self.config.model,
+                &can_read,
+                sql,
+                &params,
+            )
+            .map_err(error)?;
+            Ok(ostov_api::QueryResult {
+                columns: found.columns.into_iter().map(|c| c.name).collect(),
+                rows: found
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(value_to_api).collect())
+                    .collect(),
+            })
         })
     }
 

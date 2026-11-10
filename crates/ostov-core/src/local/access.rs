@@ -80,6 +80,17 @@ impl LocalEngine {
         }
     }
 
+    /// Право на просмотр по имени объекта — для запросов `ostov-sql`.
+    /// Никто не вошёл, а войти нужно, — не видно ничего.
+    pub(super) fn can_read(&self) -> impl Fn(&str) -> bool + '_ {
+        let role = self.role();
+        move |object: &str| match &role {
+            Ok(None) => true,
+            Ok(Some(r)) => ostov_sec::rights(&self.config.roles, r, object).read,
+            Err(_) => false,
+        }
+    }
+
     pub(super) fn need(&self, object: &str, need: Need) -> EngineResult<()> {
         let Some(role) = self.role()? else {
             return Ok(());

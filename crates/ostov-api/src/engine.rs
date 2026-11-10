@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
-    ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, ReportQuery, Saved, SessionInfo,
-    UserInfo,
+    ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult, ReportQuery, Saved,
+    SessionInfo, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -67,6 +67,10 @@ pub trait Engine: Send + Sync {
 
     fn run_report(&self, _query: &ReportQuery) -> EngineResult<ListPage> {
         Err(EngineError::not_implemented("RunReport"))
+    }
+    /// Запрос SELECT через `ostov-sql`: параметры `:имя`, права на каждый объект запроса.
+    fn query(&self, _sql: &str, _params: &Fields) -> EngineResult<QueryResult> {
+        Err(EngineError::not_implemented("Query"))
     }
     fn start_import(&self, _format: &str, _source: &str) -> EngineResult<JobId> {
         Err(EngineError::not_implemented("Import"))

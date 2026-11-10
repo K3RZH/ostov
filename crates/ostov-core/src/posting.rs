@@ -7,6 +7,7 @@ use ostov_store::Driver;
 
 use crate::closing::check_open;
 use crate::object::document::{Document, DocumentKind};
+use crate::query::Reader;
 use crate::register::{AccumulationRegister, Movement};
 use crate::{CoreError, Fields, in_transaction};
 
@@ -21,6 +22,15 @@ pub trait PostingRule: Send + Sync {
     /// Движения по регистрам документа. Регистр, которого нет у документа, — ошибка.
     fn movements(&self, doc: &Document) -> Result<Moves, CoreError>;
 
+    /// То же с чтением базы (`ctx.query`). Правило, которому база не нужна, его не трогает.
+    fn movements_reading(
+        &self,
+        doc: &Document,
+        _read: &mut dyn Reader,
+    ) -> Result<Moves, CoreError> {
+        self.movements(doc)
+    }
+
     /// Пересчёт перед записью (суммы и т. п.): считает ядро, а не интерфейс.
     fn prepare(&self, _header: &mut Fields, _parts: &mut Parts) -> Result<(), CoreError> {
         Ok(())
@@ -34,13 +44,14 @@ pub fn post_to(
     kind: &DocumentKind,
     registers: &[&AccumulationRegister],
     id: i64,
-    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
+    rule: impl FnOnce(&mut dyn Driver, &Document) -> Result<Moves, CoreError>,
 ) -> Result<(), CoreError> {
     in_transaction(db, |db| {
         let doc = kind.get(db, id)?.ok_or_else(|| kind.not_found(id))?;
         check_open(db, &doc.header)?;
         check_not_deleted(&doc)?;
-        write_moves(db, kind, registers, &doc, rule(&doc)?)?;
+        let moves = rule(db, &doc)?;
+        write_moves(db, kind, registers, &doc, moves)?;
         kind.set_posted(db, id, true)
     })
 }
@@ -53,13 +64,14 @@ pub fn save_to(
     registers: &[&AccumulationRegister],
     doc: &Document,
     post: bool,
-    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
+    rule: impl FnOnce(&mut dyn Driver, &Document) -> Result<Moves, CoreError>,
 ) -> Result<Document, CoreError> {
     in_transaction(db, |db| {
         let saved = kind.write(db, doc)?;
         if post {
             check_not_deleted(&saved)?;
-            write_moves(db, kind, registers, &saved, rule(&saved)?)?;
+            let moves = rule(db, &saved)?;
+            write_moves(db, kind, registers, &saved, moves)?;
             kind.set_posted(db, saved.id, true)?;
         } else if saved.posted {
             for register in registers {
@@ -79,11 +91,12 @@ pub fn insert_and_post_to(
     registers: &[&AccumulationRegister],
     header: &Fields,
     parts: &Parts,
-    rule: impl FnOnce(&Document) -> Result<Moves, CoreError>,
+    rule: impl FnOnce(&mut dyn Driver, &Document) -> Result<Moves, CoreError>,
 ) -> Result<Document, CoreError> {
     in_transaction(db, |db| {
         let doc = kind.insert_in(db, header, parts)?;
-        write_moves(db, kind, registers, &doc, rule(&doc)?)?;
+        let moves = rule(db, &doc)?;
+        write_moves(db, kind, registers, &doc, moves)?;
         kind.set_posted(db, doc.id, true)?;
         kind.get(db, doc.id)?.ok_or_else(|| kind.not_found(doc.id))
     })
@@ -151,8 +164,8 @@ pub fn unpost(
 fn only<'a>(
     register: &'a AccumulationRegister,
     rule: impl FnOnce(&Document) -> Result<Vec<Movement>, CoreError> + 'a,
-) -> impl FnOnce(&Document) -> Result<Moves, CoreError> + 'a {
-    move |doc| Ok(Moves::from([(register.name().to_owned(), rule(doc)?)]))
+) -> impl FnOnce(&mut dyn Driver, &Document) -> Result<Moves, CoreError> + 'a {
+    move |_, doc| Ok(Moves::from([(register.name().to_owned(), rule(doc)?)]))
 }
 
 /// Каждому регистру документа — его движения; регистру без движений — пусто (старые уходят).

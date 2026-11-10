@@ -8,11 +8,15 @@ import datetime
 import traceback
 from decimal import Decimal
 
-__all__ = ["UserError"]
+__all__ = ["QueryError", "UserError"]
 
 
 class UserError(Exception):
     """Ошибка для пользователя: он увидит ровно этот текст."""
+
+
+class QueryError(Exception):
+    """ctx.query не прошёл: запрос не по правилам ostov-sql или ошибка базы."""
 
 
 _EXPECTED = {
@@ -131,14 +135,49 @@ def _dump(record, kinds):
     }
 
 
-class _Ctx:
-    """Движения документа: ctx.receipt(...) и ctx.issue(...)."""
+def _param(name, value):
+    """Параметр запроса для ядра: (имя, вид, значение)."""
+    if value is None:
+        return name, "null", None
+    if isinstance(value, bool):
+        return name, "int", int(value)
+    if isinstance(value, int):
+        return name, "int", value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"параметр {name}: не число: {value}")
+        return name, "decimal", format(value, "f")
+    if isinstance(value, str):
+        return name, "text", value
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return name, "text", value.isoformat()
+    raise TypeError(
+        f"параметр {name}: можно int, Decimal, str, datetime.date или None, "
+        f"а не {type(value).__name__}"
+    )
 
-    def __init__(self, document, registers, allowed):
+
+class _Ctx:
+    """Движения документа: ctx.receipt(...) и ctx.issue(...); чтение: ctx.query(...)."""
+
+    def __init__(self, document, registers, allowed, query):
         self._document = document
         self._registers = registers
         self._allowed = allowed
+        self._query = query
         self._moves = []
+
+    def query(self, sql, /, **params):
+        """Строки SELECT через платформу, не больше 1000: row.поле.
+
+        Параметры — :имя в тексте и именованные аргументы. Деньги приходят Decimal,
+        даты — datetime.date, ссылки — id.
+        """
+        if self._query is None:
+            raise QueryError("ctx.query доступен только в on_post")
+        columns, rows = self._query(sql, [_param(k, v) for k, v in params.items()])
+        kinds = dict(columns)
+        return [_record("запрос", kinds, dict(zip(kinds, row)), False) for row in rows]
 
     def receipt(self, register, /, **values):
         """Приход по регистру; ключи — его измерения и ресурсы."""
@@ -182,9 +221,9 @@ def _before_write(func, name, schema, header, parts):
     return _dump(doc, schema["header"]), rows
 
 
-def _on_post(func, name, schema, header, parts, service, registers, allowed):
+def _on_post(func, name, schema, header, parts, service, registers, allowed, query):
     doc = _document(name, schema, header, parts, service, False)
-    ctx = _Ctx(name, registers, allowed)
+    ctx = _Ctx(name, registers, allowed, query)
     func(doc, ctx)
     return ctx._moves
 

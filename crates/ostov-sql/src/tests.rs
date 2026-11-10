@@ -14,10 +14,18 @@ fn config() -> ostov_model::Config {
         .unwrap()
 }
 
-fn params(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
+fn params(pairs: &[(&str, Value)]) -> BTreeMap<String, Param> {
     pairs
         .iter()
-        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .map(|(k, v)| {
+            let p = match v {
+                Value::Null => Param::Null,
+                Value::Int(n) => Param::Int(*n),
+                Value::Text(t) => Param::Text(t.clone()),
+                Value::Bytes(_) => panic!("байты параметром не передаются"),
+            };
+            ((*k).to_owned(), p)
+        })
         .collect()
 }
 
@@ -536,6 +544,82 @@ fn money_and_integers_do_not_mix() {
         )
         .is_ok()
     );
+}
+
+fn with(query: &str, p: &[(&str, Param)]) -> Result<Prepared, SqlError> {
+    let p = p
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    prepare(query, &p, &config(), &all, &SqliteDialect)
+}
+
+fn dec(units: i64, scale: u8) -> Param {
+    Param::Decimal { units, scale }
+}
+
+#[test]
+fn number_params_take_scale_of_money_field() {
+    let q = "SELECT qty FROM receipt.lines WHERE price > :p";
+    assert_eq!(
+        with(q, &[("p", dec(25, 1))]).unwrap().params,
+        [Value::Int(250)]
+    );
+    assert_eq!(
+        with(q, &[("p", dec(2500, 3))]).unwrap().params,
+        [Value::Int(250)]
+    );
+    assert_eq!(
+        with(q, &[("p", Param::Int(100))]).unwrap().params,
+        [Value::Int(10_000)]
+    );
+    let q = "SELECT qty FROM receipt.lines WHERE :p <= price";
+    assert_eq!(
+        with(q, &[("p", dec(1, 0))]).unwrap().params,
+        [Value::Int(100)]
+    );
+
+    let q = "SELECT price FROM receipt.lines WHERE qty BETWEEN :a AND :b OR qty IN (:a, :b)";
+    let s = with(q, &[("a", dec(15, 1)), ("b", Param::Int(2))]).unwrap();
+    let (a, b) = (Value::Int(1500), Value::Int(2000));
+    assert_eq!(s.params, [a.clone(), b.clone(), a, b]);
+
+    // Целое поле и целый параметр как были.
+    let q = "SELECT qty FROM receipt.lines WHERE line_no = :n";
+    assert_eq!(
+        with(q, &[("n", Param::Int(3))]).unwrap().params,
+        [Value::Int(3)]
+    );
+    // Умножение не переводит: масштабы складываются.
+    let q = "SELECT price * :k AS total FROM receipt.lines";
+    let s = with(q, &[("k", dec(15, 1))]).unwrap();
+    assert_eq!(s.params, [Value::Int(15)]);
+    assert_eq!(s.columns[0].kind, Some(FieldKind::Decimal { scale: 3 }));
+}
+
+#[test]
+fn number_params_that_do_not_fit_are_errors() {
+    let q = "SELECT qty FROM receipt.lines WHERE price > :p";
+    for p in [dec(1234, 3), Param::Int(i64::MAX)] {
+        let e = with(q, &[("p", p)]).unwrap_err();
+        assert_eq!(
+            e,
+            SqlError::ParamScale {
+                name: "p".into(),
+                scale: 2
+            }
+        );
+        assert!(e.to_string().contains("«p»"), "{e}");
+    }
+    let q = "SELECT qty FROM receipt.lines WHERE line_no = :p";
+    assert!(matches!(
+        with(q, &[("p", dec(25, 1))]),
+        Err(SqlError::MoneyWithInt { scale: 1 })
+    ));
+    assert!(matches!(
+        err("SELECT qty FROM receipt.lines WHERE price = qty"),
+        SqlError::ScaleMismatch { left: 2, right: 3 }
+    ));
 }
 
 #[test]

@@ -13,6 +13,8 @@ workspace = true
 ostov-api = { path = "../ostov-api" }
 ostov-model = { path = "../ostov-model" }
 ostov-sec = { path = "../ostov-sec" }
+# Запросы конфигурации (ctx.query, команда Query): разбор и проверка до базы.
+ostov-sql = { path = "../ostov-sql" }
 ostov-store = { path = "../ostov-store" }
 
 [dev-dependencies]

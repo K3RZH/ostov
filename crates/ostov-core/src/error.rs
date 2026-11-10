@@ -32,6 +32,8 @@ pub enum CoreError {
     /// Конфигурация не ложится на базу без потери данных (реструктуризация).
     Incompatible(String),
     Invalid(String),
+    /// Запрос конфигурации не прошёл `ostov-sql`.
+    Query(ostov_sql::SqlError),
 }
 
 impl fmt::Display for CoreError {
@@ -65,6 +67,7 @@ impl fmt::Display for CoreError {
             Self::Security(e) => write!(f, "{e}"),
             Self::Script { message, .. } => write!(f, "{message}"),
             Self::Incompatible(msg) | Self::Invalid(msg) => write!(f, "{msg}"),
+            Self::Query(e) => write!(f, "{e}"),
         }
     }
 }

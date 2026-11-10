@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use ostov_api::{
     BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
     JournalEntry, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
-    PostAction, ReportQuery, Saved, SessionInfo, UserInfo,
+    PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserInfo,
 };
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_from_pb, fields_to_pb, from_status, pb, session_from_pb};
@@ -275,6 +275,15 @@ impl Engine for RemoteEngine {
     fn run_report(&self, query: &ReportQuery) -> EngineResult<ListPage> {
         let q = pb::ReportQuery::from(query.clone());
         self.call(q, |mut c, r| async move { c.run_report(r).await })?
+            .try_into()
+    }
+
+    fn query(&self, sql: &str, params: &Fields) -> EngineResult<QueryResult> {
+        let q = pb::QueryRequest {
+            sql: sql.to_owned(),
+            params: Some(ostov_proto::fields_to_pb(params.clone())),
+        };
+        self.call(q, |mut c, r| async move { c.query(r).await })?
             .try_into()
     }
 

@@ -16,7 +16,7 @@ use sqlparser::ast::{
 
 use crate::error::Pos;
 use crate::names::{self, Table};
-use crate::{Column, MAX_DEPTH, MAX_LIMIT, Prepared, SqlError};
+use crate::{Column, MAX_DEPTH, MAX_LIMIT, Param, Prepared, SqlError};
 
 struct Source {
     /// Как к таблице обращаются в запросе: псевдоним или имя метаданных.
@@ -28,9 +28,16 @@ struct Source {
 
 type Typed = (String, Option<FieldKind>);
 
+/// Числовой параметр в выходных параметрах: его можно перевести в единицы денежного поля.
+struct Number {
+    index: usize,
+    name: String,
+    scale: u8,
+}
+
 pub(crate) fn run(
     query: ast::Query,
-    params: &BTreeMap<String, Value>,
+    params: &BTreeMap<String, Param>,
     config: &Config,
     can_read: &dyn Fn(&str) -> bool,
     dialect: &dyn Dialect,
@@ -40,6 +47,7 @@ pub(crate) fn run(
         params,
         used: BTreeSet::new(),
         out_params: Vec::new(),
+        numbers: BTreeMap::new(),
         sources: Vec::new(),
         aliases: Vec::new(),
         literals: BTreeMap::new(),
@@ -95,9 +103,11 @@ fn object_name(name: &ObjectName) -> Result<Vec<String>, SqlError> {
 
 struct Translator<'a> {
     dialect: &'a dyn Dialect,
-    params: &'a BTreeMap<String, Value>,
+    params: &'a BTreeMap<String, Param>,
     used: BTreeSet<String>,
     out_params: Vec<Value>,
+    /// Плейсхолдер числового параметра → где его значение.
+    numbers: BTreeMap<String, Number>,
     sources: Vec<Source>,
     /// Псевдонимы колонок результата: на них можно ссылаться в ORDER BY.
     aliases: Vec<String>,
@@ -506,12 +516,70 @@ impl Translator<'_> {
                 name: name.to_owned(),
             })?;
         self.used.insert(name.to_owned());
-        let kind = match value {
-            Value::Text(text) if text.contains('\0') => return Err(SqlError::NulInText),
-            Value::Text(_) => Some(FieldKind::Text),
-            _ => None,
+        let (value, kind, scale) = match value {
+            Param::Null => (Value::Null, None, None),
+            Param::Int(n) => (Value::Int(*n), Some(FieldKind::Int), Some(0)),
+            Param::Text(text) if text.contains('\0') => return Err(SqlError::NulInText),
+            Param::Text(text) => (Value::Text(text.clone()), Some(FieldKind::Text), None),
+            Param::Decimal { units, scale } => (
+                Value::Int(*units),
+                Some(FieldKind::Decimal { scale: *scale }),
+                Some(*scale),
+            ),
         };
-        Ok((self.push_value(value.clone()), kind))
+        let placeholder = self.push_value(value);
+        if let Some(scale) = scale {
+            let number = Number {
+                index: self.out_params.len() - 1,
+                name: name.to_owned(),
+                scale,
+            };
+            self.numbers.insert(placeholder.clone(), number);
+        }
+        Ok((placeholder, kind))
+    }
+
+    /// Две стороны сравнения или суммы: числовой параметр переводится в единицы
+    /// денежного поля напротив, разные масштабы двух полей — ошибка.
+    fn align(&mut self, a: &Typed, b: &Typed) -> Result<(Typed, Typed), SqlError> {
+        let a_kind = self.rescale(&a.0, b.1)?.or(a.1);
+        let b_kind = self.rescale(&b.0, a.1)?.or(b.1);
+        if let (Some(FieldKind::Decimal { scale: l }), Some(FieldKind::Decimal { scale: r })) =
+            (a_kind, b_kind)
+            && l != r
+        {
+            return Err(SqlError::ScaleMismatch { left: l, right: r });
+        }
+        money(a_kind, b_kind)?;
+        Ok(((a.0.clone(), a_kind), (b.0.clone(), b_kind)))
+    }
+
+    fn rescale(
+        &mut self,
+        text: &str,
+        other: Option<FieldKind>,
+    ) -> Result<Option<FieldKind>, SqlError> {
+        let Some(FieldKind::Decimal { scale }) = other else {
+            return Ok(None);
+        };
+        let Some(number) = self.numbers.get_mut(text) else {
+            return Ok(None);
+        };
+        if number.scale != scale {
+            let Some(Value::Int(units)) = self.out_params.get(number.index) else {
+                return Ok(None);
+            };
+            let units =
+                to_scale(*units, number.scale, scale).ok_or_else(|| SqlError::ParamScale {
+                    name: number.name.clone(),
+                    scale,
+                })?;
+            if let Some(slot) = self.out_params.get_mut(number.index) {
+                *slot = Value::Int(units);
+            }
+            number.scale = scale;
+        }
+        Ok(Some(FieldKind::Decimal { scale }))
     }
 
     fn literal_text(&mut self, text: &str) -> String {
@@ -583,8 +651,8 @@ impl Translator<'_> {
             }
             Expr::Value(v) => self.literal(&v.value, e),
             Expr::BinaryOp { left, op, right } => {
-                let (l, lk) = self.expr(left)?;
-                let (r, rk) = self.expr(right)?;
+                let mut left = self.expr(left)?;
+                let mut right = self.expr(right)?;
                 if matches!(
                     op,
                     BinaryOperator::Eq
@@ -596,8 +664,9 @@ impl Translator<'_> {
                         | BinaryOperator::Plus
                         | BinaryOperator::Minus
                 ) {
-                    money(lk, rk)?;
+                    (left, right) = self.align(&left, &right)?;
                 }
+                let ((l, lk), (r, rk)) = (left, right);
                 let (sym, kind) = match op {
                     BinaryOperator::Eq => ("=", None),
                     BinaryOperator::NotEq => ("<>", None),
@@ -642,13 +711,13 @@ impl Translator<'_> {
                 list,
                 negated,
             } => {
-                let (text, kind) = self.expr(expr)?;
+                let head = self.expr(expr)?;
                 let mut out = Vec::with_capacity(list.len());
                 for item in list {
-                    let (item, item_kind) = self.expr(item)?;
-                    money(kind, item_kind)?;
-                    out.push(item);
+                    let item = self.expr(item)?;
+                    out.push(self.align(&head, &item)?.1.0);
                 }
+                let text = head.0;
                 let items = out.join(", ");
                 let not = if *negated { "NOT " } else { "" };
                 Ok((format!("({text} {not}IN ({items}))"), None))
@@ -659,11 +728,12 @@ impl Translator<'_> {
                 low,
                 high,
             } => {
-                let (text, kind) = self.expr(expr)?;
-                let (low, low_kind) = self.expr(low)?;
-                let (high, high_kind) = self.expr(high)?;
-                money(kind, low_kind)?;
-                money(kind, high_kind)?;
+                let head = self.expr(expr)?;
+                let low = self.expr(low)?;
+                let high = self.expr(high)?;
+                let low = self.align(&head, &low)?.1.0;
+                let high = self.align(&head, &high)?.1.0;
+                let text = head.0;
                 let not = if *negated { "NOT " } else { "" };
                 Ok((format!("({text} {not}BETWEEN {low} AND {high})"), None))
             }
@@ -934,5 +1004,15 @@ fn short(text: &str) -> String {
     } else {
         let cut: String = text.chars().take(MAX).collect();
         format!("{cut}…")
+    }
+}
+
+/// Единицы из одного масштаба в другой; `None`, если теряются знаки или не влезает.
+fn to_scale(units: i64, from: u8, to: u8) -> Option<i64> {
+    if to >= from {
+        units.checked_mul(10_i64.checked_pow(u32::from(to - from))?)
+    } else {
+        let div = 10_i64.checked_pow(u32::from(from - to))?;
+        (units % div == 0).then_some(units / div)
     }
 }
