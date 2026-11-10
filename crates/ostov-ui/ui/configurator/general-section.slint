@@ -1,0 +1,37 @@
+import { Theme, Shape } from "../theme.slint";
+import { TextField } from "../components/text-field.slint";
+
+export struct InfoRow { label: string, value: string }
+
+// Раздел «Общие»: свойства элемента только для чтения, записи в конфигурацию здесь нет.
+export component GeneralSection inherits Rectangle {
+    in property <[InfoRow]> rows;
+
+    border-radius: Shape.surface-radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+
+    Flickable {
+        VerticalLayout {
+            padding: Theme.space-16;
+            spacing: Theme.space-12;
+            alignment: start;
+
+            for row in root.rows : HorizontalLayout {
+                spacing: Theme.space-16;
+                Text {
+                    text: row.label;
+                    width: 176px;
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    vertical-alignment: center;
+                }
+                TextField {
+                    read-only: true;
+                    text: row.value;
+                }
+            }
+        }
+    }
+}

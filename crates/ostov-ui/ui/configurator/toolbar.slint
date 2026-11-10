@@ -1,0 +1,74 @@
+import { Theme } from "../theme.slint";
+import { Button } from "../components/button.slint";
+import { Chip } from "../components/chip.slint";
+
+// Панель инструментов первой очереди (документ «Состав конфигурации», §11.1, К-1…К-8).
+// Включена только «Проверить»: остальным нужна открытая папка конфигурации, её выбора пока нет.
+export component Toolbar inherits Rectangle {
+    in property <string> config-title;
+    in property <string> config-version;
+    callback check-requested();
+
+    height: Theme.control-md + 2 * Theme.space-8;
+    background: Theme.surface;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-16;
+        padding-right: Theme.space-16;
+        spacing: Theme.space-8;
+
+        // Название и версия уступают место кнопкам, когда окно узкое.
+        VerticalLayout {
+            alignment: center;
+            min-width: 0px;
+            Text {
+                text: root.config-title;
+                font-size: Theme.font-body;
+                font-weight: 700;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: "v" + root.config-version;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button { text: "Открыть папку"; control-height: Theme.control-sm; enabled: false; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "Проверить";
+                control-height: Theme.control-sm;
+                clicked => { root.check-requested(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button { text: "Заглушки .pyi"; control-height: Theme.control-sm; enabled: false; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button { text: "План миграции"; control-height: Theme.control-sm; enabled: false; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button { text: "Режим тестирования"; control-height: Theme.control-sm; enabled: false; }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        VerticalLayout {
+            alignment: center;
+            Chip { text: "Git: нет данных"; }
+        }
+    }
+}

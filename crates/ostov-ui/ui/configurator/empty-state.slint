@@ -1,0 +1,23 @@
+import { Theme, Shape } from "../theme.slint";
+
+// Пустое состояние: одна фраза по центру, когда показывать пока нечего.
+export component EmptyState inherits Rectangle {
+    in property <string> text;
+
+    border-radius: Shape.surface-radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+
+    Text {
+        x: Theme.space-24;
+        width: parent.width - 2 * Theme.space-24;
+        height: parent.height;
+        text: root.text;
+        font-size: Theme.font-body;
+        color: Theme.text-muted;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+}

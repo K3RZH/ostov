@@ -39,3 +39,7 @@ path = "src/main.rs"
 [[bin]]
 name = "showcase"
 path = "src/bin/showcase.rs"
+
+[[bin]]
+name = "configurator"
+path = "src/bin/configurator.rs"
