@@ -1,0 +1,130 @@
+import { Theme, Shape } from "../theme.slint";
+import { Chip } from "../components/chip.slint";
+import { GridColumn, GridRow } from "../components/erp-grid.slint";
+import { EmptyState } from "empty-state.slint";
+import { EditorSection, SectionTitle } from "sections.slint";
+import { GeneralSection, InfoRow } from "general-section.slint";
+import { FieldsSection } from "fields-section.slint";
+
+export { EditorSection, InfoRow }
+
+// Пункт списка разделов слева от содержимого.
+component SectionItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+
+    height: Theme.control-sm + Theme.space-4;
+    border-radius: Shape.control-radius;
+    background: root.selected ? Theme.accent-soft : touch.has-hover ? Theme.surface-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        x: Theme.space-12;
+        width: parent.width - 2 * Theme.space-12;
+        text: root.text;
+        font-size: Theme.font-body;
+        font-weight: root.selected ? 600 : 400;
+        color: Theme.text;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// Редактор выбранного элемента: заголовок, список разделов и содержимое раздела.
+// Только просмотр: «Применить» и «Отменить» из макета появятся вместе с записью (вопрос В-1).
+export component Editor inherits Rectangle {
+    in property <bool> has-element;
+    in property <string> element-title;
+    in property <string> element-name;
+    in property <string> element-kind;
+    in property <[EditorSection]> sections;
+    in property <EditorSection> section;
+    in property <[InfoRow]> general-rows;
+    in property <[string]> part-titles;
+    in property <int> part-index;
+    in property <[GridColumn]> field-columns;
+    in property <[GridRow]> field-rows;
+    in property <string> field-empty-text;
+    callback section-chosen(EditorSection);
+    callback part-chosen(int);
+    callback resize-begin();
+    callback resize-column(int, length, length);
+    callback resize-end();
+
+    private property <bool> fields-shown: root.section == EditorSection.fields
+        || root.section == EditorSection.table-parts;
+
+    VerticalLayout {
+        padding: Theme.space-16;
+        spacing: Theme.space-12;
+
+        if !root.has-element : EmptyState {
+            text: "Выберите объект в дереве слева.";
+        }
+        if root.has-element : HorizontalLayout {
+            spacing: Theme.space-12;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.element-title;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                Chip { text: root.element-kind; }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: root.element-name;
+                    font-size: Theme.font-caption;
+                    color: Theme.text-muted;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.has-element : HorizontalLayout {
+            spacing: Theme.space-12;
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                width: 152px;
+                spacing: 2px;
+                alignment: start;
+                for item in root.sections : SectionItem {
+                    text: SectionTitle.of(item);
+                    selected: item == root.section;
+                    clicked => { root.section-chosen(item); }
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                if root.section == EditorSection.general : GeneralSection {
+                    rows: root.general-rows;
+                }
+                if root.fields-shown : FieldsSection {
+                    part-titles: root.part-titles;
+                    part-index: root.part-index;
+                    columns: root.field-columns;
+                    rows: root.field-rows;
+                    empty-text: root.field-empty-text;
+                    part-chosen(i) => { root.part-chosen(i); }
+                    resize-begin => { root.resize-begin(); }
+                    resize-column(i, delta, width) => { root.resize-column(i, delta, width); }
+                    resize-end => { root.resize-end(); }
+                }
+                if root.section != EditorSection.general && !root.fields-shown : EmptyState {
+                    text: "Раздел «" + SectionTitle.of(root.section) + "» появится позже.";
+                }
+            }
+        }
+    }
+}

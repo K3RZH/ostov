@@ -1,0 +1,43 @@
+import { Theme } from "../theme.slint";
+import { Segment } from "../components/segment.slint";
+import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
+
+// Разделы «Поля» и «Табличные части»: таблица полей только для чтения. Для табличных частей
+// сверху выбор части (если их несколько) или её название.
+export component FieldsSection inherits VerticalLayout {
+    in property <[string]> part-titles;
+    in property <int> part-index;
+    in property <[GridColumn]> columns;
+    in property <[GridRow]> rows;
+    in property <string> empty-text;
+    callback part-chosen(int);
+    callback resize-begin();
+    callback resize-column(int, length, length);
+    callback resize-end();
+
+    spacing: Theme.space-12;
+
+    if root.part-titles.length == 1 : Text {
+        text: root.part-titles[0];
+        font-size: Theme.font-subtitle;
+        font-weight: 600;
+        color: Theme.text;
+    }
+    if root.part-titles.length > 1 : HorizontalLayout {
+        spacing: Theme.space-8;
+        for title[i] in root.part-titles : Segment {
+            text: title;
+            selected: i == root.part-index;
+            chosen => { root.part-chosen(i); }
+        }
+    }
+    ErpGrid {
+        vertical-stretch: 1;
+        columns: root.columns;
+        rows: root.rows;
+        empty-text: root.empty-text;
+        resize-begin => { root.resize-begin(); }
+        resize-column(i, delta, width) => { root.resize-column(i, delta, width); }
+        resize-end => { root.resize-end(); }
+    }
+}

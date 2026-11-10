@@ -14,6 +14,8 @@ pub use generated::*;
 pub mod admin;
 pub mod admin_ui;
 pub mod app;
+pub mod configurator;
+pub mod configurator_ui;
 pub mod date_input;
 pub mod engine;
 pub mod grid;

@@ -1,0 +1,27 @@
+// Разделы редактора элемента (документ «Состав конфигурации», §11.5). Какие из них есть у вида
+// объекта, решает Rust (src/configurator.rs), здесь только названия.
+export enum EditorSection {
+    general,
+    fields,
+    table-parts,
+    forms,
+    print,
+    rights,
+    events,
+    numbering,
+    import-export,
+}
+
+export global SectionTitle {
+    pure public function of(section: EditorSection) -> string {
+        if section == EditorSection.general { return "Общие"; }
+        if section == EditorSection.fields { return "Поля"; }
+        if section == EditorSection.table-parts { return "Табличные части"; }
+        if section == EditorSection.forms { return "Формы"; }
+        if section == EditorSection.print { return "Печать"; }
+        if section == EditorSection.rights { return "Права"; }
+        if section == EditorSection.events { return "События"; }
+        if section == EditorSection.numbering { return "Нумерация"; }
+        return "Импорт и экспорт";
+    }
+}

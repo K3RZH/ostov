@@ -85,6 +85,8 @@ component NavRowView inherits Rectangle {
 export component NavPanel inherits Rectangle {
     in property <[NavRow]> rows;
     in-out property <bool> collapsed;
+    // Подпись над деревом: в конфигураторе это «ДЕРЕВО КОНФИГУРАЦИИ».
+    in property <string> caption: "НАВИГАЦИЯ";
     callback clicked(int);
 
     width: root.collapsed ? 56px : 280px;
@@ -103,7 +105,7 @@ export component NavPanel inherits Rectangle {
             padding-left: Theme.space-8;
             alignment: root.collapsed ? center : space-between;
             if !root.collapsed : Text {
-                text: "НАВИГАЦИЯ";
+                text: root.caption;
                 font-size: Theme.font-caption;
                 font-weight: 600;
                 color: Theme.text-muted;

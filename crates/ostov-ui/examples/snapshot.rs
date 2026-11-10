@@ -2,7 +2,8 @@
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
-//! list-goods, list-issue, list-sorted, list-search, list-error.
+//! list-goods, list-issue, list-sorted, list-search, list-error, configurator, configurator-fields,
+//! configurator-parts, configurator-role, configurator-later, configurator-check.
 
 use std::io::Write;
 
@@ -210,6 +211,29 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
     pump(800)?;
     println!("{}", data.get_summary());
     save(&window, dark, path)
+}
+
+/// Окно конфигуратора на встроенной «Склад»: щелчки по строкам дерева, затем раздел и проверка.
+fn configurator_window(
+    clicks: &[i32],
+    section: Option<ostov_ui::EditorSection>,
+    check: bool,
+) -> Result<ostov_ui::ConfiguratorWindow, Box<dyn std::error::Error>> {
+    let config = ostov_ui::configurator::Configuration::embedded()?;
+    let window = ostov_ui::configurator_ui::create_window(config)?;
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1200.0, 780.0));
+    for row in clicks {
+        window.invoke_tree_clicked(*row);
+    }
+    if let Some(section) = section {
+        window.invoke_section_chosen(section);
+    }
+    if check {
+        window.invoke_check_requested();
+    }
+    Ok(window)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -526,6 +550,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             save(&window, dark, &path)
         }
+        // Строки дерева «Склада»: 5 первый документ, 10 первая роль; без щелчков открыт первый справочник.
+        "configurator" => save(&configurator_window(&[], None, false)?, dark, &path),
+        "configurator-fields" => {
+            let section = Some(ostov_ui::EditorSection::Fields);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-parts" => {
+            let section = Some(ostov_ui::EditorSection::TableParts);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-role" => save(&configurator_window(&[10], None, false)?, dark, &path),
+        "configurator-later" => {
+            let section = Some(ostov_ui::EditorSection::Forms);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-check" => save(&configurator_window(&[], None, true)?, dark, &path),
         _ => save(&ostov_ui::ShowcaseWindow::new()?, dark, &path),
     }
 }
