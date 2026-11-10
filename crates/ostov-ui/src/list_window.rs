@@ -208,6 +208,21 @@ impl ListWindow {
         self.row(index).is_some()
     }
 
+    /// Меняет строку с этим `id` в кэше: `change` получает текущую строку и даёт новую. Строку
+    /// ищем по `id`, а не по номеру в списке: после сортировки, поиска и прыжка номера другие.
+    /// Возвращает номер строки в списке; `None`, если такой строки в кэше нет (окно выброшено
+    /// или список перезапущен): ядро отдаст её свежей при следующей загрузке.
+    pub fn replace_row(&mut self, id: i64, change: impl FnOnce(&Row) -> Row) -> Option<usize> {
+        let per_window = self.config.rows_per_window();
+        let (window, position) = self.loaded.iter().find_map(|(window, loaded)| {
+            let position = loaded.rows.iter().position(|row| row.id == id)?;
+            Some((*window, position))
+        })?;
+        let slot = self.loaded.get_mut(&window)?.rows.get_mut(position)?;
+        *slot = Rc::new(change(slot));
+        Some(window.saturating_mul(per_window).saturating_add(position))
+    }
+
     /// Последняя ошибка ядра; сбрасывается в `retry` и `restart`.
     pub fn error(&self) -> Option<&EngineError> {
         self.error.as_ref()
@@ -492,6 +507,22 @@ impl ListModel {
     /// Сколько строк в списке; `None`, пока список не открылся.
     pub fn total(&self) -> Option<u64> {
         self.state.borrow().total()
+    }
+
+    /// Строка `index`, если она уже загружена. Окон не запрашивает, в отличие от `row_data`.
+    pub fn loaded_row(&self, index: usize) -> Option<Rc<Row>> {
+        self.state.borrow().row(index)
+    }
+
+    /// Меняет строку с этим `id` на месте и сообщает таблице: прокрутка и выбор остаются.
+    /// `false`: строки в памяти нет, менять нечего.
+    pub fn update_row(&self, id: i64, change: impl FnOnce(&Row) -> Row) -> bool {
+        // Заём снимаем до оповещения: таблица в ответ сразу зовёт `row_data`.
+        let replaced = self.state.borrow_mut().replace_row(id, change);
+        if let Some(index) = replaced {
+            self.notify.row_changed(index);
+        }
+        replaced.is_some()
     }
 
     /// Последняя ошибка ядра, если окно не загрузилось. Строки такого окна остаются заглушками.
@@ -1071,6 +1102,53 @@ mod tests {
         let after_retry = calls.get();
         model.reload();
         assert_eq!(calls.get(), after_retry + 1);
+    }
+
+    fn with_n(value: i64) -> impl FnOnce(&Row) -> Row {
+        move |row| {
+            let mut row = row.clone();
+            row.values.insert("n".to_owned(), Value::Int(value));
+            row
+        }
+    }
+
+    #[test]
+    fn window_replaces_a_cached_row_by_id_and_gives_its_index() {
+        let engine = FakeEngine::new(500);
+        let mut window = ListWindow::new(query(), WindowConfig::default());
+        settle(&mut window, &engine, 0, 29);
+        settle(&mut window, &engine, 250, 260);
+
+        assert_eq!(window.replace_row(258, with_n(-1)), Some(257));
+        let value = |index| window.row(index).map(|row| row.values["n"].clone());
+        assert_eq!(value(257), Some(Value::Int(-1)));
+        // Соседи на месте, строка с тем же id остаётся одна.
+        assert_eq!(value(256), Some(Value::Int(257)));
+        assert_eq!(value(258), Some(Value::Int(259)));
+        assert_eq!(window.row(257).map(|row| row.id), Some(258));
+        // Окно с этой строкой не загружено: менять нечего.
+        assert_eq!(window.replace_row(450, with_n(-1)), None);
+    }
+
+    #[test]
+    fn model_updates_a_row_in_place_by_id() {
+        let engine = FakeEngine::new(500);
+        let queue = Queue::default();
+        let model = model_over(&engine, &queue);
+        run_all(&queue);
+
+        assert!(model.update_row(6, with_n(-1)));
+        assert_eq!(model.loaded_row(5).map(|row| row.id), Some(6));
+        // Строка вне памяти: менять нечего, и окон никто не просит.
+        assert!(!model.update_row(450, with_n(-1)));
+        assert!(model.loaded_row(450).is_none());
+        assert!(queue.borrow().is_empty());
+        let row = model.row_data(5).unwrap();
+        assert_eq!(
+            row.as_row().map(|row| row.values["n"].clone()),
+            Some(Value::Int(-1))
+        );
+        assert_eq!(model.row_count(), 500);
     }
 
     #[test]
