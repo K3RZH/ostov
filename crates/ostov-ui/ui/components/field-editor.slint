@@ -1,0 +1,81 @@
+import { Theme } from "../theme.slint";
+import { TextField } from "text-field.slint";
+import { DateField } from "date-field.slint";
+
+// Как редактировать поле формы. Берётся по виду поля в метаданных; видов, которых там нет
+// (перечисление, булево), здесь нет. Ссылка пока только показывается: выбор из справочника позже.
+export enum EditorKind { text, number, date, reference }
+
+// Поле формы, как его видит редактор. Строит Rust (src/form_ui.rs) по состоянию формы: подпись,
+// текст и ошибка приходят готовыми, значения назад идут колбэками редактора.
+export struct FormFieldItem {
+    label: string,
+    kind: EditorKind,
+    text: string,
+    error: string,
+    // Только чтение: вычисляемое поле, ссылка или нет права на запись.
+    read-only: bool,
+    // Дата для календаря. Пока даты нет (empty-date), здесь сегодняшняя: календарь откроется на ней.
+    day: int,
+    month: int,
+    year: int,
+    empty-date: bool,
+}
+
+// Редактор одного поля формы: подпись над полем, поле по виду, под ним текст ошибки. Строка
+// ошибки занимает место всегда, иначе форма прыгала бы, когда ошибка появляется.
+export component FieldEditor inherits VerticalLayout {
+    in property <FormFieldItem> field;
+    in property <bool> enabled: true;
+    // Форма только что открылась, это её первое поле для ввода: взять фокус при создании.
+    in property <bool> autofocus;
+    // Текст поля изменили. Модель формы при этом не трогается: поле хранит набранное само,
+    // иначе при каждой букве пришлось бы писать текст в модель и курсор бы терялся.
+    callback edited(string);
+    // День, месяц и год из календаря или набранные в поле даты.
+    callback date-edited(int, int, int);
+    // Редактор взял фокус по просьбе `autofocus`.
+    callback focused();
+
+    spacing: Theme.space-4;
+
+    if root.field.kind == EditorKind.date : DateField {
+        label: root.field.label;
+        enabled: root.enabled && !root.field.read-only;
+        day: root.field.day;
+        month: root.field.month;
+        year: root.field.year;
+        empty: root.field.empty-date;
+        invalid: root.field.error != "";
+        init => {
+            if (root.autofocus) {
+                self.take-focus();
+                root.focused();
+            }
+        }
+        edited => { root.date-edited(self.day, self.month, self.year); }
+    }
+    if root.field.kind != EditorKind.date : TextField {
+        label: root.field.label;
+        text: root.field.text;
+        numeric: root.field.kind == EditorKind.number;
+        read-only: root.field.read-only;
+        enabled: root.enabled;
+        error: root.field.error;
+        init => {
+            if (root.autofocus) {
+                self.take-focus();
+                root.focused();
+            }
+        }
+        edited(text) => { root.edited(text); }
+    }
+    Text {
+        min-height: Theme.font-caption * 1.5;
+        text: root.field.error;
+        font-size: Theme.font-caption;
+        color: Theme.danger;
+        wrap: word-wrap;
+        vertical-alignment: top;
+    }
+}

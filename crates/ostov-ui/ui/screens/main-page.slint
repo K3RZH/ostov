@@ -18,6 +18,8 @@ component Separator inherits Rectangle {
 // База, режим и пользователь приходят из Rust (src/app.rs) после открытия базы.
 export component MainPage inherits Rectangle {
     in property <string> base-name;
+    // Страница сейчас на виду: окно держит и скрытые страницы, форма объекта в них не строится.
+    in property <bool> shown: true;
     // Название конфигурации и карточки разделов для экрана «Главная».
     in property <string> config-name;
     in property <[HomeSection]> home-sections;
@@ -150,6 +152,7 @@ export component MainPage inherits Rectangle {
             }
 
             tab-host := TabHost {
+                shown: root.shown;
                 tabs: root.tabs;
                 active-tab: root.active-tab;
                 users: root.users;

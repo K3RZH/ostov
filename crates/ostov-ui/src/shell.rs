@@ -151,6 +151,9 @@ fn known_icon(name: Option<&str>, fallback: &'static str) -> &'static str {
 /// Вид вкладки с универсальным списком объекта (`list_ui.rs`).
 pub const LIST_VIEW: &str = "list";
 
+/// Вид вкладки с формой объекта (`form_ui.rs`, `ui/screens/object-form-view.slint`).
+pub const FORM_VIEW: &str = "form";
+
 /// Вид вкладки «Главной» (`ui/screens/home-view.slint`).
 pub const HOME_VIEW: &str = "home";
 

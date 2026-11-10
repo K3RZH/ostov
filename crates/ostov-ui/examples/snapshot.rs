@@ -2,7 +2,9 @@
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
-//! list-goods, list-issue, list-sorted, list-search, list-error, configurator, configurator-fields,
+//! list-goods, list-issue, list-sorted, list-search, list-error, form-catalog, form-document,
+//! form-catalog-narrow, form-document-narrow, form-new-errors, form-date-empty, form-error,
+//! configurator, configurator-fields,
 //! configurator-parts, configurator-role, configurator-later, configurator-check.
 
 use std::io::Write;
@@ -213,6 +215,62 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
     save(&window, dark, path)
 }
 
+/// Форма объекта на настоящей демо-базе: `FormUi` читает объект у ядра, как в приложении.
+/// Широкое окно 1200×760, узкое 960×600.
+fn form_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use ostov_ui::shell::DocKey;
+
+    let engine = snapshot_engine()?;
+    let window = app_window(2)?;
+    let narrow = screen.ends_with("-narrow");
+    window.window().set_size(if narrow {
+        slint::LogicalSize::new(960.0, 600.0)
+    } else {
+        slint::LogicalSize::new(1200.0, 760.0)
+    });
+    let meta = ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+    let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::from_meta(
+        &meta,
+        ostov_api::SystemRights::ALL,
+    )));
+    let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+    window.set_base_name("Склад".into());
+    window.set_mode_text("Режим: локально".into());
+    window.set_user_text("Администратор".into());
+    window.set_user_initials("А".into());
+
+    let windows = ostov_ui::windows::Windows::new(&receipts);
+    let forms = ostov_ui::form_ui::FormUi::new(window.as_weak(), windows, shell.clone());
+    forms.attach_window(&window);
+    forms.start(engine.clone(), &meta.objects);
+    window.show()?;
+    match screen {
+        "form-catalog" | "form-catalog-narrow" => forms.open_form(DocKey::new("goods", 1))?,
+        "form-new-errors" => {
+            forms.open_new("receipt")?;
+            pump(300)?;
+            window.global::<ostov_ui::FormData>().invoke_save();
+        }
+        "form-date-empty" => forms.open_new("issue")?,
+        "form-error" => {
+            // Закрытый период: ядро не проводит документ, ошибка видна над формой.
+            engine.set_closing_date(Some("2026-12-31"))?;
+            forms.open_form(DocKey::new("receipt", 1))?;
+            pump(800)?;
+            window
+                .global::<ostov_ui::FormData>()
+                .invoke_edited(0, "11.02.2026".into());
+            window.global::<ostov_ui::FormData>().invoke_post();
+        }
+        _ => forms.open_form(DocKey::new("receipt", 1))?,
+    }
+    pump(800)?;
+    save(&window, dark, path)
+}
+
 /// Окно конфигуратора на встроенной «Склад»: щелчки по строкам дерева, затем раздел и проверка.
 fn configurator_window(
     clicks: &[i32],
@@ -277,6 +335,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error" => {
             list_screen(&screen, dark, &path)
         }
+        "form-catalog"
+        | "form-document"
+        | "form-catalog-narrow"
+        | "form-document-narrow"
+        | "form-new-errors"
+        | "form-date-empty"
+        | "form-error" => form_screen(&screen, dark, &path),
         "main-meta" => {
             // Меню из встроенной конфигурации «Склад», как его строит приложение.
             let window = app_window(2)?;

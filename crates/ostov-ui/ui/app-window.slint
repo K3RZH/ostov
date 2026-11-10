@@ -239,6 +239,7 @@ export component AppWindow inherits Window {
         width: root.width;
         height: root.height - root.chrome-height;
         visible: root.page == 2;
+        shown: root.page == 2;
         config-name: root.config-name;
         home-sections: root.home-sections;
         maximized: root.maximized;
@@ -268,6 +269,7 @@ export component AppWindow inherits Window {
     }
     host-tabs := TabHost {
         visible: root.page == 4;
+        shown: root.page == 4;
         x: host-nav.width;
         y: root.chrome-height;
         width: root.width - host-nav.width;

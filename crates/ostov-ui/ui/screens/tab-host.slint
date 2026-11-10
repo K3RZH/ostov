@@ -7,10 +7,12 @@ import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
 import { JournalView } from "journal-view.slint";
 import { PeriodView } from "period-view.slint";
 import { ObjectListView } from "object-list-view.slint";
+import { ObjectFormView } from "object-form-view.slint";
 import { HomeView, HomeSection } from "home-view.slint";
 
 // object: объект конфигурации вкладки (имя в ядре); по нему экран списка берёт свои данные.
-export struct TabItem { title: string, icon: string, modified: bool, view: string, object: string, preview: bool }
+// doc-id: id документа во вкладке с формой (строкой: i64 в Slint нет), у остальных вкладок пусто.
+export struct TabItem { title: string, icon: string, modified: bool, view: string, object: string, doc-id: string, preview: bool }
 
 component TabView inherits Rectangle {
     in property <TabItem> tab;
@@ -146,6 +148,10 @@ export component TabHost inherits VerticalLayout {
     in property <string> config-name;
     in property <string> base-name;
     in property <[HomeSection]> home-sections;
+    // Узел сейчас на виду. Окно держит два узла TabHost (главная страница и окно-вкладка), один
+    // из них скрыт. Форма объекта в скрытом не создаётся: её поле взяло бы фокус, а нажатия
+    // клавиш скрытому полю Slint не отдаёт.
+    in property <bool> shown: true;
     callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
@@ -194,7 +200,7 @@ export component TabHost inherits VerticalLayout {
 
     // Для каких видов вкладок экран уже есть; остальным показывается заглушка.
     pure function has-screen(view: string) -> bool {
-        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period" || view == "list" || view == "home"
+        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period" || view == "list" || view == "form" || view == "home"
     }
 
     pure function is-home(i: int) -> bool {
@@ -378,6 +384,10 @@ export component TabHost inherits VerticalLayout {
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "period" : PeriodView { }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "list" : ObjectListView {
                     object: root.tabs[root.active-tab].object;
+                }
+                if root.shown && root.tabs.length > 0 && root.tabs[root.active-tab].view == "form" : ObjectFormView {
+                    object: root.tabs[root.active-tab].object;
+                    doc-id: root.tabs[root.active-tab].doc-id;
                 }
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "home" : HomeView {
                     config-name: root.config-name;

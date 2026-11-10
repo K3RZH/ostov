@@ -2,7 +2,7 @@
 //! `Workspace`, здесь только окна Slint и обработчики их панели вкладок.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use crate::app::{
 };
 use crate::receipts_ui::ReceiptsUi;
 use crate::shell::{DocKey, Shell, Tab};
-use crate::workspace::{Change, TabList, WindowId, WindowRef, Workspace};
+use crate::workspace::{Change, DocTabs, TabList, WindowId, WindowRef, Workspace};
 
 /// Перетаскивание вкладки между окнами на общих координатах экрана.
 struct DragState {
@@ -191,6 +191,25 @@ impl Windows {
     /// Активное окно: в нём открываются новые вкладки и документы.
     pub fn active(&self) -> WindowRef {
         self.inner.borrow().workspace.active()
+    }
+
+    /// Окно, в котором открыта вкладка документа. `None`: документ нигде не открыт или оболочка
+    /// сейчас занята (вызов изнутри её обновления).
+    pub fn window_of_doc(&self, doc: &DocKey) -> Option<WindowRef> {
+        let shell = self.shell.try_borrow().ok()?;
+        self.inner.borrow().workspace.window_of_doc(&shell, doc)
+    }
+
+    /// Документы, открытые во вкладках всех окон. `None`: оболочка сейчас занята.
+    pub fn open_documents(&self) -> Option<HashSet<DocKey>> {
+        let mut open = self.shell.try_borrow().ok()?.documents();
+        let inner = self.inner.borrow();
+        for id in inner.workspace.extra_ids() {
+            if let Some(list) = inner.workspace.list(id) {
+                open.extend(list.documents());
+            }
+        }
+        Some(open)
     }
 
     pub fn set_active(&self, window: WindowRef) {

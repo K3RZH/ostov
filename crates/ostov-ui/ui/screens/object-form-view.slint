@@ -1,0 +1,253 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
+import { AlertBanner } from "../components/alert-banner.slint";
+import { ConfirmDialog } from "../components/confirm-dialog.slint";
+import { FieldEditor, FormFieldItem } from "../components/field-editor.slint";
+
+// Данные и события формы объекта. Состояние ведёт Rust (src/form_ui.rs), здесь только свойства
+// и колбэки. Глобальный объект, а не свойства окна: экран стоит в любом окне с вкладками. В окне
+// виден один документ: тот, что у активной вкладки; остальные формы Rust хранит у себя.
+export global FormData {
+    // Чья форма сейчас показана в этом окне: имя объекта в ядре и id (строкой: i64 в Slint нет).
+    in property <string> object;
+    in property <string> doc-id;
+    in property <string> title;
+    // Подпись состояния («Черновик», «Проведён») и вид чипа: 0 нейтральный, 1 проведён,
+    // 2 черновик, 4 проведён и изменён, 5 помечен на удаление. Пусто: чипа нет.
+    in property <string> status;
+    in property <int> status-kind;
+    in property <[FormFieldItem]> fields;
+    // Табличные части появятся позже: если они у объекта есть, под шапкой одна фраза про это.
+    in property <string> tables-note;
+    // Ошибка ядра или загрузки над формой; у неё может быть кнопка («Перечитать», «Повторить»).
+    in property <string> error;
+    in property <string> error-action;
+    in property <bool> loading;
+    // Идёт запись: поля и кнопки на это время закрыты.
+    in property <bool> busy;
+    // В форме есть несохранённые правки.
+    in property <bool> modified;
+    in property <bool> can-save;
+    in property <bool> can-post;
+    in property <bool> can-unpost;
+    in property <bool> posted;
+    // Какое поле возьмёт фокус, когда его редактор появится (-1: никакое). Поле, взявшее фокус,
+    // сбрасывает значение: редакторы, перестроенные при смене ширины, фокус не крадут.
+    in-out property <int> autofocus-field: -1;
+    // Экран открылся или вкладка сменила документ: имя объекта и id.
+    callback show(string, string);
+    callback edited(int, string);
+    callback date-edited(int, int, int, int);
+    callback save();
+    callback post();
+    callback unpost();
+    // Взять документ из ядра заново (после конфликта версий или ошибки загрузки).
+    callback reload();
+    callback close();
+}
+
+// Место поля в колонке. Чужое поле занимает слот нулевой высоты: промежуток между полями входит
+// в высоту слота, поэтому пустые слоты его не копят.
+component FieldSlot inherits VerticalLayout {
+    in property <int> index;
+    in property <FormFieldItem> field;
+    in property <bool> mine;
+
+    alignment: start;
+    padding-bottom: root.mine ? Theme.space-8 : 0px;
+
+    if root.mine : FieldEditor {
+        field: root.field;
+        enabled: !FormData.busy;
+        autofocus: root.index == FormData.autofocus-field;
+        focused => { FormData.autofocus-field = -1; }
+        edited(text) => { FormData.edited(root.index, text); }
+        date-edited(day, month, year) => { FormData.date-edited(root.index, day, month, year); }
+    }
+}
+
+// Колонка полей. Поля раскладываются по колонкам по очереди, строка за строкой: в колонке
+// стоят те, чей номер при делении на число колонок даёт номер колонки. Колонок всегда две, а
+// при одной вторая пуста и без ширины: колонки через `for` по числу пересоздавали бы все
+// редакторы при любом пересчёте раскладки, и фокус терялся бы на первой же букве.
+component FormColumn inherits VerticalLayout {
+    in property <int> column;
+    in property <int> columns;
+
+    alignment: start;
+
+    for field[index] in FormData.fields : FieldSlot {
+        index: index;
+        field: field;
+        mine: mod(index, root.columns) == root.column;
+    }
+}
+
+// Тело формы: карточка с полями в колонках и фраза про табличные части.
+component FormBody inherits VerticalLayout {
+    in property <int> columns;
+    in property <length> slot-width;
+
+    spacing: Theme.space-16;
+    alignment: start;
+
+    if FormData.fields.length > 0 : Rectangle {
+        height: card.preferred-height;
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        card := HorizontalLayout {
+            padding: Theme.space-16;
+            FormColumn {
+                column: 0;
+                columns: root.columns;
+                width: root.slot-width;
+            }
+            FormColumn {
+                column: 1;
+                columns: root.columns;
+                padding-left: root.columns == 2 ? Theme.space-16 : 0px;
+                width: root.columns == 2 ? root.slot-width + Theme.space-16 : 0px;
+            }
+        }
+    }
+
+    if FormData.tables-note != "" : Text {
+        text: FormData.tables-note;
+        font-size: Theme.font-body;
+        color: Theme.text-muted;
+        wrap: word-wrap;
+    }
+}
+
+// Вкладка с формой любого справочника или документа: поля шапки строятся по метаданным.
+export component ObjectFormView inherits Rectangle {
+    in property <string> object;
+    in property <string> doc-id;
+
+    // Колонок столько, сколько влезает: на колонку не меньше 360 px, поэтому две колонки
+    // начинаются с окна около 1100 px. Число колонок зависит от ширины экрана, а не от
+    // содержимого: иначе пределы ширины замкнулись бы в петлю.
+    private property <length> column-min: 360px;
+    private property <length> inner-width: root.width - 2 * Theme.space-24 - 2 * Theme.space-16;
+    private property <int> columns: root.inner-width >= 2 * root.column-min + Theme.space-16 ? 2 : 1;
+    private property <length> slot-width: (root.inner-width - (root.columns - 1) * Theme.space-16) / root.columns;
+    private property <bool> confirm-open;
+
+    background: Theme.bg;
+
+    init => { FormData.show(root.object, root.doc-id); }
+    // Соседняя вкладка тоже форма, или документ записали и его вкладка получила настоящий id:
+    // экран тот же, меняется только документ.
+    changed object => { FormData.show(root.object, root.doc-id); }
+    changed doc-id => { FormData.show(root.object, root.doc-id); }
+
+    VerticalLayout {
+        padding: Theme.space-24;
+        spacing: Theme.space-16;
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: FormData.title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
+            }
+            if FormData.status != "" : VerticalLayout {
+                alignment: center;
+                Chip {
+                    text: FormData.status;
+                    kind: FormData.status-kind == 1 ? ChipKind.posted
+                        : FormData.status-kind == 2 ? ChipKind.draft
+                        : FormData.status-kind == 4 ? ChipKind.changed
+                        : FormData.status-kind == 5 ? ChipKind.error
+                        : ChipKind.neutral;
+                }
+            }
+            Rectangle { }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            if FormData.can-post : Button {
+                text: FormData.posted ? "Перепровести" : "Провести";
+                kind: ButtonKind.primary;
+                enabled: !FormData.busy;
+                clicked => { FormData.post(); }
+            }
+            if FormData.can-save : Button {
+                text: "Записать";
+                kind: FormData.can-post ? ButtonKind.secondary : ButtonKind.primary;
+                enabled: !FormData.busy;
+                clicked => { FormData.save(); }
+            }
+            if FormData.can-unpost : Button {
+                text: "Отменить проведение";
+                enabled: !FormData.busy;
+                clicked => { FormData.unpost(); }
+            }
+            Rectangle { }
+            Button {
+                text: "Закрыть";
+                kind: ButtonKind.text;
+                clicked => {
+                    if (FormData.modified) {
+                        root.confirm-open = true;
+                    } else {
+                        FormData.close();
+                    }
+                }
+            }
+        }
+
+        if FormData.error != "" : AlertBanner {
+            text: FormData.error;
+            action-text: FormData.error-action;
+            action => { FormData.reload(); }
+        }
+
+        if FormData.loading : Text {
+            text: "Загрузка…";
+            font-size: Theme.font-body;
+            color: Theme.text-muted;
+        }
+
+        // Шапка прокручивается: на узком окне полей в одну колонку может быть больше экрана,
+        // а под ней позже встанут табличные части.
+        Flickable {
+            vertical-stretch: 1;
+            min-height: 0px;
+            min-width: 0px;
+            preferred-width: 0px;
+            max-width: 100000px;
+            content-width: self.width;
+
+            FormBody {
+                columns: root.columns;
+                slot-width: root.slot-width;
+            }
+        }
+    }
+
+    if root.confirm-open : ConfirmDialog {
+        title: "Закрыть без записи?";
+        text: "Изменения в форме не записаны и пропадут.";
+        accept-text: "Закрыть";
+        accepted => {
+            root.confirm-open = false;
+            FormData.close();
+        }
+        cancelled => { root.confirm-open = false; }
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+}

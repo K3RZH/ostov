@@ -283,11 +283,16 @@ export global DateInput {
 export component DateField inherits VerticalLayout {
     in property <string> label;
     in property <bool> enabled: true;
+    // Значение не принято (обязательное поле пусто): рамка красная, как у TextField.
+    in property <bool> invalid: false;
     in property <int> year-min: 1990;
     in property <int> year-max: 2060;
     in-out property <int> day: 1;
     in-out property <int> month: 1;
     in-out property <int> year: 2026;
+    // Даты пока нет (поле не заполнено): в поле пусто, а день, месяц и год задают только то,
+    // на чём откроется календарь. Первый выбор даты снимает признак.
+    in-out property <bool> empty: false;
     callback edited();
 
     private property <int> mode: 0;
@@ -300,7 +305,10 @@ export component DateField inherits VerticalLayout {
     spacing: Theme.space-4;
 
     pure function current() -> string {
-        DateMath.two(root.day) + "." + DateMath.two(root.month) + "." + root.year
+        root.empty ? "" : DateMath.two(root.day) + "." + DateMath.two(root.month) + "." + root.year
+    }
+    public function take-focus() {
+        input.focus();
     }
     function show-current() {
         root.text = root.current();
@@ -309,6 +317,7 @@ export component DateField inherits VerticalLayout {
     function commit-text() -> bool {
         let parts = DateInput.parts(root.text);
         if (parts.length == 3 && parts[2] >= root.year-min && parts[2] <= root.year-max) {
+            root.empty = false;
             root.day = parts[0];
             root.month = parts[1];
             root.year = parts[2];
@@ -349,8 +358,8 @@ export component DateField inherits VerticalLayout {
     field := Rectangle {
         height: Theme.control-md;
         border-radius: Shape.control-radius;
-        border-width: 1px;
-        border-color: !root.enabled ? transparent : input.has-focus ? Theme.accent : Theme.border-strong;
+        border-width: root.invalid && root.enabled ? 2px : 1px;
+        border-color: !root.enabled ? transparent : root.invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border-strong;
         background: root.enabled ? Theme.surface : Theme.disabled-bg;
 
         HorizontalLayout {
@@ -407,6 +416,16 @@ export component DateField inherits VerticalLayout {
             }
         }
 
+        if root.empty && root.text == "" : Text {
+            x: Theme.space-12;
+            width: parent.width - 32px - Theme.space-12;
+            height: parent.height;
+            text: "дд.мм.гггг";
+            font-size: Theme.font-body;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+
         // Двойной клик по полю открывает календарь; один клик ставит курсор в поле.
         TouchArea {
             x: 0px;
@@ -460,7 +479,10 @@ export component DateField inherits VerticalLayout {
                 mode <=> root.mode;
                 first <=> root.seq-first;
                 second <=> root.seq-second;
-                edited => { root.edited(); }
+                edited => {
+                    root.empty = false;
+                    root.edited();
+                }
                 completed => { popup.close(); }
             }
         }

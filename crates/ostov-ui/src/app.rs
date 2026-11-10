@@ -12,6 +12,7 @@ use crate::engine::{
     Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, SystemRights,
     call_in_background,
 };
+use crate::form_ui::FormUi;
 use crate::list_ui::ListUi;
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
@@ -122,6 +123,11 @@ pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
             modified: tab.modified,
             view: tab.view.into(),
             object: tab.object.as_str().into(),
+            doc_id: tab
+                .doc
+                .as_ref()
+                .map_or_else(String::new, |doc| doc.id.to_string())
+                .into(),
             preview: tab.preview,
         })
         .collect()
@@ -505,6 +511,7 @@ struct Screens {
     users: UsersUi,
     admin: AdminUi,
     lists: ListUi,
+    forms: FormUi,
 }
 
 /// Открывает главную страницу выбранной базы и подключает к ней экраны.
@@ -516,10 +523,12 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
             screens.receipts.attach(engine.clone());
             let objects = session.meta.as_ref().map_or(&[][..], |meta| &meta.objects);
             screens.lists.start(engine.clone(), objects);
+            screens.forms.start(engine.clone(), objects);
         }
         None => {
             screens.receipts.show_error("База не открыта.");
             screens.lists.clear();
+            screens.forms.clear();
         }
     }
     let roles = session
@@ -1066,6 +1075,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             move || session.borrow().engine.clone()
         }),
         lists: ListUi::new(app.as_weak(), windows.clone()),
+        forms: FormUi::new(app.as_weak(), windows.clone(), shell.clone()),
     };
 
     // Закрытие окна пользователем завершает приложение.
@@ -1111,11 +1121,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let to_start = {
         let app = app.as_weak();
         let (session, receipts, admin) = (session.clone(), receipts.clone(), screens.admin.clone());
-        let lists = screens.lists.clone();
+        let (lists, forms) = (screens.lists.clone(), screens.forms.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            // Списки держат движок: забываем их до закрытия базы, иначе файл остался бы занят.
+            // Списки и формы держат движок: забываем их до закрытия базы, иначе файл остался бы
+            // занят.
             lists.clear();
+            forms.clear();
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
             release(std::mem::take(&mut *session.borrow_mut()));
             receipts.detach();
@@ -1180,6 +1192,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     screens.users.clear();
                     screens.admin.clear();
                     screens.lists.clear();
+                    screens.forms.clear();
                     configure_login(&app, kind, &name, &key);
                     prefill_login(&app, &key);
                     show_page(&app, PAGE_LOGIN);
@@ -1332,11 +1345,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
     wire_users(&app, &screens.users);
     screens.admin.attach_window(&app);
     screens.lists.attach_window(&app);
+    screens.forms.attach_window(&app);
     windows.on_host_created({
         let (main, users, admin) = (app.as_weak(), screens.users.clone(), screens.admin.clone());
-        let lists = screens.lists.clone();
+        let (lists, forms) = (screens.lists.clone(), screens.forms.clone());
         move |window| {
             lists.attach_window(window);
+            forms.attach_window(window);
             if let Some(main) = main.upgrade() {
                 refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
