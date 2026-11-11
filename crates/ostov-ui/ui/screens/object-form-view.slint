@@ -35,8 +35,12 @@ export global FormData {
     // Какое поле возьмёт фокус, когда его редактор появится (-1: никакое). Поле, взявшее фокус,
     // сбрасывает значение: редакторы, перестроенные при смене ширины, фокус не крадут.
     in-out property <int> autofocus-field: -1;
+    // Спрашивает, закрывать ли без записи: кнопка «Закрыть» или крестик вкладки при правках.
+    // Вопрос относится к одной форме: Rust гасит его, когда окно показывает другую.
+    in-out property <bool> ask-close;
     // Экран открылся или вкладка сменила документ: имя объекта и id.
     callback show(string, string);
+    callback ask-cancelled();
     callback edited(int, string);
     callback date-edited(int, int, int, int);
     callback save();
@@ -135,7 +139,6 @@ export component ObjectFormView inherits Rectangle {
     private property <length> inner-width: root.width - 2 * Theme.space-24 - 2 * Theme.space-16;
     private property <int> columns: root.inner-width >= 2 * root.column-min + Theme.space-16 ? 2 : 1;
     private property <length> slot-width: (root.inner-width - (root.columns - 1) * Theme.space-16) / root.columns;
-    private property <bool> confirm-open;
 
     background: Theme.bg;
 
@@ -199,7 +202,7 @@ export component ObjectFormView inherits Rectangle {
                 kind: ButtonKind.text;
                 clicked => {
                     if (FormData.modified) {
-                        root.confirm-open = true;
+                        FormData.ask-close = true;
                     } else {
                         FormData.close();
                     }
@@ -236,15 +239,18 @@ export component ObjectFormView inherits Rectangle {
         }
     }
 
-    if root.confirm-open : ConfirmDialog {
+    if FormData.ask-close : ConfirmDialog {
         title: "Закрыть без записи?";
         text: "Изменения в форме не записаны и пропадут.";
         accept-text: "Закрыть";
         accepted => {
-            root.confirm-open = false;
+            FormData.ask-close = false;
             FormData.close();
         }
-        cancelled => { root.confirm-open = false; }
+        cancelled => {
+            FormData.ask-close = false;
+            FormData.ask-cancelled();
+        }
         x: 0px;
         y: 0px;
         width: parent.width;

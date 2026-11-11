@@ -3,9 +3,9 @@
 //! какой командой ядра выполнить пункт и как поменять строку в списке после ответа ядра.
 //! Строка опознаётся по `id`, а не по номеру или названию: номер документа не ключ.
 
-use ostov_api::{Engine, EngineResult, ObjectKind, Rights, Row, Saved, Value};
+use ostov_api::{Engine, EngineResult, ObjectData, ObjectKind, Rights, Row, Saved, Value};
 
-use crate::object_list::{DELETED_FIELD, POSTED_FIELD, VERSION_FIELD};
+use crate::object_list::{DELETED_FIELD, NUMBER_FIELD, POSTED_FIELD, VERSION_FIELD};
 
 /// Что ядро делает со строкой.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,8 @@ pub enum RowCommand {
 /// Пункт меню строки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowAction {
+    /// Открыть форму объекта; ядро не зовётся, форма читает объект сама.
+    Open,
     Command(RowCommand),
     /// Перечитать список; ядро не зовётся, строки загружаются заново.
     Reload,
@@ -28,6 +30,7 @@ pub enum RowAction {
 /// Группа пунктов: между группами в меню стоит черта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Group {
+    Open,
     Posting,
     Deletion,
     List,
@@ -37,6 +40,7 @@ impl RowAction {
     /// Идентификатор пункта: по нему интерфейс сообщает, что выбрали.
     pub fn id(self) -> &'static str {
         match self {
+            Self::Open => "open",
             Self::Command(RowCommand::Post) => "post",
             Self::Command(RowCommand::Unpost) => "unpost",
             Self::Command(RowCommand::MarkDeleted) => "delete",
@@ -47,6 +51,7 @@ impl RowAction {
 
     pub fn from_id(id: &str) -> Option<Self> {
         [
+            Self::Open,
             Self::Command(RowCommand::Post),
             Self::Command(RowCommand::Unpost),
             Self::Command(RowCommand::MarkDeleted),
@@ -59,6 +64,7 @@ impl RowAction {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Open => "Открыть",
             Self::Command(RowCommand::Post) => "Провести",
             Self::Command(RowCommand::Unpost) => "Отменить проведение",
             Self::Command(RowCommand::MarkDeleted) => "Пометить на удаление",
@@ -70,6 +76,7 @@ impl RowAction {
     /// Название значка из набора интерфейса.
     pub fn icon(self) -> &'static str {
         match self {
+            Self::Open => "edit",
             Self::Command(RowCommand::Post) => "check",
             Self::Command(RowCommand::Unpost | RowCommand::Restore) => "undo",
             Self::Command(RowCommand::MarkDeleted) => "trash",
@@ -84,6 +91,7 @@ impl RowAction {
 
     fn group(self) -> Group {
         match self {
+            Self::Open => Group::Open,
             Self::Command(RowCommand::Post | RowCommand::Unpost) => Group::Posting,
             Self::Command(RowCommand::MarkDeleted | RowCommand::Restore) => Group::Deletion,
             Self::Reload => Group::List,
@@ -123,6 +131,9 @@ pub struct MenuEntry {
 /// «Провести» и «Отменить проведение» есть только у документов; «Обновить список» всегда.
 pub fn row_menu(kind: ObjectKind, rights: Rights, state: RowState) -> Vec<MenuEntry> {
     let mut wanted: Vec<(RowAction, bool)> = Vec::new();
+    if rights.read {
+        wanted.push((RowAction::Open, true));
+    }
     if kind == ObjectKind::Document {
         if state.posted {
             if rights.unpost {
@@ -247,6 +258,30 @@ pub fn updated_row(row: &Row, command: RowCommand, saved: &Saved) -> Row {
     row
 }
 
+/// Строка списка по объекту, который записали в форме: поля шапки и служебные (`posted` и номер
+/// только у документа). Ключи, которых в объекте нет, остаются от прежней строки.
+pub fn row_from_object(old: &Row, kind: ObjectKind, data: &ObjectData) -> Row {
+    let mut row = old.clone();
+    row.values.extend(
+        data.fields
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    row.values
+        .insert(DELETED_FIELD.to_owned(), Value::Bool(data.deleted));
+    row.values
+        .insert(VERSION_FIELD.to_owned(), Value::Int(data.version));
+    if kind == ObjectKind::Document {
+        row.values
+            .insert(POSTED_FIELD.to_owned(), Value::Bool(data.posted));
+        if let Some(number) = data.number {
+            row.values
+                .insert(NUMBER_FIELD.to_owned(), Value::Int(number));
+        }
+    }
+    row
+}
+
 /// Текст ошибки действия над строкой: с названием строки, чтобы было ясно, к чему она.
 pub fn failure_text(label: &str, message: &str) -> String {
     format!("{label}: {message}")
@@ -279,6 +314,9 @@ mod tests {
         entries.iter().map(|entry| entry.action).collect()
     }
 
+    fn open() -> RowAction {
+        RowAction::Open
+    }
     fn post() -> RowAction {
         RowAction::Command(RowCommand::Post)
     }
@@ -295,33 +333,39 @@ mod tests {
     #[test]
     fn draft_document_can_be_posted_or_marked_for_deletion() {
         let menu = row_menu(ObjectKind::Document, Rights::ALL, state(false, false));
-        assert_eq!(actions(&menu), [post(), mark(), RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), post(), mark(), RowAction::Reload]);
         assert!(menu.iter().all(|entry| entry.enabled));
     }
 
     #[test]
     fn posted_document_offers_unpost_and_cannot_be_marked() {
         let menu = row_menu(ObjectKind::Document, Rights::ALL, state(true, false));
-        assert_eq!(actions(&menu), [unpost(), mark(), RowAction::Reload]);
+        assert_eq!(
+            actions(&menu),
+            [open(), unpost(), mark(), RowAction::Reload]
+        );
         // Ядро не помечает проведённый документ: пункт виден, но недоступен.
         let enabled: Vec<bool> = menu.iter().map(|entry| entry.enabled).collect();
-        assert_eq!(enabled, [true, false, true]);
+        assert_eq!(enabled, [true, true, false, true]);
     }
 
     #[test]
     fn deleted_document_offers_restore_and_cannot_be_posted() {
         let menu = row_menu(ObjectKind::Document, Rights::ALL, state(false, true));
-        assert_eq!(actions(&menu), [post(), restore(), RowAction::Reload]);
+        assert_eq!(
+            actions(&menu),
+            [open(), post(), restore(), RowAction::Reload]
+        );
         let enabled: Vec<bool> = menu.iter().map(|entry| entry.enabled).collect();
-        assert_eq!(enabled, [false, true, true]);
+        assert_eq!(enabled, [true, false, true, true]);
     }
 
     #[test]
     fn catalog_has_no_posting_actions() {
         let menu = row_menu(ObjectKind::Catalog, Rights::ALL, state(false, false));
-        assert_eq!(actions(&menu), [mark(), RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), mark(), RowAction::Reload]);
         let menu = row_menu(ObjectKind::Catalog, Rights::ALL, state(false, true));
-        assert_eq!(actions(&menu), [restore(), RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), restore(), RowAction::Reload]);
     }
 
     #[test]
@@ -331,25 +375,39 @@ mod tests {
             rights(false, true, false),
             state(false, false),
         );
-        assert_eq!(actions(&menu), [RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), RowAction::Reload]);
         let menu = row_menu(
             ObjectKind::Document,
             rights(false, true, false),
             state(true, false),
         );
-        assert_eq!(actions(&menu), [unpost(), RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), unpost(), RowAction::Reload]);
         let menu = row_menu(
             ObjectKind::Document,
             rights(true, false, true),
             state(true, false),
         );
-        assert_eq!(actions(&menu), [mark(), RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), mark(), RowAction::Reload]);
         let menu = row_menu(
             ObjectKind::Catalog,
             rights(true, true, false),
             state(false, true),
         );
-        assert_eq!(actions(&menu), [RowAction::Reload]);
+        assert_eq!(actions(&menu), [open(), RowAction::Reload]);
+    }
+
+    #[test]
+    fn open_needs_the_read_right() {
+        let no_read = Rights {
+            read: false,
+            ..Rights::ALL
+        };
+        let menu = row_menu(ObjectKind::Document, no_read, state(false, false));
+        assert!(!actions(&menu).contains(&open()));
+        let menu = row_menu(ObjectKind::Document, Rights::ALL, state(false, false));
+        assert_eq!(actions(&menu).first(), Some(&open()));
+        assert!(!open().is_danger());
+        assert!(confirmation(open(), "Расход № 7").is_none());
     }
 
     #[test]
@@ -366,15 +424,15 @@ mod tests {
     fn divider_stands_between_groups_only() {
         let menu = row_menu(ObjectKind::Document, Rights::ALL, state(false, false));
         let dividers: Vec<bool> = menu.iter().map(|entry| entry.divider).collect();
-        assert_eq!(dividers, [false, true, true]);
+        assert_eq!(dividers, [false, true, true, true]);
         let menu = row_menu(ObjectKind::Catalog, Rights::ALL, state(false, false));
         let dividers: Vec<bool> = menu.iter().map(|entry| entry.divider).collect();
-        assert_eq!(dividers, [false, true]);
+        assert_eq!(dividers, [false, true, true]);
     }
 
     #[test]
     fn only_marking_for_deletion_is_dangerous_and_asks_to_confirm() {
-        for action in [post(), unpost(), restore(), RowAction::Reload] {
+        for action in [open(), post(), unpost(), restore(), RowAction::Reload] {
             assert!(!action.is_danger());
             assert!(confirmation(action, "Расход № 7").is_none());
         }
@@ -385,7 +443,14 @@ mod tests {
 
     #[test]
     fn action_ids_round_trip_and_unknown_id_is_ignored() {
-        for action in [post(), unpost(), mark(), restore(), RowAction::Reload] {
+        for action in [
+            open(),
+            post(),
+            unpost(),
+            mark(),
+            restore(),
+            RowAction::Reload,
+        ] {
             assert_eq!(RowAction::from_id(action.id()), Some(action));
         }
         assert_eq!(RowAction::from_id("purge"), None);
@@ -582,5 +647,52 @@ mod tests {
         assert_eq!(updated.values["deleted"], Value::Bool(true));
         assert_eq!(updated.values["version"], Value::Int(2));
         assert_eq!(RowState::of(&updated), state(false, true));
+    }
+
+    #[test]
+    fn row_from_object_takes_fields_flags_and_version_and_keeps_other_keys() {
+        let old = row(
+            7,
+            &[
+                ("number", Value::Int(3)),
+                ("posted", Value::Bool(false)),
+                ("deleted", Value::Bool(false)),
+                ("version", Value::Int(1)),
+                ("extra", Value::Text("осталось".to_owned())),
+                ("date", Value::Date("2026-01-01".to_owned())),
+            ],
+        );
+        let data = ObjectData {
+            id: Some(7),
+            version: 5,
+            number: Some(3),
+            posted: true,
+            deleted: false,
+            fields: [("date".to_owned(), Value::Date("2026-02-10".to_owned()))].into(),
+            ..ObjectData::default()
+        };
+        let fresh = row_from_object(&old, ObjectKind::Document, &data);
+        assert_eq!(fresh.id, 7);
+        assert_eq!(fresh.values["date"], Value::Date("2026-02-10".to_owned()));
+        assert_eq!(fresh.values["posted"], Value::Bool(true));
+        assert_eq!(fresh.values["version"], Value::Int(5));
+        assert_eq!(fresh.values["number"], Value::Int(3));
+        assert_eq!(fresh.values["extra"], Value::Text("осталось".to_owned()));
+    }
+
+    #[test]
+    fn row_of_catalog_gets_no_posting_keys() {
+        let data = ObjectData {
+            id: Some(1),
+            version: 2,
+            posted: true,
+            fields: [("name".to_owned(), Value::Text("Мука".to_owned()))].into(),
+            ..ObjectData::default()
+        };
+        let fresh = row_from_object(&row(1, &[]), ObjectKind::Catalog, &data);
+        assert!(!fresh.values.contains_key("posted"));
+        assert!(!fresh.values.contains_key("number"));
+        assert_eq!(fresh.values["deleted"], Value::Bool(false));
+        assert_eq!(fresh.values["name"], Value::Text("Мука".to_owned()));
     }
 }

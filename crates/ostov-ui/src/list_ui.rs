@@ -16,18 +16,21 @@ use std::time::Duration;
 use slint::{ComponentHandle, MapModel, ModelRc, SharedString, VecModel};
 
 use crate::engine::{
-    Engine, EngineResult, ErrorCode, ListQuery, ObjectKind, ObjectMeta, Rights, Saved,
+    Engine, EngineResult, ErrorCode, ListQuery, ObjectData, ObjectKind, ObjectMeta, Rights, Saved,
     call_in_background,
 };
+use crate::form_ui::FormUi;
 use crate::list_window::{LazyRow, ListModel, WindowConfig};
 use crate::object_list::{ColumnSpec, columns_from_meta, row_cells, row_label};
 use crate::receipts_ui::{resized_columns, snapshot_of, write_columns};
 use crate::row_actions::{
     MenuEntry, RowAction, RowCommand, RowState, RowTarget, confirmation, failure_text, perform,
-    row_menu, updated_row,
+    row_from_object, row_menu, updated_row,
 };
+use crate::shell::DocKey;
 use crate::sorting::Sorting;
 use crate::windows::Windows;
+use crate::workspace::WindowRef;
 use crate::{AppWindow, GridColumn, GridRow, ListData, MenuAction};
 
 /// Пауза после последней буквы поиска: запрос в ядро не уходит на каждое нажатие.
@@ -194,16 +197,28 @@ struct Base {
 pub struct ListUi {
     main: slint::Weak<AppWindow>,
     windows: Windows,
+    /// Формы объектов: строка списка открывается в форме, а записанная форма обновляет строку.
+    forms: FormUi,
     base: Rc<RefCell<Base>>,
 }
 
 impl ListUi {
-    pub fn new(main: slint::Weak<AppWindow>, windows: Windows) -> Self {
-        Self {
+    pub fn new(main: slint::Weak<AppWindow>, windows: Windows, forms: FormUi) -> Self {
+        let ui = Self {
             main,
             windows,
+            forms,
             base: Rc::default(),
-        }
+        };
+        // Подписка держит список слабой ссылкой на базу; форма и список живут, пока работает
+        // приложение, цикл между ними не утечка.
+        let weak = ui.downgrade();
+        ui.forms.on_saved(move |object, data, created| {
+            if let Some(ui) = weak.upgrade() {
+                ui.form_saved(object, data, created);
+            }
+        });
+        ui
     }
 
     /// База открыта: списки прошлой базы забыты, экраны, которые уже стоят в окнах,
@@ -364,6 +379,12 @@ impl ListUi {
                 };
                 match action {
                     RowAction::Reload => ui.reload(&list),
+                    RowAction::Open => {
+                        let target = menu.borrow_mut().target.take();
+                        if let Some(target) = target.filter(|target| target.object == list.object) {
+                            ui.open_row(&window, &list, &target);
+                        }
+                    }
                     RowAction::Command(command) => {
                         let target = menu.borrow_mut().target.take();
                         // Окно успело показать другой объект: выбранная строка уже не тут.
@@ -416,6 +437,76 @@ impl ListUi {
                 }
             }
         });
+        // Двойной щелчок и кнопка «Открыть»: форма выбранной строки.
+        data.on_open({
+            let (ui, window, _) = bound();
+            move |row| {
+                let Some((window, list)) = ui.shown(&window) else {
+                    return;
+                };
+                if let Some(target) = list.target_at(row) {
+                    ui.open_row(&window, &list, &target);
+                }
+            }
+        });
+        data.on_create({
+            let (ui, window, _) = bound();
+            move || {
+                if let Some((window, list)) = ui.shown(&window) {
+                    ui.create(&window, &list);
+                }
+            }
+        });
+    }
+
+    /// В каком окне открыть форму: в том, где нажали. Активное окно оболочка меняет только
+    /// щелчками по вкладкам, а список в другом окне мог не получить ни одного.
+    fn activate(&self, window: &AppWindow) {
+        let place = self
+            .windows
+            .id_of(window)
+            .map_or(WindowRef::Main, WindowRef::Extra);
+        self.windows.set_active(place);
+    }
+
+    /// Открывает форму строки; отказ ложится полосой над таблицей, как ошибка действия.
+    fn open_row(&self, window: &AppWindow, list: &ObjectList, target: &RowTarget) {
+        self.activate(window);
+        let key = DocKey::new(&target.object, target.id);
+        if let Err(error) = self.forms.open_form(key) {
+            self.fail(list, failure_text(&target.label, &error.to_string()));
+        }
+    }
+
+    /// «Создать»: форма нового объекта этого списка.
+    fn create(&self, window: &AppWindow, list: &ObjectList) {
+        self.activate(window);
+        if let Err(error) = self.forms.open_new(&list.object) {
+            self.fail(list, failure_text(&list.title, &error.to_string()));
+        }
+    }
+
+    fn fail(&self, list: &ObjectList, text: String) {
+        *list.notice.borrow_mut() = text;
+        self.show_state(list);
+    }
+
+    /// Объект записан в форме: строка списка меняется на месте, новый объект и случай, когда
+    /// записанное прочитать не удалось, читаются списком заново.
+    fn form_saved(&self, object: &str, data: Option<&ObjectData>, created: bool) {
+        let Some(list) = self.base.borrow().lists.get(object).cloned() else {
+            return;
+        };
+        match data.filter(|_| !created) {
+            Some(data) => {
+                if let Some(id) = data.id {
+                    list.model
+                        .update_row(id, |old| row_from_object(old, list.kind, data));
+                }
+            }
+            None => self.reload(&list),
+        }
+        self.show_state(&list);
     }
 
     /// «Обновить список»: строки читаются заново с первой, выбор и прошлая ошибка снимаются.
@@ -504,6 +595,7 @@ impl ListUi {
                 data.set_rows(list.rows.clone());
                 data.set_query(list.search.borrow().as_str().into());
                 data.set_selected_row(-1);
+                data.set_can_create(list.rights.create);
                 show_state_in(window, &list);
             }
             Err(message) => show_nothing(window, object, message),
@@ -540,6 +632,7 @@ impl ListUi {
         WeakUi {
             main: self.main.clone(),
             windows: self.windows.clone(),
+            forms: self.forms.clone(),
             base: Rc::downgrade(&self.base),
         }
     }
@@ -599,6 +692,7 @@ fn menu_actions(entries: &[MenuEntry]) -> ModelRc<MenuAction> {
 struct WeakUi {
     main: slint::Weak<AppWindow>,
     windows: Windows,
+    forms: FormUi,
     base: Weak<RefCell<Base>>,
 }
 
@@ -607,6 +701,7 @@ impl WeakUi {
         Some(ListUi {
             main: self.main.clone(),
             windows: self.windows.clone(),
+            forms: self.forms.clone(),
             base: self.base.upgrade()?,
         })
     }
@@ -649,6 +744,7 @@ fn show_nothing(window: &AppWindow, object: &str, error: &str) {
     data.set_notice("".into());
     data.set_menu_actions(ModelRc::default());
     data.set_confirm_open(false);
+    data.set_can_create(false);
 }
 
 #[cfg(test)]

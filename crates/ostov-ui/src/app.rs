@@ -1026,8 +1026,15 @@ pub fn wire_tabs(
     });
     app.on_tab_closed({
         let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        let windows = windows.clone();
         move |tab| {
             let Some(app) = app.upgrade() else { return };
+            // Форма с несохранёнными правками сама спросит, закрывать ли.
+            if index(tab)
+                .is_some_and(|tab| windows.close_vetoed(crate::workspace::WindowRef::Main, tab))
+            {
+                return;
+            }
             let mut shell = shell.borrow_mut();
             receipts.before(&app, &mut shell);
             if let Some(tab) = index(tab) {
@@ -1061,6 +1068,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let windows = crate::windows::Windows::new(&receipts);
     let session = Rc::new(RefCell::new(Session::default()));
     let directory = Rc::new(RefCell::new(Directory::default()));
+    let forms = FormUi::new(app.as_weak(), windows.clone(), shell.clone());
     let screens = Screens {
         shell: shell.clone(),
         receipts: receipts.clone(),
@@ -1074,8 +1082,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
             let session = session.clone();
             move || session.borrow().engine.clone()
         }),
-        lists: ListUi::new(app.as_weak(), windows.clone()),
-        forms: FormUi::new(app.as_weak(), windows.clone(), shell.clone()),
+        lists: ListUi::new(app.as_weak(), windows.clone(), forms.clone()),
+        forms,
     };
 
     // Закрытие окна пользователем завершает приложение.

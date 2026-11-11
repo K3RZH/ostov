@@ -261,6 +261,92 @@ fn main() {
     data.invoke_close();
     settle(&window);
 
+    // ---------------------------------------------------------------- крестик вкладки
+    let tab_of = |key: &DocKey| {
+        shell
+            .borrow()
+            .tabs()
+            .iter()
+            .position(|tab| tab.doc.as_ref() == Some(key))
+    };
+    forms.open_form(flour.clone()).unwrap();
+    check(
+        "форма для проверки крестика открыта",
+        wait_for(&window, || data.get_title() == saved_name),
+    );
+    window.invoke_tab_closed(i32::try_from(tab_of(&flour).unwrap()).unwrap());
+    settle(&window);
+    check(
+        "крестик вкладки без правок закрывает её без вопроса",
+        tab_of(&flour).is_none() && !data.get_ask_close(),
+    );
+    forms.open_form(flour.clone()).unwrap();
+    check(
+        "форма открыта заново",
+        wait_for(&window, || data.get_title() == saved_name),
+    );
+    settle(&window);
+    type_text(&window, "Ж");
+    // Соседняя вкладка на виду: вопрос должен перевести на форму с правками.
+    forms.open_form(DocKey::new("goods", 3)).unwrap();
+    check(
+        "открыта вторая форма, на виду она",
+        wait_for(&window, || active().doc == Some(DocKey::new("goods", 3))),
+    );
+    window.invoke_tab_closed(i32::try_from(tab_of(&flour).unwrap()).unwrap());
+    check(
+        "крестик вкладки с правками не закрывает её, вкладка выбирается и спрашивает",
+        tab_of(&flour).is_some()
+            && active().doc.as_ref() == Some(&flour)
+            && wait_for(&window, || {
+                data.get_title() == saved_name && data.get_ask_close()
+            }),
+    );
+    data.set_ask_close(false);
+    data.invoke_ask_cancelled();
+    window.invoke_tab_closed(i32::try_from(tab_of(&flour).unwrap()).unwrap());
+    check(
+        "после «Отмена» вопрос задаётся снова",
+        data.get_ask_close() && tab_of(&flour).is_some(),
+    );
+    // «Закрыть» ответ на вопрос: форма уходит, правки пропадают.
+    data.set_ask_close(false);
+    data.invoke_close();
+    settle(&window);
+    check(
+        "«Закрыть» в вопросе закрывает вкладку с правками",
+        tab_of(&flour).is_none() && text_of(&*engine, "goods", 1, "name") == saved_name,
+    );
+    // Вопрос относится к одной форме: на другой вкладке его нет.
+    forms.open_form(flour.clone()).unwrap();
+    check(
+        "форма открыта в третий раз",
+        wait_for(&window, || data.get_title() == saved_name),
+    );
+    settle(&window);
+    type_text(&window, "З");
+    let third = DocKey::new("goods", 3);
+    forms.open_form(third.clone()).unwrap();
+    check(
+        "вторая форма открыта рядом с формой, где есть правки",
+        wait_for(&window, || active().doc.as_ref() == Some(&third)),
+    );
+    window.invoke_tab_closed(i32::try_from(tab_of(&third).unwrap()).unwrap());
+    settle(&window);
+    check(
+        "вторая форма без правок закрылась сразу, спрашивать нечего",
+        tab_of(&third).is_none() && tab_of(&flour).is_some(),
+    );
+    window.invoke_tab_closed(i32::try_from(tab_of(&flour).unwrap()).unwrap());
+    check(
+        "а у первой вопрос есть: правки не потеряны молча",
+        wait_for(&window, || data.get_ask_close()),
+    );
+    data.set_ask_close(false);
+    data.invoke_close();
+    settle(&window);
+    check("ответ «Закрыть» закрыл и её", tab_of(&flour).is_none());
+
     // ---------------------------------------------------------------- новый элемент
     let before = engine
         .list(&ListQuery {
@@ -445,6 +531,13 @@ fn main() {
         "главное окно эту форму не показывает",
         shell.borrow().tabs().iter().all(|tab| tab.view != "form"),
     );
+    host.invoke_tab_closed(0);
+    settle(&host);
+    check(
+        "крестик вкладки с правками в дополнительном окне спрашивает, а не закрывает",
+        host_data.get_ask_close() && !windows.debug_state().0.is_empty(),
+    );
+    host_data.set_ask_close(false);
     host_data.invoke_close();
     settle(&host);
     check(

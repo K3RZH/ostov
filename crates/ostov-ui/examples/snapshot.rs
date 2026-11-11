@@ -182,7 +182,8 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
     window.set_user_initials("А".into());
 
     let windows = ostov_ui::windows::Windows::new(&receipts);
-    let lists = ostov_ui::list_ui::ListUi::new(window.as_weak(), windows);
+    let forms = ostov_ui::form_ui::FormUi::new(window.as_weak(), windows.clone(), shell.clone());
+    let lists = ostov_ui::list_ui::ListUi::new(window.as_weak(), windows, forms);
     lists.attach_window(&window);
     // Объект, которого нет в базе: ядро отвечает ошибкой, она видна полосой с «Повторить».
     let mut objects = meta.objects.clone();

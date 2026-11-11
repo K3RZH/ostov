@@ -1,5 +1,5 @@
 import { Theme } from "../theme.slint";
-import { Button } from "../components/button.slint";
+import { Button, ButtonKind } from "../components/button.slint";
 import { TextField } from "../components/text-field.slint";
 import { AlertBanner } from "../components/alert-banner.slint";
 import { ConfirmDialog } from "../components/confirm-dialog.slint";
@@ -36,8 +36,13 @@ export global ListData {
     in property <string> confirm-title;
     in property <string> confirm-text;
     in property <string> confirm-accept;
+    // Пользователь может создавать объекты: показывается кнопка «Создать».
+    in property <bool> can-create;
     // Экран открылся или вкладка сменила объект.
     callback show(string);
+    // Открыть форму строки (двойной щелчок, кнопка «Открыть») и форму нового объекта.
+    callback open(int);
+    callback create();
     callback menu-opening(int);
     callback action(int, string);
     callback dismiss-notice();
@@ -74,10 +79,15 @@ export component ObjectListView inherits Rectangle {
         }
         HorizontalLayout {
             spacing: Theme.space-8;
-            // Формы объекта пока нет: открывать нечем.
             Button {
                 text: "Открыть";
-                enabled: false;
+                enabled: ListData.selected-row >= 0;
+                clicked => { ListData.open(ListData.selected-row); }
+            }
+            if ListData.can-create : Button {
+                text: "Создать";
+                kind: ButtonKind.primary;
+                clicked => { ListData.create(); }
             }
             Rectangle { }
             TextField {
@@ -108,6 +118,7 @@ export component ObjectListView inherits Rectangle {
             selected-row <=> ListData.selected-row;
             menu-opening(i) => { ListData.menu-opening(i); }
             action-chosen(i, id) => { ListData.action(i, id); }
+            row-activated(i) => { ListData.open(i); }
             sort-clicked(i) => { ListData.sort(i); }
             visible-changed(first, last) => { ListData.visible-changed(first, last); }
             resize-begin => { ListData.resize-begin(); }

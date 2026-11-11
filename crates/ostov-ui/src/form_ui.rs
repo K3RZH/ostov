@@ -166,6 +166,10 @@ impl Base {
     }
 }
 
+/// Кого известить о записи объекта: имя объекта, что записало ядро (`None`: прочитать заново не
+/// удалось) и новый ли это объект.
+type SavedListener = Rc<dyn Fn(&str, Option<&ObjectData>, bool)>;
+
 /// Формы объектов открытой базы во всех окнах с вкладками.
 #[derive(Clone)]
 pub struct FormUi {
@@ -173,6 +177,9 @@ pub struct FormUi {
     windows: Windows,
     shell: Rc<RefCell<Shell>>,
     base: Rc<RefCell<Base>>,
+    /// Форма, у которой закрытие вкладки ждёт ответа «Закрыть без записи?».
+    closing: Rc<RefCell<Option<DocKey>>>,
+    saved: Rc<RefCell<Option<SavedListener>>>,
     /// Счётчики общие на все копии и переживают смену базы: ответ ядра прошлой базы не должен
     /// совпасть с номером запроса новой.
     requests: Rc<Cell<u64>>,
@@ -181,14 +188,26 @@ pub struct FormUi {
 
 impl FormUi {
     pub fn new(main: slint::Weak<AppWindow>, windows: Windows, shell: Rc<RefCell<Shell>>) -> Self {
-        Self {
+        let ui = Self {
             main,
             windows,
             shell,
             base: Rc::default(),
+            closing: Rc::default(),
+            saved: Rc::default(),
             requests: Rc::default(),
             temporary: Rc::default(),
-        }
+        };
+        // Окна и форма живут, пока работает приложение: цикл ссылок между ними не утечка.
+        let guard = ui.clone();
+        ui.windows
+            .on_close_guard(move |window, index| guard.guard_close(window, index));
+        ui
+    }
+
+    /// Подписывается на запись объекта (список обновляет строку). Подписчик один, новый заменяет.
+    pub fn on_saved(&self, listener: impl Fn(&str, Option<&ObjectData>, bool) + 'static) {
+        *self.saved.borrow_mut() = Some(Rc::new(listener));
     }
 
     /// База открыта: формы прошлой базы забыты.
@@ -332,6 +351,10 @@ impl FormUi {
                 }
             }
         });
+        data.on_ask_cancelled({
+            let ui = self.clone();
+            move || *ui.closing.borrow_mut() = None
+        });
     }
 
     fn next_request(&self) -> u64 {
@@ -451,6 +474,55 @@ impl FormUi {
                 "Форма не открыта. Закройте вкладку и откройте объект заново.",
             ),
         }
+        // Вопрос о закрытии относится к одной форме: на соседней вкладке его не видно.
+        let asking = self.closing.borrow().as_ref() == Some(key);
+        window.global::<FormData>().set_ask_close(asking);
+    }
+
+    /// Вкладку `index` окна `window` просят закрыть. Форма с несохранёнными правками остаётся:
+    /// вкладка выбирается и спрашивает, закрывать ли без записи. Пока идёт запись, вкладка
+    /// тоже остаётся. `true`: закрывать не надо.
+    fn guard_close(&self, window: WindowRef, index: usize) -> bool {
+        let key = match window {
+            WindowRef::Main => self
+                .shell
+                .borrow()
+                .tabs()
+                .get(index)
+                .and_then(|t| t.doc.clone()),
+            WindowRef::Extra(id) => self
+                .windows
+                .with_list(id, |list| {
+                    list.tabs().get(index).and_then(|t| t.doc.clone())
+                })
+                .flatten(),
+        };
+        let Some(key) = key else {
+            return false;
+        };
+        let (busy, modified) = {
+            let base = self.base.borrow();
+            let Some(form) = base.forms.get(&key) else {
+                return false;
+            };
+            (form.busy, form.state().is_some_and(FormState::is_modified))
+        };
+        if !busy && !modified {
+            return false;
+        }
+        if !busy {
+            *self.closing.borrow_mut() = Some(key.clone());
+            match window {
+                WindowRef::Main => self.shell.borrow_mut().select_tab(index),
+                WindowRef::Extra(id) => {
+                    self.windows.with_list(id, |list| list.select(index));
+                }
+            }
+            self.windows.set_active(window);
+            self.refresh_tabs(&key);
+            self.each_showing(&key, |w| w.global::<FormData>().set_ask_close(true));
+        }
+        true
     }
 
     /// Правка поля `index` текстом.
@@ -546,6 +618,11 @@ impl FormUi {
         result: EngineResult<SaveOutcome>,
     ) {
         let saved_ok = result.is_ok();
+        // Что узнает список: записанное ядром (или `None`, если прочитать не удалось) и новизна.
+        let announce = result
+            .as_ref()
+            .ok()
+            .map(|outcome| (outcome.fresh.as_ref().ok().cloned(), key.is_temporary()));
         let (new_key, title) = {
             let mut base = self.base.borrow_mut();
             let Base { objects, forms, .. } = &mut *base;
@@ -598,6 +675,13 @@ impl FormUi {
                 Draw::Refresh
             },
         );
+        if let Some((fresh, created)) = announce {
+            // Заём снимаем до вызова: список в ответ читает окна и сам может открывать формы.
+            let listener = self.saved.borrow().clone();
+            if let Some(listener) = listener {
+                listener(&key.object, fresh.as_ref(), created);
+            }
+        }
     }
 
     /// «Перечитать» и «Повторить»: объект из ядра заново.
@@ -692,6 +776,7 @@ impl FormUi {
         }
         let place = self.windows.window_of_doc(&key);
         self.base.borrow_mut().forms.remove(&key);
+        *self.closing.borrow_mut() = None;
         match place {
             Some(WindowRef::Main) => {
                 let Some(main) = self.main.upgrade() else {
@@ -885,6 +970,7 @@ fn show_nothing(window: &AppWindow, error: &str) {
     data.set_tables_note("".into());
     data.set_error(error.into());
     data.set_error_action("".into());
+    data.set_ask_close(false);
     show_flags(&data, None);
 }
 

@@ -7,7 +7,7 @@ use crate::GridColumn;
 use crate::values::display;
 
 /// Служебные поля строки документа (их добавляет ядро, в метаданных шапки их нет).
-const NUMBER_FIELD: &str = "number";
+pub(crate) const NUMBER_FIELD: &str = "number";
 pub(crate) const POSTED_FIELD: &str = "posted";
 pub(crate) const DELETED_FIELD: &str = "deleted";
 /// Версия записи: по ней ядро замечает чужую правку.

@@ -31,12 +31,16 @@ struct DragState {
 /// Что подключить к каждому новому окну.
 type HostSetup = Rc<dyn Fn(&AppWindow)>;
 
+/// Решает, закрывать ли вкладку: окно, номер вкладки; `true`: не закрывать (экран сам спросит).
+type CloseGuard = Rc<dyn Fn(WindowRef, usize) -> bool>;
+
 struct Inner {
     workspace: Workspace,
     hosts: HashMap<WindowId, AppWindow>,
     drag: Option<DragState>,
     /// Что подключить к каждому новому окну, кроме форм (например, пользователей).
     host_setup: Option<HostSetup>,
+    close_guard: Option<CloseGuard>,
 }
 
 /// Журнал перетаскивания для разбора странностей в живых окнах: включается переменной
@@ -148,6 +152,7 @@ impl Windows {
                 hosts: HashMap::new(),
                 drag: None,
                 host_setup: None,
+                close_guard: None,
             })),
             receipts: receipts.clone(),
             shell: receipts.shell(),
@@ -159,6 +164,29 @@ impl Windows {
     /// Что подключить к каждому новому окну, кроме списка и форм документов.
     pub fn on_host_created(&self, setup: impl Fn(&AppWindow) + 'static) {
         self.inner.borrow_mut().host_setup = Some(Rc::new(setup));
+    }
+
+    /// Кто может не дать закрыть вкладку (форма с несохранёнными правками). Один, новый заменяет.
+    pub fn on_close_guard(&self, guard: impl Fn(WindowRef, usize) -> bool + 'static) {
+        self.inner.borrow_mut().close_guard = Some(Rc::new(guard));
+    }
+
+    /// Вкладку `index` окна `window` просят закрыть: `true`, если её закрывать нельзя (кто-то
+    /// спросил пользователя или запись идёт). Звать до любых заимствований оболочки.
+    pub fn close_vetoed(&self, window: WindowRef, index: usize) -> bool {
+        // Заём снимаем до вызова: охранник читает вкладки и сам заимствует окна.
+        let guard = self.inner.borrow().close_guard.clone();
+        guard.is_some_and(|guard| guard(window, index))
+    }
+
+    /// Номер дополнительного окна `window`; `None`: это главное окно или чужое.
+    pub fn id_of(&self, window: &AppWindow) -> Option<WindowId> {
+        self.inner
+            .borrow()
+            .hosts
+            .iter()
+            .find(|(_, host)| std::ptr::eq(host.window(), window.window()))
+            .map(|(id, _)| *id)
     }
 
     /// Доступ к вкладкам дополнительного окна.
@@ -705,6 +733,9 @@ impl Windows {
                 let (Ok(tab), Some(main)) = (usize::try_from(tab), main.upgrade()) else {
                     return;
                 };
+                if this.close_vetoed(WindowRef::Extra(id), tab) {
+                    return;
+                }
                 let change = this.inner.borrow_mut().workspace.close_tab(id, tab);
                 this.apply(&main, &shell, change);
             }

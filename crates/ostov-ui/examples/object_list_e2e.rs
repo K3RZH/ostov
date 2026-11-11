@@ -1,7 +1,8 @@
 //! Стенд универсального списка: окну посылаются настоящие события мыши и клавиатуры, а строки
 //! приходят из настоящей демо-базы. Проверяет, что пункты «Товары» и «Расход» открывают список,
-//! щелчок по шапке сортирует, поиск фильтрует, прокрутка догружает дальние строки, «Открыть»
-//! и двойной щелчок пока ничего не делают, а правая кнопка открывает меню строки: пункты по
+//! щелчок по шапке сортирует, поиск фильтрует, прокрутка догружает дальние строки, «Открыть»,
+//! двойной щелчок и пункт меню открывают форму строки, «Создать» форму нового объекта, а
+//! записанная форма обновляет строку списка. Правая кнопка открывает меню строки: пункты по
 //! виду объекта, состоянию строки и правам, действие идёт в настоящее ядро.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example object_list_e2e`.
 // Стенд, а не приложение: падение на unwrap и есть провал сценария.
@@ -11,10 +12,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ostov_ui::app::{refresh, wire_tabs};
+use ostov_ui::form_ui::FormUi;
 use ostov_ui::list_ui::ListUi;
 use ostov_ui::shell::Shell;
 use ostov_ui::windows::Windows;
-use ostov_ui::{AppWindow, ListData};
+use ostov_ui::{AppWindow, FormData, ListData};
 use slint::platform::{PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model, SharedString};
 
@@ -26,6 +28,9 @@ const NAV_GOODS: (f32, f32) = (108.0, 176.0);
 const NAV_RECEIPT: (f32, f32) = (128.0, 278.0);
 const NAV_ISSUE: (f32, f32) = (108.0, 312.0);
 const OPEN_BUTTON: (f32, f32) = (350.0, 174.0);
+const CREATE_BUTTON: (f32, f32) = (443.0, 174.0);
+/// «Записать» на форме: слева под заголовком, при ширине окна не сдвигается.
+const FORM_SAVE_BUTTON: (f32, f32) = (353.0, 174.0);
 const SEARCH: (f32, f32) = (1275.0, 174.0);
 const FIRST_HEADER: (f32, f32) = (340.0, 227.0);
 const DATE_HEADER: (f32, f32) = (395.0, 227.0);
@@ -85,6 +90,25 @@ fn right_click(w: &AppWindow, (x, y): (f32, f32)) {
         position,
         button: PointerEventButton::Right,
     });
+    settle();
+}
+
+/// Два нажатия подряд в одной точке: Slint считает их двойным щелчком.
+fn double_click(w: &AppWindow, (x, y): (f32, f32)) {
+    settle();
+    let position = LogicalPosition::new(x, y);
+    w.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    for _ in 0..2 {
+        w.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        w.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+    }
     settle();
 }
 
@@ -181,6 +205,7 @@ fn main() {
         .unwrap();
 
     let window = AppWindow::new().unwrap();
+    ostov_ui::date_input::install(&window);
     window.set_page(2);
     window
         .window()
@@ -195,7 +220,10 @@ fn main() {
     refresh(&window, &shell.borrow());
     receipts.attach(engine.clone());
     wire_tabs(&window, &shell, &receipts, &windows);
-    let lists = ListUi::new(window.as_weak(), windows);
+    let forms = FormUi::new(window.as_weak(), windows.clone(), shell.clone());
+    forms.attach_window(&window);
+    forms.start(engine.clone(), &meta.objects);
+    let lists = ListUi::new(window.as_weak(), windows, forms.clone());
     lists.attach_window(&window);
     lists.start(engine.clone(), &meta.objects);
     settle();
@@ -254,7 +282,7 @@ fn main() {
     check(
         "правая кнопка выбирает строку и открывает меню справочника",
         data.get_selected_row() == 0
-            && menu_labels(&window) == ["Пометить на удаление", "Обновить список"],
+            && menu_labels(&window) == ["Открыть", "Пометить на удаление", "Обновить список"],
     );
     data.invoke_action(0, "delete".into());
     check(
@@ -281,7 +309,7 @@ fn main() {
     right_click(&window, FIRST_ROW);
     check(
         "у помеченной строки пункт «Снять пометку»",
-        menu_labels(&window) == ["Снять пометку", "Обновить список"],
+        menu_labels(&window) == ["Открыть", "Снять пометку", "Обновить список"],
     );
     data.invoke_action(0, "restore".into());
     check(
@@ -291,22 +319,126 @@ fn main() {
     check("ошибки действия нет", data.get_notice() == "");
     click(&window, NEUTRAL);
 
+    // ---------------------------------------------------------------- форма из списка
+    let form = window.global::<FormData>();
+    let forms_open = || {
+        shell
+            .borrow()
+            .tabs()
+            .iter()
+            .filter(|tab| tab.view == "form")
+            .count()
+    };
+    let name_in_engine = |id: i64| match engine.get("goods", id).unwrap().fields["name"].clone() {
+        ostov_api::Value::Text(text) => text,
+        other => unreachable!("{other:?}"),
+    };
+    let first_name = name_in_engine(1);
+    data.set_selected_row(-1);
+    click(&window, OPEN_BUTTON);
+    check(
+        "«Открыть» без выбранной строки ничего не открывает",
+        forms_open() == 0,
+    );
+    check(
+        "«Создать» есть: у пользователя есть право создания",
+        data.get_can_create(),
+    );
+    click(&window, FIRST_ROW);
+    click(&window, OPEN_BUTTON);
+    check(
+        "«Открыть» открывает форму выбранной строки во вкладке",
+        wait_for(|| forms_open() == 1 && active_view() == "form" && form.get_title() == first_name),
+    );
+    settle();
+    type_text(&window, "Я");
+    click(&window, FORM_SAVE_BUTTON);
+    check(
+        "форма записала объект в ядро",
+        wait_for(|| name_in_engine(1) == format!("Я{first_name}") && !form.get_modified()),
+    );
+    form.invoke_close();
+    settle();
+    check(
+        "после записи строка в открытом списке обновилась на месте",
+        active_view() == "list" && cell(&window, 0, 0) == format!("Я{first_name}"),
+    );
+    // Вернули имя: следующие проверки ждут прежние данные.
+    let mut back = engine.get("goods", 1).unwrap();
+    back.fields.insert(
+        "name".to_owned(),
+        ostov_api::Value::Text(first_name.clone()),
+    );
+    engine
+        .save("goods", &back, ostov_api::PostAction::Write)
+        .unwrap();
+    right_click(&window, FIRST_ROW);
+    data.invoke_action(0, "reload".into());
+    check(
+        "«Обновить список» вернул прежнее имя",
+        wait_for(|| cell(&window, 0, 0) == first_name),
+    );
+    click(&window, NEUTRAL);
+
+    double_click(&window, FIRST_ROW);
+    check(
+        "двойной щелчок по строке открывает её форму",
+        wait_for(|| forms_open() == 1 && form.get_title() == first_name),
+    );
+    form.invoke_close();
+    settle();
+    right_click(&window, FIRST_ROW);
+    data.invoke_action(0, "open".into());
+    check(
+        "пункт «Открыть» в меню строки открывает форму",
+        wait_for(|| forms_open() == 1 && form.get_title() == first_name),
+    );
+    form.invoke_close();
+    settle();
+    // Меню закрывается щелчком вне его: событие пункта шло в обход всплывающего окна.
+    click(&window, NEUTRAL);
+
+    // Отказ открыть форму ложится полосой над таблицей, как ошибка действия.
+    forms.start(engine.clone(), &[]);
+    click(&window, FIRST_ROW);
+    click(&window, OPEN_BUTTON);
+    check(
+        "отказ открыть форму виден над таблицей с названием строки",
+        data.get_notice() == format!("{first_name}: Такого объекта нет в конфигурации базы.")
+            && forms_open() == 0,
+    );
+    data.invoke_dismiss_notice();
+    forms.start(engine.clone(), &meta.objects);
+
+    click(&window, CREATE_BUTTON);
+    check(
+        "«Создать» открывает форму нового объекта",
+        wait_for(|| forms_open() == 1 && form.get_title() == "Товары (новый)"),
+    );
+    settle();
+    type_text(&window, "Соль");
+    click(&window, FORM_SAVE_BUTTON);
+    check(
+        "новый объект записан, вкладка получила настоящий id",
+        wait_for(|| {
+            shell.borrow().tabs().iter().any(|tab| {
+                tab.view == "form" && tab.doc.as_ref().is_some_and(|d| !d.is_temporary())
+            })
+        }) && form.get_title() == "Соль",
+    );
+    form.invoke_close();
+    check(
+        "новый объект появился в списке: «Показано 9 из 9»",
+        wait_for(|| summary(&window) == "Показано 9 из 9") && cell(&window, 8, 0) == "Соль",
+    );
+
     click(&window, SEARCH);
     type_text(&window, "мас");
     check("текст поиска вводится", data.get_query() == "мас");
     check(
-        "поиск фильтрует: «Показано 1 из 8»",
-        wait_for(|| summary(&window) == "Показано 1 из 8")
+        "поиск фильтрует: «Показано 1 из 9»",
+        wait_for(|| summary(&window) == "Показано 1 из 9")
             && cells(&window, 0) == ["Масло сливочное 82%", "кг"],
-    );
-
-    let tabs_before = shell.borrow().tabs().len();
-    click(&window, OPEN_BUTTON);
-    click(&window, (700.0, 260.0));
-    click(&window, (700.0, 260.0));
-    check(
-        "«Открыть» и двойной щелчок пока ничего не открывают",
-        shell.borrow().tabs().len() == tabs_before && active_view() == "list",
     );
 
     // ---------------------------------------------------------------- документ
@@ -355,11 +487,12 @@ fn main() {
         "у проведённого документа «Отменить проведение», пометка недоступна",
         menu_labels(&window)
             == [
+                "Открыть",
                 "Отменить проведение",
                 "Пометить на удаление",
                 "Обновить список",
             ]
-            && menu_enabled(&window) == [true, false, true],
+            && menu_enabled(&window) == [true, true, false, true],
     );
     data.invoke_action(0, "unpost".into());
     check(
@@ -370,8 +503,14 @@ fn main() {
     right_click(&window, FIRST_ROW);
     check(
         "у записанного документа «Провести» и доступная пометка",
-        menu_labels(&window) == ["Провести", "Пометить на удаление", "Обновить список"]
-            && menu_enabled(&window) == [true, true, true],
+        menu_labels(&window)
+            == [
+                "Открыть",
+                "Провести",
+                "Пометить на удаление",
+                "Обновить список",
+            ]
+            && menu_enabled(&window) == [true, true, true, true],
     );
     data.invoke_action(0, "post".into());
     check(
@@ -421,7 +560,7 @@ fn main() {
         "список товаров помнит поиск",
         data.get_title() == "Товары"
             && data.get_query() == "мас"
-            && wait_for(|| summary(&window) == "Показано 1 из 8"),
+            && wait_for(|| summary(&window) == "Показано 1 из 9"),
     );
     click(&window, NAV_RECEIPT);
     check(
@@ -438,23 +577,28 @@ fn main() {
                 post: false,
                 unpost: false,
                 delete: false,
+                create: false,
                 ..ostov_api::Rights::ALL
             },
             ..object.clone()
         })
         .collect();
     lists.start(engine.clone(), &restricted);
+    forms.start(engine.clone(), &restricted);
     click(&window, NAV_GOODS);
     check(
-        "без прав на проведение и пометку в меню только «Обновить список»",
-        wait_for(|| summary(&window) == "Показано 8 из 8") && {
-            right_click(&window, FIRST_ROW);
-            menu_labels(&window) == ["Обновить список"]
-        },
+        "без прав на проведение и пометку в меню «Открыть» (право чтения) и «Обновить список»",
+        wait_for(|| summary(&window) == "Показано 9 из 9")
+            && {
+                right_click(&window, FIRST_ROW);
+                menu_labels(&window) == ["Открыть", "Обновить список"]
+            }
+            && !data.get_can_create(),
     );
     click(&window, NEUTRAL);
 
     lists.clear();
+    forms.clear();
     drop(engine);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("sqlite.lock"));
