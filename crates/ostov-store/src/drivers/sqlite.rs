@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
@@ -33,15 +36,92 @@ impl Dialect for SqliteDialect {
     }
 }
 
+/// Сколько транзакция ждёт своей очереди на запись, прежде чем сдаться с `Busy`.
+const QUEUE_WAIT: Duration = Duration::from_secs(30);
+
+/// Очередь записи к одному файлу внутри процесса (сервер на SQLite). Сам SQLite ждёт
+/// занятую базу опросом, и под непрерывной записью других сессий одна может не дождаться
+/// никогда; здесь транзакции идут строго по очереди. От других процессов база защищена
+/// как раньше — блокировкой SQLite.
+struct Queue {
+    waiting: Mutex<(u64, VecDeque<u64>)>,
+    turn: Condvar,
+}
+
+impl Queue {
+    fn for_path(path: &Path) -> Arc<Self> {
+        static ALL: OnceLock<Mutex<HashMap<PathBuf, Weak<Queue>>>> = OnceLock::new();
+        let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut all = ALL
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        all.retain(|_, q| q.strong_count() > 0);
+        if let Some(queue) = all.get(&key).and_then(Weak::upgrade) {
+            return queue;
+        }
+        let queue = Arc::new(Self {
+            waiting: Mutex::new((0, VecDeque::new())),
+            turn: Condvar::new(),
+        });
+        all.insert(key, Arc::downgrade(&queue));
+        queue
+    }
+
+    fn enter(&self) -> Result<u64, StoreError> {
+        let mut state = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let ticket = state.0;
+        state.0 += 1;
+        state.1.push_back(ticket);
+        let until = Instant::now() + QUEUE_WAIT;
+        while state.1.front() != Some(&ticket) {
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                state.1.retain(|t| *t != ticket);
+                self.turn.notify_all();
+                return Err(StoreError::Busy("очередь записи в базу не дошла".into()));
+            };
+            state = self
+                .turn
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        Ok(ticket)
+    }
+
+    fn leave(&self, ticket: u64) {
+        let mut state = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        state.1.retain(|t| *t != ticket);
+        self.turn.notify_all();
+    }
+}
+
 /// База режима «один компьютер»: файл SQLite рядом с приложением.
 pub struct SqliteDriver {
     conn: Connection,
     depth: crate::Depth,
+    queue: Option<Arc<Queue>>,
+    /// Номерок в очереди, пока идёт внешняя транзакция.
+    ticket: Option<u64>,
+}
+
+impl SqliteDriver {
+    fn release(&mut self) {
+        if let (Some(queue), Some(ticket)) = (&self.queue, self.ticket.take()) {
+            queue.leave(ticket);
+        }
+    }
+}
+
+impl Drop for SqliteDriver {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl SqliteDriver {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(path.as_ref())?;
         // Кэш 64 МБ вместо 2 МБ: на базе в миллионы движений страницы индексов регистра
         // при проведении иначе всё время дочитываются (НТ-П14).
         conn.execute_batch(
@@ -51,6 +131,8 @@ impl SqliteDriver {
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: Some(Queue::for_path(path.as_ref())),
+            ticket: None,
         })
     }
 
@@ -62,6 +144,8 @@ impl SqliteDriver {
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: None,
+            ticket: None,
         })
     }
 
@@ -72,6 +156,8 @@ impl SqliteDriver {
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: None,
+            ticket: None,
         })
     }
 }
@@ -120,12 +206,21 @@ impl Driver for SqliteDriver {
     // «база занята» без ожидания, когда первая уже пишет.
     fn begin(&mut self) -> Result<(), StoreError> {
         let sql = self.depth.begin();
-        let sql = if sql == "BEGIN" {
+        let outer = sql == "BEGIN";
+        if outer && let Some(queue) = &self.queue {
+            self.ticket = Some(queue.enter()?);
+        }
+        let sql = if outer {
             "BEGIN IMMEDIATE".to_owned()
         } else {
             sql
         };
-        self.conn.execute_batch(&sql)?;
+        if let Err(e) = self.conn.execute_batch(&sql) {
+            if outer {
+                self.release();
+            }
+            return Err(e.into());
+        }
         self.depth.entered();
         Ok(())
     }
@@ -133,13 +228,20 @@ impl Driver for SqliteDriver {
     fn commit(&mut self) -> Result<(), StoreError> {
         self.conn.execute_batch(&self.depth.commit())?;
         self.depth.left();
+        if self.depth.is_outside() {
+            self.release();
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), StoreError> {
         let sql = self.depth.rollback();
         self.depth.left();
-        Ok(self.conn.execute_batch(&sql)?)
+        let done = self.conn.execute_batch(&sql);
+        if self.depth.is_outside() {
+            self.release();
+        }
+        Ok(done?)
     }
 }
 

@@ -146,11 +146,12 @@ impl LocalEngine {
 
     pub(super) fn run_login(&self, login: &str, password: &str) -> EngineResult<SessionInfo> {
         let password = Password::new(password);
-        // Транзакция фиксируется и при неудаче: счётчик ошибок и запись журнала должны остаться.
+        // Пароль проверяется вне транзакции: Argon2 медленный, и в SQLite он держал бы запись
+        // всем остальным сессиям. Счётчик ошибок пишется сам, журнал — короткой транзакцией.
         let verified = {
             let mut db = self.db();
+            let result = ostov_sec::verify(&mut **db, login, &password);
             in_transaction(&mut **db, |db| {
-                let result = ostov_sec::verify(db, login, &password);
                 let (action, note) = match &result {
                     Ok(user) if self.blocks_weak(user) => {
                         (Action::LoginFailed, "пароль задан для одного компьютера")
