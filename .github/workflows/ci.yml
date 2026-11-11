@@ -60,9 +60,8 @@ jobs:
           cargo test --workspace 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            { grep -E -A3 "^error(\[E[0-9]+\])?:|^test .* FAILED$|panicked at|didn.t exit|overflowed" test.log | head -40
-              echo "--- конец лога:"
-              tail -n 5 test.log; } |
+            # GitHub показывает не больше 10 аннотаций на шаг: только начало первой ошибки.
+            grep -E -m1 -A8 "^error(\[E[0-9]+\])?:|^test .* FAILED$|panicked at|didn.t exit|overflowed" test.log |
               while IFS= read -r line; do echo "::error::${line//%/%25}"; done
           fi
           exit "$status"
