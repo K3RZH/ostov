@@ -53,14 +53,16 @@ jobs:
       # Упавшие тесты и текст паники — аннотациями: видно без чтения логов.
       - name: cargo test --workspace
         shell: bash
+        env:
+          CARGO_TERM_COLOR: never
         run: |
           set +e
           cargo test --workspace 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            { grep -E "^test .* FAILED$|panicked at|^  left:|^ right:|^called|^error|didn.t exit|overflowed|SIG" test.log | head -15
+            { grep -E -A3 "^error(\[E[0-9]+\])?:|^test .* FAILED$|panicked at|didn.t exit|overflowed" test.log | head -40
               echo "--- конец лога:"
-              tail -n 8 test.log; } |
+              tail -n 5 test.log; } |
               while IFS= read -r line; do echo "::error::${line//%/%25}"; done
           fi
           exit "$status"
