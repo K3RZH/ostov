@@ -229,7 +229,16 @@ fn run(name: &str, connect: Option<Connect>) {
     for w in workers {
         w.join().unwrap();
     }
+    println!(
+        "НТ-Н3 {name}: нагрузка закончилась — записано {}, нехваток {}, списков {}, отчётов {}",
+        counts.saved.load(Ordering::Relaxed),
+        counts.short.load(Ordering::Relaxed),
+        counts.lists.load(Ordering::Relaxed),
+        counts.reports.load(Ordering::Relaxed),
+    );
 
+    // Администратор всё это время молчал: сессия без действий закрывается через 30 минут.
+    boss.login("boss", PASSWORD).unwrap();
     // Ни одна успешная запись не потерялась, остатки сходятся с движениями.
     let docs = boss
         .query(
