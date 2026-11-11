@@ -15,6 +15,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Без отладочной информации сборка в разы меньше: на Linux-машине GitHub иначе кончается
+  # диск (сборка со Slint и тестами больше 14 ГБ).
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   fmt:
@@ -29,11 +32,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-latest переходит на Ubuntu 26, а там другие имена пакетов Slint: пока закреплено.
         os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Место на диске
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          echo "::notice::свободно: $(df -h / | tail -1 | awk '{print $4}')"
       - name: Slint deps
         if: runner.os == 'Linux'
         # Сломанный сторонний репозиторий в образе не должен ронять update: ставим из того,
@@ -60,6 +67,7 @@ jobs:
           cargo test --workspace 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
+            echo "::warning::свободно после сборки: $(df -h . | tail -1 | awk '{print $4}')"
             # GitHub показывает не больше 10 аннотаций на шаг: только начало первой ошибки.
             grep -E -m1 -A8 "^error(\[E[0-9]+\])?:|^test .* FAILED$|panicked at|didn.t exit|overflowed" test.log |
               while IFS= read -r line; do echo "::error::${line//%/%25}"; done
