@@ -457,6 +457,8 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
         .global::<Theme>()
         .set_font_scale(settings.font_scale());
     window.global::<Theme>().set_row_height(settings.row_px());
+    // Фон X11-окна при растягивании: цвет темы, иначе новая полоса мелькает чёрной.
+    crate::x11_background::set_theme_color(window.window(), window.global::<Theme>().get_bg());
     window.set_dark_theme(settings.dark);
     window.set_radius_mode(settings.radius);
     window.set_density_mode(settings.density);

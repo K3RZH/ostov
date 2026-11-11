@@ -14,34 +14,41 @@ use slint::winit_030::{EventResult, WinitWindowAccessor};
 
 /// Включает перевод сочетаний для окна. Вызывается один раз для каждого окна приложения.
 /// Окно без winit (тесты) остаётся как есть.
+///
+/// Здесь же красится X11-окно (`x11_background`): фильтр событий у окна может быть только один,
+/// а событие окна первым сообщает, что X-окно уже создано.
 pub fn install(window: &slint::Window) {
     let modifiers = Cell::new(ModifiersState::empty());
-    window.on_winit_window_event(move |window, event| match event {
-        WinitEvent::ModifiersChanged(changed) => {
-            modifiers.set(changed.state());
-            EventResult::Propagate
+    let background = crate::x11_background::Watcher::new();
+    window.on_winit_window_event(move |window, event| {
+        background.on_event(window);
+        match event {
+            WinitEvent::ModifiersChanged(changed) => {
+                modifiers.set(changed.state());
+                EventResult::Propagate
+            }
+            WinitEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } => {
+                let Some(letter) =
+                    latin_letter(modifiers.get(), &event.logical_key, event.physical_key)
+                else {
+                    return EventResult::Propagate;
+                };
+                let text = slint::SharedString::from(letter);
+                let translated = match event.state {
+                    ElementState::Pressed if event.repeat => WindowEvent::KeyPressRepeated { text },
+                    ElementState::Pressed => WindowEvent::KeyPressed { text },
+                    ElementState::Released => WindowEvent::KeyReleased { text },
+                };
+                // Окно могло закрыться во время обработки: тогда событие некому получать.
+                let _ = window.dispatch_event_with_result(translated);
+                EventResult::PreventDefault
+            }
+            _ => EventResult::Propagate,
         }
-        WinitEvent::KeyboardInput {
-            event,
-            is_synthetic: false,
-            ..
-        } => {
-            let Some(letter) =
-                latin_letter(modifiers.get(), &event.logical_key, event.physical_key)
-            else {
-                return EventResult::Propagate;
-            };
-            let text = slint::SharedString::from(letter);
-            let translated = match event.state {
-                ElementState::Pressed if event.repeat => WindowEvent::KeyPressRepeated { text },
-                ElementState::Pressed => WindowEvent::KeyPressed { text },
-                ElementState::Released => WindowEvent::KeyReleased { text },
-            };
-            // Окно могло закрыться во время обработки: тогда событие некому получать.
-            let _ = window.dispatch_event_with_result(translated);
-            EventResult::PreventDefault
-        }
-        _ => EventResult::Propagate,
     });
 }
 

@@ -37,6 +37,7 @@ pub fn apply_settings(window: &ConfiguratorWindow, settings: Settings) {
         .global::<Theme>()
         .set_font_scale(settings.font_scale());
     window.global::<Theme>().set_row_height(settings.row_px());
+    crate::x11_background::set_theme_color(window.window(), window.global::<Theme>().get_bg());
 }
 
 fn connect_browser(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>) {
