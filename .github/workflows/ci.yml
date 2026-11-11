@@ -50,7 +50,18 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # ostov-ui вне clippy, пока build.rs Артёма на expect.
       - run: cargo clippy --workspace --all-targets --exclude ostov-ui -- -D warnings
-      - run: cargo test --workspace
+      # Упавшие тесты и текст паники — аннотациями: видно без чтения логов.
+      - name: cargo test --workspace
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E "^test .* FAILED$|panicked at|^  left:|^ right:|^called" test.log | head -20 |
+              while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit "$status"
 
   postgres:
     runs-on: ubuntu-24.04
