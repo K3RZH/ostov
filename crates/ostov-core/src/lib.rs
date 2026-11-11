@@ -24,6 +24,6 @@ pub use posting::{
     Moves, Parts, PostingRule, insert_and_post, insert_and_post_to, post, post_to, save, save_to,
     unpost, unpost_from,
 };
-pub use query::{DbReader, QueryRows, Reader};
+pub use query::{DbReader, QueryRows, Reader, Trace, TraceEvent};
 pub use register::{AccumulationRegister, Movement, MovementKind};
 pub use tx::in_transaction;

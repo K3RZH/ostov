@@ -2770,3 +2770,67 @@ fn schema_description_matches_real_base() {
     assert!(checked > 40, "проверено колонок: {checked}");
     assert!(text.contains("`doc_id` | `ref(receipt)`"), "{text}");
 }
+
+/// Журнал запуска (К-21): команды, запросы после перевода и правила проведения.
+#[test]
+fn trace_shows_commands_queries_and_rules() {
+    use crate::TraceEvent;
+    use std::sync::Mutex;
+
+    let events: Arc<Mutex<Vec<TraceEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let trace: crate::Trace = Arc::new(move |e: &TraceEvent| sink.lock().unwrap().push(e.clone()));
+
+    let base = Base::new("trace");
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let config = super::Config::from_model_with(&super::warehouse_model(), &QueryRules).unwrap();
+    let engine = super::LocalEngine::install(Box::new(db), config)
+        .unwrap()
+        .with_trace(trace);
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &receipt(main, mill, &[(flour, 10_000, 100)]),
+            PostAction::Post,
+        )
+        .unwrap();
+    // Расход читает свои строки запросом — запрос из правила тоже в журнале.
+    engine
+        .save("issue", &issue(main, flour, 1_000), PostAction::Post)
+        .unwrap();
+    let _ = engine.query("SELECT name FROM nowhere", &Fields::new());
+
+    let events = events.lock().unwrap();
+    let commands: Vec<(&str, bool)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Command { name, ok, .. } => Some((name.as_str(), *ok)),
+            _ => None,
+        })
+        .collect();
+    assert!(commands.contains(&("Save", true)), "{commands:?}");
+    assert!(commands.contains(&("Query", false)), "{commands:?}");
+    let rules: Vec<(&str, bool)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Rule { document, ok, .. } => Some((document.as_str(), *ok)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rules, [("receipt", true), ("issue", true)]);
+    let query = events
+        .iter()
+        .find_map(|e| match e {
+            TraceEvent::Query {
+                sql, params, rows, ..
+            } => Some((sql, params, *rows)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(query.0.contains("\"issue__lines\""), "{}", query.0);
+    assert_eq!(query.1.len(), 1);
+    assert_eq!(query.2, 1);
+}

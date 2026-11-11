@@ -2,11 +2,40 @@
 //! потом выполнение и разбор строк по типам полей.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ostov_sql::{Column, Param};
 use ostov_store::{Decimal, Driver, Value};
 
 use crate::{CoreError, FieldKind, FieldValue};
+
+/// Событие журнала запуска (К-21): режим тестирования конфигурации показывает, что делало ядро.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TraceEvent {
+    /// Команда `Engine` целиком.
+    Command {
+        name: String,
+        took: Duration,
+        ok: bool,
+    },
+    /// Запрос `ostov-sql`: SQL после проверки и перевода под базу.
+    Query {
+        sql: String,
+        params: Vec<Value>,
+        rows: usize,
+        took: Duration,
+    },
+    /// Правило проведения документа (Rust или Python).
+    Rule {
+        document: String,
+        took: Duration,
+        ok: bool,
+    },
+}
+
+/// Куда ядро отдаёт события; без него журнал не ведётся.
+pub type Trace = Arc<dyn Fn(&TraceEvent) + Send + Sync>;
 
 /// Ответ на запрос: колонки по порядку и строки в типах полей.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +58,7 @@ pub struct DbReader<'a> {
     pub db: &'a mut dyn Driver,
     pub model: &'a ostov_model::Config,
     pub can_read: &'a dyn Fn(&str) -> bool,
+    pub trace: Option<&'a Trace>,
 }
 
 impl Reader for DbReader<'_> {
@@ -37,7 +67,7 @@ impl Reader for DbReader<'_> {
         sql: &str,
         params: &BTreeMap<String, Param>,
     ) -> Result<QueryRows, CoreError> {
-        run(self.db, self.model, self.can_read, sql, params)
+        run(self.db, self.model, self.can_read, sql, params, self.trace)
     }
 }
 
@@ -47,11 +77,21 @@ pub fn run(
     can_read: &dyn Fn(&str) -> bool,
     sql: &str,
     params: &BTreeMap<String, Param>,
+    trace: Option<&Trace>,
 ) -> Result<QueryRows, CoreError> {
     let prepared =
         ostov_sql::prepare(sql, params, model, can_read, db.dialect()).map_err(CoreError::Query)?;
-    let rows = db
-        .query(&prepared.sql, &prepared.params)?
+    let started = Instant::now();
+    let raw = db.query(&prepared.sql, &prepared.params)?;
+    if let Some(trace) = trace {
+        trace(&TraceEvent::Query {
+            sql: prepared.sql.clone(),
+            params: prepared.params.clone(),
+            rows: raw.len(),
+            took: started.elapsed(),
+        });
+    }
+    let rows = raw
         .into_iter()
         .map(|row| {
             if row.len() != prepared.columns.len() {

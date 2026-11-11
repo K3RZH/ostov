@@ -54,6 +54,8 @@ pub struct LocalEngine {
     password_policy: PasswordPolicy,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
+    /// Журнал запуска (К-21), только в режиме тестирования.
+    trace: Option<crate::Trace>,
 }
 
 enum Object<'a> {
@@ -80,6 +82,7 @@ impl LocalEngine {
             access: Mutex::new(access::Access { users, user: None }),
             password_policy: PasswordPolicy::STRICT,
             _lock: None,
+            trace: None,
         }
     }
 
@@ -101,6 +104,18 @@ impl LocalEngine {
         Ok(Self::new(db, config))
     }
 
+    /// События журнала запуска (К-21): команды, запросы, правила проведения.
+    pub fn with_trace(mut self, trace: crate::Trace) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    fn emit(&self, event: crate::TraceEvent) {
+        if let Some(trace) = &self.trace {
+            trace(&event);
+        }
+    }
+
     fn locked(mut self, lock: File) -> Self {
         self._lock = Some(lock);
         self
@@ -120,6 +135,21 @@ impl LocalEngine {
 
     /// Паника внутри команды становится ошибкой `Internal`, а не падением потока интерфейса.
     fn guarded<T>(&self, command: &str, f: impl FnOnce() -> EngineResult<T>) -> EngineResult<T> {
+        let started = std::time::Instant::now();
+        let result = self.guarded_inner(command, f);
+        self.emit(crate::TraceEvent::Command {
+            name: command.to_owned(),
+            took: started.elapsed(),
+            ok: result.is_ok(),
+        });
+        result
+    }
+
+    fn guarded_inner<T>(
+        &self,
+        command: &str,
+        f: impl FnOnce() -> EngineResult<T>,
+    ) -> EngineResult<T> {
         match catch_unwind(AssertUnwindSafe(f)) {
             Ok(result) => result,
             Err(payload) => {
@@ -178,8 +208,16 @@ impl LocalEngine {
             db,
             model: &self.config.model,
             can_read,
+            trace: self.trace.as_ref(),
         };
-        cfg.rule.movements_reading(doc, &mut reader)
+        let started = std::time::Instant::now();
+        let moves = cfg.rule.movements_reading(doc, &mut reader);
+        self.emit(crate::TraceEvent::Rule {
+            document: cfg.kind.table().to_owned(),
+            took: started.elapsed(),
+            ok: moves.is_ok(),
+        });
+        moves
     }
 
     fn forget_lists(&self) {
@@ -1076,8 +1114,16 @@ impl Engine for LocalEngine {
                 .collect();
             let can_read = self.can_read();
             let mut db = self.db();
-            let found = crate::query::run(&mut **db, &self.config.model, &can_read, sql, &params)
-                .map_err(error)?;
+            let trace = self.trace.as_ref();
+            let found = crate::query::run(
+                &mut **db,
+                &self.config.model,
+                &can_read,
+                sql,
+                &params,
+                trace,
+            )
+            .map_err(error)?;
             // Названия ссылок — тем же путём, что в списках: строки по именам колонок.
             let refs: Vec<FieldDef> = found
                 .columns
@@ -1376,6 +1422,7 @@ pub struct LocalConnector {
     model: Option<ostov_model::Config>,
     rules: Option<Arc<dyn Rules + Send + Sync>>,
     password_policy: PasswordPolicy,
+    trace: Option<crate::Trace>,
 }
 
 impl std::fmt::Debug for LocalConnector {
@@ -1393,6 +1440,7 @@ impl LocalConnector {
             model: Some(model),
             rules: None,
             password_policy: PasswordPolicy::STRICT,
+            trace: None,
         }
     }
 
@@ -1400,6 +1448,19 @@ impl LocalConnector {
     pub fn with_password_policy(mut self, policy: PasswordPolicy) -> Self {
         self.password_policy = policy;
         self
+    }
+
+    /// Журнал запуска (К-21) у всех баз, которые откроет или создаст коннектор.
+    pub fn with_trace(mut self, trace: crate::Trace) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    fn traced(&self, engine: LocalEngine) -> LocalEngine {
+        match &self.trace {
+            Some(trace) => engine.with_trace(Arc::clone(trace)),
+            None => engine,
+        }
     }
 
     /// Свои правила документов вместо встроенных, например из Python (`ostov-py`).
@@ -1448,9 +1509,11 @@ impl Connector for LocalConnector {
         let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
-            LocalEngine::new(Box::new(db), config)
-                .with_password_policy(self.password_policy)
-                .locked(lock),
+            self.traced(
+                LocalEngine::new(Box::new(db), config)
+                    .with_password_policy(self.password_policy)
+                    .locked(lock),
+            ),
         ))
     }
 
@@ -1483,9 +1546,11 @@ impl Connector for LocalConnector {
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
-        let engine = LocalEngine::new(Box::new(db), config)
-            .with_password_policy(self.password_policy)
-            .locked(lock);
+        let engine = self.traced(
+            LocalEngine::new(Box::new(db), config)
+                .with_password_policy(self.password_policy)
+                .locked(lock),
+        );
         if let Some(admin) = admin
             && let Err(e) = engine.create_first_admin(&admin.login, &admin.password)
         {
