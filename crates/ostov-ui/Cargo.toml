@@ -23,6 +23,11 @@ slint = { version = "1.18.1", features = ["unstable-winit-030"] }
 # Системное окно выбора папки (на Linux через xdg-portal, в GNOME родное окно).
 rfd = "0.17.2"
 
+# Фон X11-окна цветом темы (src/x11_background.rs). Та же версия, что уже стоит у winit и softbuffer;
+# свои вызовы идут по чистому Rust-протоколу, без unsafe и без дополнительных фич.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13.2"
+
 [dev-dependencies]
 # Тест окна сервера: настоящий сервер на localhost по TLS, как в тестах ostov-client.
 ostov-server = { path = "../ostov-server" }

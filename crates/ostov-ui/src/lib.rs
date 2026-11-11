@@ -35,6 +35,7 @@ pub mod users;
 pub mod values;
 pub mod windows;
 pub mod workspace;
+pub mod x11_background;
 
 /// Имя крейта (проверка, что каркас собран).
 pub const NAME: &str = env!("CARGO_PKG_NAME");
