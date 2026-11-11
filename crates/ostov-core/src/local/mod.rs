@@ -5,6 +5,7 @@ mod access;
 mod config;
 mod convert;
 mod demo;
+mod describe;
 mod journal;
 mod schema;
 mod settings;
@@ -29,6 +30,7 @@ use access::Need;
 use config::Parts;
 pub use config::{BuiltinRules, Config, DocumentConfig, Rules, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid, param_from_api, value_to_api};
+pub use describe::describe_schema;
 use ostov_sec::Action;
 
 use crate::closing::ClosedPeriodPass;
@@ -597,6 +599,94 @@ impl LocalEngine {
         Ok(saved)
     }
 
+    /// Запись и проведение, как у `save`, в транзакции, которая всегда откатывается.
+    /// Остатки «после» читаются внутри неё, «до» — после отката.
+    fn run_trial_post(
+        &self,
+        document: &str,
+        data: &ObjectData,
+    ) -> EngineResult<ostov_api::TrialPost> {
+        let cfg = self.document(document)?;
+        let registers = self.config.registers_of(cfg);
+        let (target, fields, parts) = self.prepare_save(document, data, PostAction::Post)?;
+        let mut guard = self.db();
+        let db = &mut **guard;
+        db.begin().map_err(|e| error(e.into()))?;
+        let tried = || -> Result<_, crate::CoreError> {
+            // Ключи прежних движений тоже меняют остаток: документ мог убрать строку.
+            let mut keys: Vec<(&crate::AccumulationRegister, crate::Fields)> = Vec::new();
+            if let Some(id) = data.id {
+                for reg in &registers {
+                    for m in reg.movements_of(db, cfg.kind.table(), id)? {
+                        keys.push((reg, m.dims));
+                    }
+                }
+            }
+            let saved = self.save_in(
+                db,
+                document,
+                data,
+                PostAction::Post,
+                target,
+                &fields,
+                &parts,
+            )?;
+            let mut moves = Vec::new();
+            for reg in &registers {
+                for m in reg.movements_of(db, cfg.kind.table(), saved.id)? {
+                    keys.push((reg, m.dims.clone()));
+                    moves.push((*reg, m));
+                }
+            }
+            let mut after = Vec::new();
+            for (reg, dims) in keys {
+                if !after
+                    .iter()
+                    .any(|(r, d, _): &(&crate::AccumulationRegister, _, _)| {
+                        r.name() == reg.name() && *d == dims
+                    })
+                {
+                    let balance = reg.balance(db, &dims)?;
+                    after.push((reg, dims, balance));
+                }
+            }
+            Ok((moves, after))
+        };
+        let result = tried();
+        db.rollback().map_err(|e| error(e.into()))?;
+        let (moves, after) = result.map_err(|e| self.explain(db, e))?;
+
+        let resources = |amounts: &BTreeMap<String, ostov_store::Decimal>| -> ostov_api::Fields {
+            amounts
+                .iter()
+                .map(|(k, v)| (k.clone(), decimal_to_api(*v)))
+                .collect()
+        };
+        let mut trial = ostov_api::TrialPost::default();
+        for (reg, m) in moves {
+            let mut dims = fields_to_api(&m.dims);
+            self.fill_titles(db, reg.dims(), &mut [&mut dims])?;
+            trial.moves.push(ostov_api::TrialMove {
+                register: reg.name().to_owned(),
+                receipt: m.kind == crate::MovementKind::Receipt,
+                dims,
+                resources: resources(&m.resources),
+            });
+        }
+        for (reg, dims, after) in after {
+            let before = reg.balance(db, &dims).map_err(error)?;
+            let mut api_dims = fields_to_api(&dims);
+            self.fill_titles(db, reg.dims(), &mut [&mut api_dims])?;
+            trial.balances.push(ostov_api::TrialBalance {
+                register: reg.name().to_owned(),
+                dims: api_dims,
+                before: resources(&before),
+                after: resources(&after),
+            });
+        }
+        Ok(trial)
+    }
+
     /// Пачка в одной транзакции: упала одна запись — не записалось ничего (импорт, Дизайн §12).
     fn run_save_batch(&self, items: &[BatchItem]) -> EngineResult<Vec<Saved>> {
         let mut prepared = Vec::with_capacity(items.len());
@@ -958,6 +1048,14 @@ impl Engine for LocalEngine {
             self.need(document, Need::Unpost)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             busy_retry(|| self.run_unpost(document, id))
+        })
+    }
+
+    fn trial_post(&self, document: &str, data: &ObjectData) -> EngineResult<ostov_api::TrialPost> {
+        self.guarded("TrialPost", || {
+            self.need_save(document, data, PostAction::Post)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_trial_post(document, data)
         })
     }
 

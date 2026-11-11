@@ -2661,3 +2661,112 @@ fn plan_explains_refusal() {
         .unwrap();
     assert_eq!(report(&*engine, "stock_balance", &[]).len(), 1);
 }
+
+#[test]
+fn trial_post_shows_moves_and_leaves_base_alone() {
+    let base = Base::new("trial");
+    let (engine, flour, main, _) = stocked(&base);
+    let receipts = engine.list(&query("receipt", 10)).unwrap().total;
+
+    // Расход 2 из 10: движение и остаток 10 → 8, но ничего не записано.
+    let trial = engine
+        .trial_post("issue", &dated(issue(main, flour, 2_000), "2026-03-01"))
+        .unwrap();
+    let titled = |id: i64, title: &str| Value::Ref {
+        id,
+        title: Some(title.into()),
+    };
+    assert_eq!(trial.moves.len(), 1);
+    let m = &trial.moves[0];
+    assert_eq!((m.register.as_str(), m.receipt), ("stock", false));
+    assert_eq!(m.dims["goods"], titled(flour, "Мука"));
+    assert_eq!(m.resources["qty"], dec(2_000, 3));
+    assert_eq!(trial.balances.len(), 1);
+    let b = &trial.balances[0];
+    assert_eq!(b.dims["warehouse"], titled(main, "Основной"));
+    assert_eq!(
+        (b.before["qty"].clone(), b.after["qty"].clone()),
+        (dec(10_000, 3), dec(8_000, 3))
+    );
+    assert_eq!(engine.list(&query("issue", 10)).unwrap().total, Some(0));
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, receipts);
+    // Номер не израсходован: настоящий расход получает № 1.
+    let saved = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 2_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    assert_eq!(saved.number, Some(1));
+
+    // Нехватка — та же ошибка, что у «Провести».
+    let err = engine
+        .trial_post("issue", &dated(issue(main, flour, 50_000), "2026-03-02"))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("остатка"), "{}", err.message);
+
+    // Проведённый документ меняют: учтены и его прежние движения (8 → 7, а не 8 → 5).
+    let mut changed = engine.get("issue", saved.id).unwrap();
+    changed.tables.get_mut("lines").unwrap()[0].insert("qty".into(), dec(3_000, 3));
+    let trial = engine.trial_post("issue", &changed).unwrap();
+    let b = &trial.balances[0];
+    assert_eq!(
+        (b.before["qty"].clone(), b.after["qty"].clone()),
+        (dec(8_000, 3), dec(7_000, 3))
+    );
+    assert_eq!(
+        engine.get("issue", saved.id).unwrap().tables["lines"][0]["qty"],
+        dec(2_000, 3)
+    );
+}
+
+#[test]
+fn trial_post_needs_right_to_post() {
+    let base = Base::new("trial-rights");
+    let engine = with_admin(&base);
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.logout().unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let err = engine
+        .trial_post("receipt", &receipt(main, mill, &[(flour, 1_000, 100)]))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+}
+
+/// Описание схемы (СТ-58) не врёт: каждая описанная колонка есть в настоящей базе.
+#[test]
+fn schema_description_matches_real_base() {
+    use ostov_store::Driver;
+
+    let base = Base::new("describe");
+    drop(base.create());
+    let text = super::describe_schema(&super::warehouse_model());
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open_read_only(&base.path).unwrap();
+    let mut table = String::new();
+    let mut checked = 0;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("## `") {
+            table = rest.split('`').next().unwrap().to_owned();
+        } else if let Some(rest) = line.strip_prefix("| `") {
+            let column = rest.split('`').next().unwrap();
+            let sql = format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0");
+            db.query(&sql, &[])
+                .unwrap_or_else(|e| panic!("{table}.{column}: {e}"));
+            checked += 1;
+        }
+    }
+    assert!(checked > 40, "проверено колонок: {checked}");
+    assert!(text.contains("`doc_id` | `ref(receipt)`"), "{text}");
+}

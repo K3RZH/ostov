@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
     JournalPage, ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult,
-    ReportQuery, Saved, SchemaPlan, SessionInfo, UserInfo,
+    ReportQuery, Saved, SchemaPlan, SessionInfo, TrialPost, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -63,6 +63,13 @@ pub trait Engine: Send + Sync {
     }
     fn unpost(&self, _document: &str, _id: i64) -> EngineResult<Saved> {
         Err(EngineError::not_implemented("Unpost"))
+    }
+
+    /// Пробное проведение (К-19): запись и «Провести» в транзакции, которая откатывается.
+    /// Не удалось бы провести — та же ошибка, что у настоящего проведения. Только локально:
+    /// режим тестирования конфигурации.
+    fn trial_post(&self, _document: &str, _data: &ObjectData) -> EngineResult<TrialPost> {
+        Err(EngineError::not_implemented("TrialPost"))
     }
 
     fn run_report(&self, _query: &ReportQuery) -> EngineResult<ListPage> {

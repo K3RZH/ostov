@@ -193,6 +193,34 @@ impl AccumulationRegister {
             .collect())
     }
 
+    /// Движения документа, как они лежат в регистре.
+    pub fn movements_of(
+        &self,
+        db: &mut dyn Driver,
+        recorder: &str,
+        recorder_id: i64,
+    ) -> Result<Vec<Movement>, CoreError> {
+        self.recorded(db, recorder, recorder_id)?
+            .into_iter()
+            .map(|(sign, key, amounts, _)| {
+                Ok(Movement {
+                    kind: if sign < 0 {
+                        MovementKind::Issue
+                    } else {
+                        MovementKind::Receipt
+                    },
+                    dims: crate::object::read_fields(&self.dims, key.into_iter())?,
+                    resources: self
+                        .resources
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .zip(amounts)
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
     /// Заменяет движения документа новыми и пересчитывает итоги.
     /// Если итог уйдёт в минус, возвращает ошибку — вызывающий откатывает транзакцию.
     pub fn replace(

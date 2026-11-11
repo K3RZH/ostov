@@ -359,3 +359,46 @@ fn users_on_postgres() {
         ErrorCode::Validation
     );
 }
+
+#[test]
+#[cfg_attr(not(pg_url), ignore = "нужен OSTOV_PG_URL")]
+fn trial_post_on_postgres() {
+    let Some(engine) = install("ostov_t_trial") else {
+        return;
+    };
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &receipt("2026-02-01", mill, main, &[(flour, 10_000, 100)]),
+            PostAction::Post,
+        )
+        .unwrap();
+    let trial = engine
+        .trial_post("issue", &issue("2026-02-02", main, flour, 4_000))
+        .unwrap();
+    let b = &trial.balances[0];
+    assert_eq!(b.before["qty"], dec(10_000, 3));
+    assert_eq!(b.after["qty"], dec(6_000, 3));
+    assert_eq!(
+        engine
+            .list(&ListQuery {
+                object: "issue".into(),
+                size: 10,
+                ..ListQuery::default()
+            })
+            .unwrap()
+            .total,
+        Some(0)
+    );
+    let saved = engine
+        .save(
+            "issue",
+            &issue("2026-02-02", main, flour, 4_000),
+            PostAction::Post,
+        )
+        .unwrap();
+    assert_eq!(saved.number, Some(1));
+}

@@ -1,11 +1,12 @@
-//! Программа командной строки `ostov`: `ostov check [папка]` и `ostov stubs [папка]`.
+//! Программа командной строки `ostov`: `ostov check|stubs|schema [папка]`.
 
 use std::fmt::Display;
 use std::path::Path;
 use std::process::ExitCode;
 
 const DEFAULT_CONFIG_DIR: &str = "config";
-const USAGE: &str = "использование: ostov check|stubs [папка конфигурации, по умолчанию config]";
+const USAGE: &str =
+    "использование: ostov check|stubs|schema [папка конфигурации, по умолчанию config]";
 /// Код выхода при неверных аргументах, отличный от «в конфигурации ошибки».
 const USAGE_EXIT_CODE: u8 = 2;
 
@@ -21,10 +22,23 @@ fn main() -> ExitCode {
         ["check", dir] => check(Path::new(dir)),
         ["stubs"] => stubs(Path::new(DEFAULT_CONFIG_DIR)),
         ["stubs", dir] => stubs(Path::new(dir)),
+        ["schema"] => schema(Path::new(DEFAULT_CONFIG_DIR)),
+        ["schema", dir] => schema(Path::new(dir)),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(USAGE_EXIT_CODE)
         }
+    }
+}
+
+/// Описание схемы базы для внешних отчётов (Markdown в stdout).
+fn schema(dir: &Path) -> ExitCode {
+    match ostov_meta::load(dir) {
+        Ok(config) => {
+            print!("{}", ostov_core::local::describe_schema(&config));
+            ExitCode::SUCCESS
+        }
+        Err(errors) => failure(&errors),
     }
 }
 

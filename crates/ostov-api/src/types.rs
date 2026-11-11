@@ -179,6 +179,31 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
 }
 
+/// Пробное проведение (К-19): что записало бы «Провести». База не меняется.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrialPost {
+    pub moves: Vec<TrialMove>,
+    /// Остатки по каждому затронутому ключу регистра до и после проведения.
+    pub balances: Vec<TrialBalance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialMove {
+    pub register: String,
+    /// `true` — приход, `false` — расход.
+    pub receipt: bool,
+    pub dims: Fields,
+    pub resources: Fields,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialBalance {
+    pub register: String,
+    pub dims: Fields,
+    pub before: Fields,
+    pub after: Fields,
+}
+
 /// Что сделает с базой открытие с этой конфигурацией (СТ-50): база при этом не меняется.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaPlan {
