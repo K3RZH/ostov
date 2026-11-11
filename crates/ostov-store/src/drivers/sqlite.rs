@@ -42,7 +42,11 @@ pub struct SqliteDriver {
 impl SqliteDriver {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        // Кэш 64 МБ вместо 2 МБ: на базе в миллионы движений страницы индексов регистра
+        // при проведении иначе всё время дочитываются (НТ-П14).
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA cache_size = -65536;",
+        )?;
         add_functions(&conn)?;
         Ok(Self {
             conn,
