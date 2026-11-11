@@ -90,6 +90,13 @@ pub fn error(e: CoreError) -> EngineError {
         CoreError::NegativeBalance(_) | CoreError::Invalid(_) => ErrorCode::Validation,
         CoreError::Query(ostov_sql::SqlError::NoRight { .. }) => ErrorCode::Forbidden,
         CoreError::Query(_) => ErrorCode::Validation,
+        CoreError::Store(ostov_store::StoreError::Busy(_)) => {
+            return EngineError {
+                code: ErrorCode::Unavailable,
+                message: "Эти данные сейчас меняет другой пользователь. Повторите действие.".into(),
+                details: e.to_string(),
+            };
+        }
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.
             return EngineError {

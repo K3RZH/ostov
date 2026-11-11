@@ -164,7 +164,14 @@ impl From<postgres::Error> for StoreError {
     fn from(e: postgres::Error) -> Self {
         // Сам `postgres::Error` пишет только «db error»; причина — в ответе сервера.
         match e.as_db_error() {
-            Some(db) => Self::Database(format!("{} ({})", db.message(), db.code().code())),
+            Some(db) => {
+                let text = format!("{} ({})", db.message(), db.code().code());
+                // 40P01 взаимная блокировка, 40001 сериализация, 55P03 не дождались блокировки.
+                match db.code().code() {
+                    "40P01" | "40001" | "55P03" => Self::Busy(text),
+                    _ => Self::Database(text),
+                }
+            }
             None => Self::Database(e.to_string()),
         }
     }

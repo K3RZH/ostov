@@ -218,7 +218,14 @@ impl AccumulationRegister {
         // Самый ранний день, который меняется: старая дата документа или новая.
         let mut earliest = period.unwrap_or(NO_DATE).to_owned();
 
-        for (sign, key, amounts, old) in self.recorded(db, recorder, recorder_id)? {
+        let recorded = self.recorded(db, recorder, recorder_id)?;
+        let mut keys: Vec<Key> = recorded.iter().map(|(_, key, _, _)| key.clone()).collect();
+        for movement in movements {
+            keys.push(self.key(&movement.dims)?);
+        }
+        self.lock_keys(db, keys)?;
+
+        for (sign, key, amounts, old) in recorded {
             self.add(db, &key, &amounts, -sign)?;
             push_unique(&mut touched, key);
             earliest = earliest.min(old);
@@ -391,6 +398,39 @@ impl AccumulationRegister {
             .map(|(i, name)| format!("{name} = {}", d.placeholder(from + i)))
             .collect::<Vec<_>>()
             .join(" AND ")
+    }
+
+    /// Итоги ключей документа — под блокировку до конца транзакции, всегда в одном порядке:
+    /// иначе два документа с ключами A, B и B, A ждали бы друг друга вечно. Строку итога
+    /// нового ключа создаём заранее, чтобы и её было что блокировать.
+    fn lock_keys(&self, db: &mut dyn Driver, mut keys: Vec<Key>) -> Result<(), CoreError> {
+        keys.sort_by_cached_key(|key| format!("{key:?}"));
+        keys.dedup();
+        let insert = {
+            let d = db.dialect();
+            let cols: Vec<String> = names(d, &self.dims)
+                .into_iter()
+                .chain(names(d, &self.resources))
+                .collect();
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
+                d.quote_ident(&self.totals()),
+                cols.join(", "),
+                placeholders(d, 1, cols.len()),
+            )
+        };
+        let zeros: Vec<Value> = self
+            .zeros()?
+            .iter()
+            .map(|z| Value::Int(z.units()))
+            .collect();
+        for key in &keys {
+            let mut values = key.clone();
+            values.extend(zeros.iter().cloned());
+            db.execute(&insert, &values)?;
+            self.totals_row(db, key, true)?;
+        }
+        Ok(())
     }
 
     fn totals_row(

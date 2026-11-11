@@ -17,6 +17,9 @@ pub type Row = Vec<Value>;
 #[derive(Debug)]
 pub enum StoreError {
     Database(String),
+    /// Данные держит другая транзакция: взаимная блокировка, база занята, не дождались
+    /// блокировки. Действие можно повторить.
+    Busy(String),
     /// Тип колонки или параметра, которого нет в `Value` (например float).
     UnsupportedType(String),
 }
@@ -25,6 +28,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "ошибка базы данных: {msg}"),
+            Self::Busy(msg) => write!(f, "база занята другой транзакцией: {msg}"),
             Self::UnsupportedType(what) => write!(f, "неподдерживаемый тип: {what}"),
         }
     }

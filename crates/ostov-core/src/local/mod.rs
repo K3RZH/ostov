@@ -269,6 +269,21 @@ fn query_value(column: &ostov_sql::Column, value: &crate::FieldValue) -> ostov_a
     }
 }
 
+/// Сколько раз пробуем запись, если данные держала другая транзакция (НТ-Н3).
+const BUSY_TRIES: usize = 3;
+
+/// Запись откатывается целиком, поэтому её можно просто повторить.
+fn busy_retry<T>(mut f: impl FnMut() -> EngineResult<T>) -> EngineResult<T> {
+    for _ in 1..BUSY_TRIES {
+        match f() {
+            Err(e) if e.code == ErrorCode::Unavailable && e.details.starts_with("база занята") =>
+                {}
+            done => return done,
+        }
+    }
+    f()
+}
+
 fn broken() -> EngineError {
     EngineError::new(
         ErrorCode::Internal,
@@ -901,7 +916,7 @@ impl Engine for LocalEngine {
         self.guarded("Save", || {
             self.need_save(object, data, post)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_save(object, data, post)
+            busy_retry(|| self.run_save(object, data, post))
         })
     }
 
@@ -912,7 +927,7 @@ impl Engine for LocalEngine {
                     .map_err(|e| numbered(n, e))?;
             }
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_save_batch(items)
+            busy_retry(|| self.run_save_batch(items))
         })
     }
 
@@ -926,7 +941,7 @@ impl Engine for LocalEngine {
         self.guarded("MarkDeleted", || {
             self.need(object, Need::Delete)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_mark_deleted(object, id, version, deleted)
+            busy_retry(|| self.run_mark_deleted(object, id, version, deleted))
         })
     }
 
@@ -934,7 +949,7 @@ impl Engine for LocalEngine {
         self.guarded("Post", || {
             self.need(document, Need::Post)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_post(document, id)
+            busy_retry(|| self.run_post(document, id))
         })
     }
 
@@ -942,7 +957,7 @@ impl Engine for LocalEngine {
         self.guarded("Unpost", || {
             self.need(document, Need::Unpost)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_unpost(document, id)
+            busy_retry(|| self.run_unpost(document, id))
         })
     }
 
@@ -1471,6 +1486,7 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
     check_config(db, config)?;
     crate::closing::create_table(db)?;
+    crate::object::document::create_numbers_table(db)?;
     settings::create_table(db)?;
     ostov_sec::create_tables(db)?;
     if !schema::recorded(db)? {

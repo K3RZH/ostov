@@ -112,8 +112,16 @@ impl Driver for SqliteDriver {
         Ok(result)
     }
 
+    // Внешняя транзакция сразу берёт запись: иначе в WAL вторая сессия, прочитав, получает
+    // «база занята» без ожидания, когда первая уже пишет.
     fn begin(&mut self) -> Result<(), StoreError> {
-        self.conn.execute_batch(&self.depth.begin())?;
+        let sql = self.depth.begin();
+        let sql = if sql == "BEGIN" {
+            "BEGIN IMMEDIATE".to_owned()
+        } else {
+            sql
+        };
+        self.conn.execute_batch(&sql)?;
         self.depth.entered();
         Ok(())
     }
@@ -155,7 +163,12 @@ fn from_sql(value: ValueRef<'_>, column: &str) -> Result<Value, StoreError> {
 
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        Self::Database(e.to_string())
+        match e.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                Self::Busy(e.to_string())
+            }
+            _ => Self::Database(e.to_string()),
+        }
     }
 }
 
