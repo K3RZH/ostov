@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use ostov_api::SchemaChange;
 use ostov_store::{Driver, Value};
 
 use super::BASE_TABLE;
@@ -60,14 +61,20 @@ pub(super) fn record(db: &mut dyn Driver, config: &Config) -> Result<(), CoreErr
 
 /// Доводит таблицы до конфигурации: новые объекты, табличные части и поля добавляются.
 /// Смена типа поля и перестройка регистра с движениями отклоняются: данные пришлось бы терять.
-pub(super) fn restructure(db: &mut dyn Driver, config: &Config) -> Result<(), CoreError> {
+/// Каждый шаг записывается в `steps`: по ним строится план (СТ-50).
+pub(super) fn restructure(
+    db: &mut dyn Driver,
+    config: &Config,
+    steps: &mut Vec<SchemaChange>,
+) -> Result<(), CoreError> {
     let stored = load(db)?;
     for c in config.catalogs.values() {
         match stored.get(c.table()) {
-            Some(columns) => add_fields(db, c.table(), c.fields(), columns)?,
+            Some(columns) => add_fields(db, c.table(), c.fields(), columns, steps)?,
             None => {
                 c.create_table(db)?;
                 save(db, c.table(), c.fields(), "")?;
+                steps.push(new_table(c.table()));
             }
         }
     }
@@ -76,36 +83,56 @@ pub(super) fn restructure(db: &mut dyn Driver, config: &Config) -> Result<(), Co
         let Some(columns) = stored.get(kind.table()) else {
             kind.create_tables(db)?;
             save(db, kind.table(), kind.header(), "")?;
+            steps.push(new_table(kind.table()));
             for part in kind.parts() {
-                save(db, &kind.part_table(part), part.fields(), "")?;
+                let table = kind.part_table(part);
+                save(db, &table, part.fields(), "")?;
+                steps.push(new_table(&table));
             }
             continue;
         };
-        add_fields(db, kind.table(), kind.header(), columns)?;
+        add_fields(db, kind.table(), kind.header(), columns, steps)?;
         for part in kind.parts() {
             let table = kind.part_table(part);
             match stored.get(&table) {
-                Some(columns) => add_fields(db, &table, part.fields(), columns)?,
+                Some(columns) => add_fields(db, &table, part.fields(), columns, steps)?,
                 None => {
                     kind.create_part_table(db, part)?;
                     save(db, &table, part.fields(), "")?;
+                    steps.push(new_table(&table));
                 }
             }
         }
     }
     for register in config.registers.values() {
-        restructure_register(db, register, stored.get(register.name()))?;
+        restructure_register(db, register, stored.get(register.name()), steps)?;
     }
     Ok(())
+}
+
+fn new_table(table: &str) -> SchemaChange {
+    SchemaChange::NewTable {
+        table: table.to_owned(),
+    }
+}
+
+fn new_field(table: &str, field: &FieldDef) -> SchemaChange {
+    SchemaChange::NewField {
+        table: table.to_owned(),
+        field: field.name.clone(),
+        kind: code(field),
+    }
 }
 
 fn restructure_register(
     db: &mut dyn Driver,
     reg: &AccumulationRegister,
     stored: Option<&Columns>,
+    steps: &mut Vec<SchemaChange>,
 ) -> Result<(), CoreError> {
     let Some(stored) = stored else {
         reg.create_tables(db)?;
+        steps.push(new_table(reg.name()));
         return save_register(db, reg);
     };
     let wanted: Columns = roles(reg).collect();
@@ -133,6 +160,9 @@ fn restructure_register(
         reg.drop_tables(db)?;
         reg.create_tables(db)?;
         forget(db, reg.name())?;
+        steps.push(SchemaChange::RebuiltRegister {
+            register: reg.name().to_owned(),
+        });
         return save_register(db, reg);
     }
 
@@ -156,6 +186,7 @@ fn restructure_register(
             db.execute(&sql, &[])?;
         }
         save(db, reg.name(), std::slice::from_ref(r), RES)?;
+        steps.push(new_field(reg.name(), r));
     }
     Ok(())
 }
@@ -165,6 +196,7 @@ fn add_fields(
     table: &str,
     fields: &[FieldDef],
     stored: &Columns,
+    steps: &mut Vec<SchemaChange>,
 ) -> Result<(), CoreError> {
     for field in fields {
         let kind = code(field);
@@ -182,6 +214,7 @@ fn add_fields(
                 };
                 db.execute(&sql, &[])?;
                 save(db, table, std::slice::from_ref(field), "")?;
+                steps.push(new_field(table, field));
             }
         }
     }

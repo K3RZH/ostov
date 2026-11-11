@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
     JournalPage, ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult,
-    ReportQuery, Saved, SessionInfo, UserInfo,
+    ReportQuery, Saved, SchemaPlan, SessionInfo, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -160,6 +160,11 @@ pub trait Connector: Send + Sync {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         Err(EngineError::not_implemented("CreateLocal"))
+    }
+    /// План изменений базы `path` под конфигурацию этого коннектора (СТ-50, К-6): что
+    /// добавится и не откажет ли открытие. Ничего не записывает.
+    fn plan_local(&self, _path: &str) -> EngineResult<SchemaPlan> {
+        Err(EngineError::not_implemented("PlanLocal"))
     }
     fn connect_remote(&self, _address: &str) -> EngineResult<Arc<dyn Engine>> {
         Err(EngineError::not_implemented("ConnectRemote"))

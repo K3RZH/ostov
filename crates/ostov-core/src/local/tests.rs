@@ -2584,3 +2584,80 @@ fn journal_page_says_when_it_ends() {
         assert_eq!(paged, all, "size {size}");
     }
 }
+
+#[test]
+fn plan_shows_changes_without_touching_base() {
+    use ostov_api::SchemaChange;
+
+    let base = Base::new("plan");
+    drop(stocked(&base).0);
+    let changed = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("brand", crate::FieldKind::Text));
+        m.registers[0].resources.push(crate::FieldDef::new(
+            "amount",
+            crate::FieldKind::Decimal { scale: 2 },
+        ));
+        let mut units = m.catalogs[0].clone();
+        units.name = "units".into();
+        units.title = "Единицы".into();
+        m.catalogs.push(units);
+    });
+    let plan = changed.plan_local(&base.path).unwrap();
+    assert_eq!(plan.refused, None);
+    assert_eq!(
+        plan.changes,
+        [
+            SchemaChange::NewField {
+                table: "goods".into(),
+                field: "brand".into(),
+                kind: "text".into()
+            },
+            SchemaChange::NewTable {
+                table: "units".into()
+            },
+            SchemaChange::NewField {
+                table: "stock".into(),
+                field: "amount".into(),
+                kind: "decimal(2)".into()
+            },
+        ]
+    );
+    // План ничего не записал: тот же план второй раз, а открытие делает ровно его.
+    assert_eq!(changed.plan_local(&base.path).unwrap(), plan);
+    drop(changed.open_local(&base.path, None).unwrap());
+    let after = changed.plan_local(&base.path).unwrap();
+    assert!(
+        after.changes.is_empty() && after.refused.is_none(),
+        "{after:?}"
+    );
+
+    // Открытую базу план не трогает.
+    let open = changed.open_local(&base.path, None).unwrap();
+    assert_eq!(
+        changed.plan_local(&base.path).unwrap_err().code,
+        ErrorCode::AlreadyOpen
+    );
+    drop(open);
+}
+
+#[test]
+fn plan_explains_refusal() {
+    let base = Base::new("plan-refused");
+    drop(stocked(&base).0);
+    let changed = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("brand", crate::FieldKind::Text));
+        m.catalogs[0].fields[1].kind = crate::FieldKind::Int;
+    });
+    let plan = changed.plan_local(&base.path).unwrap();
+    let why = plan.refused.unwrap();
+    assert!(why.contains("unit"), "{why}");
+    // Отказ — и база как была: старая конфигурация открывает её с данными.
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(report(&*engine, "stock_balance", &[]).len(), 1);
+}

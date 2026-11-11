@@ -1356,6 +1356,27 @@ impl Connector for LocalConnector {
         ))
     }
 
+    // Всё то же, что сделает открытие, но в транзакции, которая откатывается.
+    fn plan_local(&self, path: &str) -> EngineResult<ostov_api::SchemaPlan> {
+        if !Path::new(path).exists() {
+            return Err(not_found(path));
+        }
+        let _lock = lock_base(path)?;
+        let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
+        base_config(&mut db, path)?;
+        let config = self.config()?;
+        let mut changes = Vec::new();
+        db.begin().map_err(|e| error(e.into()))?;
+        let result = upgrade_noting(&mut db, &config, &mut changes);
+        db.rollback().map_err(|e| error(e.into()))?;
+        let refused = match result {
+            Ok(()) => None,
+            Err(e @ crate::CoreError::Incompatible(_)) => Some(e.to_string()),
+            Err(e) => return Err(error(e)),
+        };
+        Ok(ostov_api::SchemaPlan { changes, refused })
+    }
+
     fn create_local(
         &self,
         path: &str,
@@ -1484,6 +1505,14 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    upgrade_noting(db, config, &mut Vec::new())
+}
+
+fn upgrade_noting(
+    db: &mut dyn Driver,
+    config: &Config,
+    steps: &mut Vec<ostov_api::SchemaChange>,
+) -> Result<(), crate::CoreError> {
     check_config(db, config)?;
     crate::closing::create_table(db)?;
     crate::object::document::create_numbers_table(db)?;
@@ -1493,7 +1522,7 @@ fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
         // Базы до реструктуризации создавались только под встроенный «Склад».
         schema::record(db, &warehouse()?)?;
     }
-    schema::restructure(db, config)?;
+    schema::restructure(db, config, steps)?;
     for doc in config.documents.values() {
         doc.kind.index_parts(db)?;
     }

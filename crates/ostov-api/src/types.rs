@@ -179,6 +179,27 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
 }
 
+/// Что сделает с базой открытие с этой конфигурацией (СТ-50): база при этом не меняется.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaPlan {
+    pub changes: Vec<SchemaChange>,
+    /// Почему открыть нельзя: изменение потеряло бы данные. Тогда `changes` до отказа.
+    pub refused: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SchemaChange {
+    /// Новый справочник, документ, табличная часть или регистр.
+    NewTable { table: String },
+    NewField {
+        table: String,
+        field: String,
+        kind: String,
+    },
+    /// Регистр без движений создаётся заново: сменились измерения или убран ресурс.
+    RebuiltRegister { register: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobId(pub String);
 
