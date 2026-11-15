@@ -2834,3 +2834,22 @@ fn trace_shows_commands_queries_and_rules() {
     assert_eq!(query.1.len(), 1);
     assert_eq!(query.2, 1);
 }
+
+/// Занятые данные ядро узнаёт по своей метке, а не по тексту ошибки базы.
+#[test]
+fn busy_store_error_is_retried_and_explained() {
+    let busy = super::convert::error(crate::CoreError::Store(ostov_store::StoreError::Busy(
+        "database is locked".into(),
+    )));
+    assert_eq!(busy.code, ErrorCode::Unavailable);
+    assert!(super::convert::is_busy(&busy), "{busy:?}");
+    assert!(
+        busy.message.contains("другой пользователь"),
+        "{}",
+        busy.message
+    );
+    let other = super::convert::error(crate::CoreError::Store(ostov_store::StoreError::Database(
+        "syntax error".into(),
+    )));
+    assert!(!super::convert::is_busy(&other));
+}

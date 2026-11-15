@@ -316,8 +316,7 @@ const BUSY_TRIES: usize = 3;
 fn busy_retry<T>(mut f: impl FnMut() -> EngineResult<T>) -> EngineResult<T> {
     for _ in 1..BUSY_TRIES {
         match f() {
-            Err(e) if e.code == ErrorCode::Unavailable && e.details.starts_with("база занята") =>
-                {}
+            Err(e) if convert::is_busy(&e) => {}
             done => return done,
         }
     }
