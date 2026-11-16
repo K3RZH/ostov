@@ -41,8 +41,40 @@ use crate::{
     in_transaction, posting,
 };
 
+/// Откуда ядро берёт соединение: своё (режим 1) или из пула сервера на время команды.
+enum Db {
+    Own(Mutex<Box<dyn Driver + Send>>),
+    Pool(Arc<crate::Pool>),
+}
+
+/// Соединение на время команды: своё под замком или взятое из пула.
+enum DbGuard<'a> {
+    Own(MutexGuard<'a, Box<dyn Driver + Send>>),
+    Pool(crate::pool::Pooled<'a>),
+}
+
+impl std::ops::Deref for DbGuard<'_> {
+    type Target = Box<dyn Driver + Send>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Own(db) => db,
+            Self::Pool(db) => db,
+        }
+    }
+}
+
+impl std::ops::DerefMut for DbGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Own(db) => db,
+            Self::Pool(db) => db,
+        }
+    }
+}
+
 pub struct LocalEngine {
-    db: Mutex<Box<dyn Driver + Send>>,
+    db: Db,
     config: Config,
     /// Вехи по токену списка; сбрасываются при любой записи.
     milestones: Mutex<HashMap<String, Milestones>>,
@@ -66,6 +98,19 @@ enum Object<'a> {
 impl LocalEngine {
     pub fn new(mut db: Box<dyn Driver + Send>, config: Config) -> Self {
         let users = ostov_sec::has_users(&mut *db).unwrap_or(false);
+        Self::with_db(Db::Own(Mutex::new(db)), users, config)
+    }
+
+    /// Ядро сессии сервера: соединение из общего пула на время каждой команды.
+    pub fn pooled(pool: Arc<crate::Pool>, config: Config) -> EngineResult<Self> {
+        let users = {
+            let mut db = pool.get().map_err(|e| error(e.into()))?;
+            ostov_sec::has_users(&mut **db).unwrap_or(false)
+        };
+        Ok(Self::with_db(Db::Pool(pool), users, config))
+    }
+
+    fn with_db(db: Db, users: bool, config: Config) -> Self {
         let titles = config
             .catalogs
             .iter()
@@ -75,7 +120,7 @@ impl LocalEngine {
             })
             .collect();
         Self {
-            db: Mutex::new(db),
+            db,
             titles,
             config,
             milestones: Mutex::new(HashMap::new()),
@@ -123,8 +168,13 @@ impl LocalEngine {
 
     // Если команда упала с паникой, транзакция уже откачена (см. `in_transaction`),
     // поэтому соединение можно брать и после «отравленного» замка.
-    fn db(&self) -> MutexGuard<'_, Box<dyn Driver + Send>> {
-        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    fn db(&self) -> EngineResult<DbGuard<'_>> {
+        match &self.db {
+            Db::Own(db) => Ok(DbGuard::Own(
+                db.lock().unwrap_or_else(PoisonError::into_inner),
+            )),
+            Db::Pool(pool) => pool.get().map(DbGuard::Pool).map_err(|e| error(e.into())),
+        }
     }
 
     fn milestones(&self) -> MutexGuard<'_, HashMap<String, Milestones>> {
@@ -509,7 +559,7 @@ impl LocalEngine {
             filter: fields_from_api(&q.filter)?,
         };
         let token = token(&q.object, &query)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let page = list_titled(
             &mut **db,
             source,
@@ -526,7 +576,7 @@ impl LocalEngine {
         let (object, query) = parse_token(token)?;
         self.need(&object, Need::Read)?;
         let source = self.source(&object)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let mut cache = self.milestones();
         if !cache.contains_key(token) {
             let built =
@@ -543,7 +593,7 @@ impl LocalEngine {
     }
 
     fn run_get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
-        let mut db = self.db();
+        let mut db = self.db()?;
         let missing =
             || EngineError::new(ErrorCode::NotFound, format!("в {object} нет записи {id}"));
         match self.object(object)? {
@@ -626,7 +676,7 @@ impl LocalEngine {
 
     fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
         let (target, fields, parts) = self.prepare_save(object, data, post)?;
-        let mut guard = self.db();
+        let mut guard = self.db()?;
         let db = &mut **guard;
         let saved = in_transaction(db, |db| {
             self.save_in(db, object, data, post, target, &fields, &parts)
@@ -646,7 +696,7 @@ impl LocalEngine {
         let cfg = self.document(document)?;
         let registers = self.config.registers_of(cfg);
         let (target, fields, parts) = self.prepare_save(document, data, PostAction::Post)?;
-        let mut guard = self.db();
+        let mut guard = self.db()?;
         let db = &mut **guard;
         db.begin().map_err(|e| error(e.into()))?;
         let tried = || -> Result<_, crate::CoreError> {
@@ -733,7 +783,7 @@ impl LocalEngine {
                 .map_err(|e| numbered(n, e))?;
             prepared.push(ready);
         }
-        let mut guard = self.db();
+        let mut guard = self.db()?;
         let db = &mut **guard;
         let mut failed = 0;
         let saved = in_transaction(db, |db| {
@@ -909,7 +959,7 @@ impl LocalEngine {
         deleted: bool,
     ) -> EngineResult<Saved> {
         let target = self.object(object)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let action = if deleted {
             Action::MarkDeleted
         } else {
@@ -930,7 +980,7 @@ impl LocalEngine {
 
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
         let can_read = self.can_read();
         in_transaction(&mut **db, |db| {
@@ -951,7 +1001,7 @@ impl LocalEngine {
 
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
         in_transaction(&mut **db, |db| {
             posting::unpost_from(db, &cfg.kind, &registers, id)?;
@@ -1112,7 +1162,7 @@ impl Engine for LocalEngine {
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
-            let mut db = self.db();
+            let mut db = self.db()?;
             let trace = self.trace.as_ref();
             let found = crate::query::run(
                 &mut **db,
@@ -1160,14 +1210,14 @@ impl Engine for LocalEngine {
     fn get_settings(&self, key: &str) -> EngineResult<Option<ostov_api::Fields>> {
         self.guarded("GetSettings", || {
             self.need_system(|_| true, "настройки")?;
-            settings::get(&mut **self.db(), key).map_err(error)
+            settings::get(&mut **self.db()?, key).map_err(error)
         })
     }
 
     fn save_settings(&self, key: &str, values: &ostov_api::Fields) -> EngineResult<()> {
         self.guarded("SaveSettings", || {
             self.need_system(|_| true, "настройки")?;
-            settings::save(&mut **self.db(), key, values).map_err(error)
+            settings::save(&mut **self.db()?, key, values).map_err(error)
         })
     }
 
@@ -1178,7 +1228,7 @@ impl Engine for LocalEngine {
     fn closing_date(&self) -> EngineResult<Option<String>> {
         self.guarded("GetClosingDate", || {
             self.need_system(|_| true, "дата закрытия")?;
-            crate::closing::closing_date(&mut **self.db()).map_err(error)
+            crate::closing::closing_date(&mut **self.db()?).map_err(error)
         })
     }
 
@@ -1189,7 +1239,7 @@ impl Engine for LocalEngine {
                 Some(d) => format!("период закрыт по {}", ru_date(d)),
                 None => "период открыт".to_owned(),
             };
-            let mut db = self.db();
+            let mut db = self.db()?;
             in_transaction(&mut **db, |db| {
                 crate::closing::set_closing_date(db, date)?;
                 self.journal(db, Action::ClosingDateSet, "", None, &[], &note)
@@ -1235,7 +1285,7 @@ impl LocalEngine {
             }
         }
 
-        let mut db = self.db();
+        let mut db = self.db()?;
         let mut rows: Vec<ostov_api::Fields> = match kind {
             "balance" => register
                 .balances(&mut **db, date("date")?.as_deref(), &filter)

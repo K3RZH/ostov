@@ -91,7 +91,7 @@ impl LocalEngine {
             size,
             ..ostov_sec::JournalQuery::default()
         };
-        let page = ostov_sec::journal::list(&mut **self.db(), &query).map_err(sec_error)?;
+        let page = ostov_sec::journal::list(&mut **self.db()?, &query).map_err(sec_error)?;
         let entries = page
             .rows
             .into_iter()

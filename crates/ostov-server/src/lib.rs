@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
-pub use hub::{Base, Connect, Hub};
+pub use hub::{Base, CONNECTIONS, Connect, Hub};
 pub use tls::{CERT_FILE, KEY_FILE, Tls};
 
 /// Принимает клиентов на `listener` до сигнала `shutdown`. Без TLS не работает (СТ-33).

@@ -18,7 +18,7 @@ use ostov_server::{Base, CERT_FILE, Connect, Hub, Tls, serve};
 use ostov_store::Driver;
 
 const USAGE: &str = "ostov-server --config <папка конфигурации> [--listen 0.0.0.0:7700] \
-[--tls <папка сертификата>] [--host <имя>]... [--query-timeout <секунд, 30>]\nБаза: переменная OSTOV_DB_URL — строка \
+[--tls <папка сертификата>] [--host <имя>]... [--query-timeout <секунд, 30>] [--db-connections <число, 10>]\nБаза: переменная OSTOV_DB_URL — строка \
 подключения PostgreSQL или sqlite:<файл>.\nСброс пароля: ostov-server --config <папка> \
 --reset-password <логин> — новый пароль спросит с клавиатуры, сервер не запускается.";
 
@@ -33,6 +33,8 @@ struct Args {
     reset_password: Option<String>,
     /// Сколько может идти один запрос к базе (СТ-51).
     query_timeout: std::time::Duration,
+    /// Соединений с базой на все сессии.
+    connections: usize,
 }
 
 impl Args {
@@ -43,6 +45,7 @@ impl Args {
         let mut hosts = Vec::new();
         let mut reset_password = None;
         let mut query_timeout = ostov_store::drivers::QUERY_TIMEOUT;
+        let mut connections = ostov_server::CONNECTIONS;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("после {arg} нужно значение"));
             match arg.as_str() {
@@ -65,6 +68,14 @@ impl Args {
                         .ok_or(format!("«{raw}» — не число секунд больше нуля"))?;
                     query_timeout = std::time::Duration::from_secs(secs);
                 }
+                "--db-connections" => {
+                    let raw = value()?;
+                    connections = raw
+                        .parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or(format!("«{raw}» — не число соединений больше нуля"))?;
+                }
                 "--help" | "-h" => return Err(USAGE.to_owned()),
                 other => return Err(format!("непонятный параметр {other}\n{USAGE}")),
             }
@@ -85,6 +96,7 @@ impl Args {
             hosts,
             reset_password,
             query_timeout,
+            connections,
         })
     }
 }
@@ -159,7 +171,8 @@ fn run() -> Result<(), String> {
     } else {
         "встроенная"
     };
-    let mut base = Base::new(database(url, args.query_timeout), model);
+    let mut base =
+        Base::new(database(url, args.query_timeout), model).with_connections(args.connections);
     if let Some(rules) = rules {
         base = base.with_rules(rules);
     }
@@ -257,6 +270,10 @@ mod tests {
         let slow = parse(&["--config", "c", "--query-timeout", "90"]).unwrap();
         assert_eq!(slow.query_timeout, std::time::Duration::from_secs(90));
         assert!(parse(&["--config", "c", "--query-timeout", "0"]).is_err());
+        assert_eq!(args.connections, 10);
+        let many = parse(&["--config", "c", "--db-connections", "40"]).unwrap();
+        assert_eq!(many.connections, 40);
+        assert!(parse(&["--config", "c", "--db-connections", "0"]).is_err());
         let reset = parse(&["--config", "c", "--reset-password", "boss"]).unwrap();
         assert_eq!(reset.reset_password.as_deref(), Some("boss"));
 

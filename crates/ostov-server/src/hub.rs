@@ -1,11 +1,13 @@
-//! Сессии сервера: каждому вошедшему клиенту — свой экземпляр ядра со своим соединением
-//! с базой и своим пользователем. Ядро так и знает одного пользователя на экземпляр,
-//! а одновременную работу разводит база (блокировки строк в ядре).
+//! Сессии сервера: каждому вошедшему клиенту — свой экземпляр ядра со своим пользователем.
+//! Соединения с базой общие: команда берёт соединение из пула и сразу отдаёт, так что сотня
+//! сессий не держит сотню соединений. Одновременную работу разводит база (блокировки в ядре).
 //!
 //! Всё здесь синхронное и зовётся из рабочих потоков (`spawn_blocking`), не из асинхронных.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use ostov_core::Pool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ostov_api::{
@@ -24,7 +26,12 @@ pub struct Base {
     connect: Connect,
     model: ostov_model::Config,
     rules: Option<Arc<dyn Rules + Send + Sync>>,
+    /// Сколько соединений с базой держит сервер на все сессии.
+    connections: usize,
 }
+
+/// Соединений в пуле по умолчанию.
+pub const CONNECTIONS: usize = 10;
 
 impl Base {
     pub fn new(connect: Connect, model: ostov_model::Config) -> Self {
@@ -32,7 +39,14 @@ impl Base {
             connect,
             model,
             rules: None,
+            connections: CONNECTIONS,
         }
+    }
+
+    /// Размер пула соединений на все сессии (по умолчанию 10).
+    pub fn with_connections(mut self, connections: usize) -> Self {
+        self.connections = connections.max(1);
+        self
     }
 
     /// Правила документов не из Rust, например Python.
@@ -57,8 +71,13 @@ impl Base {
         })
     }
 
-    fn engine(&self) -> EngineResult<LocalEngine> {
-        Ok(LocalEngine::new(self.connect()?, self.config()?))
+    fn pool(&self) -> EngineResult<Pool> {
+        let connect = Arc::clone(&self.connect);
+        Pool::new(Box::new(move || connect()), self.connections).map_err(|e| EngineError {
+            code: ErrorCode::Unavailable,
+            message: "Сервер не может подключиться к базе данных.".into(),
+            details: e.to_string(),
+        })
     }
 
     /// Сброс пароля из консоли (`ostov-server --reset-password`): пустую базу не создаёт.
@@ -93,8 +112,8 @@ impl Base {
 
 pub struct Hub {
     base: Base,
-    /// Соединение для вопросов без сессии: есть ли пользователи.
-    lobby: Mutex<Option<Box<dyn Driver + Send>>>,
+    /// Соединения на все сессии и на вопросы без сессии (есть ли пользователи).
+    pool: Arc<Pool>,
     sessions: Mutex<Sessions>,
     engines: Mutex<HashMap<String, Arc<LocalEngine>>>,
 }
@@ -102,13 +121,17 @@ pub struct Hub {
 impl Hub {
     pub fn start(base: Base) -> EngineResult<Self> {
         base.prepare()?;
-        let lobby = Mutex::new(Some(base.connect()?));
+        let pool = Arc::new(base.pool()?);
         Ok(Self {
             base,
-            lobby,
+            pool,
             sessions: Mutex::new(Sessions::default()),
             engines: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn engine(&self) -> EngineResult<LocalEngine> {
+        LocalEngine::pooled(Arc::clone(&self.pool), self.base.config()?)
     }
 
     /// В режиме 2 вход нужен всегда; `first_run` — пользователей ещё нет (СТ-36).
@@ -149,7 +172,7 @@ impl Hub {
     }
 
     pub fn login(&self, login: &str, password: &str) -> EngineResult<(SessionInfo, String)> {
-        let engine = self.base.engine()?;
+        let engine = self.engine()?;
         let info = engine.login(login, password)?;
         self.open(engine, info)
     }
@@ -159,7 +182,7 @@ impl Hub {
         login: &str,
         password: &str,
     ) -> EngineResult<(SessionInfo, String)> {
-        let engine = self.base.engine()?;
+        let engine = self.engine()?;
         let info = engine.create_first_admin(login, password)?;
         self.open(engine, info)
     }
@@ -190,14 +213,15 @@ impl Hub {
     /// в асинхронном потоке, поэтому сервер зовёт это в рабочем потоке при остановке.
     pub fn close(&self) {
         lock(&self.engines).clear();
-        lock(&self.lobby).take();
+        self.pool.clear();
     }
 
     fn has_users(&self) -> EngineResult<bool> {
-        let mut lobby = lock(&self.lobby);
-        let db = lobby
-            .as_mut()
-            .ok_or_else(|| EngineError::new(ErrorCode::Unavailable, "Сервер остановлен."))?;
+        let mut db = self.pool.get().map_err(|e| EngineError {
+            code: ErrorCode::Unavailable,
+            message: "Сервер не может подключиться к базе данных.".into(),
+            details: e.to_string(),
+        })?;
         ostov_sec::has_users(&mut **db).map_err(|e| EngineError {
             code: ErrorCode::Unavailable,
             message: "Сервер не может прочитать базу данных.".into(),

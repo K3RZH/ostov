@@ -59,7 +59,9 @@ fn start(name: &str, connect: Option<Connect>) -> Server {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let (ready, port) = mpsc::channel();
     let thread = std::thread::spawn(move || {
-        let hub = Arc::new(Hub::start(Base::new(connect, warehouse_model())).unwrap());
+        // Три соединения на десять клиентов: пул работает на пределе.
+        let base = Base::new(connect, warehouse_model()).with_connections(3);
+        let hub = Arc::new(Hub::start(base).unwrap());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
