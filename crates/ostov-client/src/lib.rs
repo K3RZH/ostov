@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use ostov_api::{
     BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
     JournalPage, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
-    PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserInfo,
+    PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserFields, UserInfo,
 };
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_from_pb, fields_to_pb, from_status, pb, session_from_pb};
@@ -341,6 +341,23 @@ impl Engine for RemoteEngine {
         self.call(
             u,
             |mut c, r| async move { c.admin_set_user_active(r).await },
+        )?;
+        Ok(())
+    }
+
+    fn admin_user_fields(&self, login: &str) -> EngineResult<UserFields> {
+        let u = pb::UserLogin {
+            login: login.to_owned(),
+        };
+        let reply = self.call(u, |mut c, r| async move { c.admin_user_fields(r).await })?;
+        ostov_proto::user_fields_from_pb(reply.fields)
+    }
+
+    fn admin_set_user_fields(&self, login: &str, fields: &UserFields) -> EngineResult<()> {
+        let u = ostov_proto::user_fields_to_pb(login, fields.clone());
+        self.call(
+            u,
+            |mut c, r| async move { c.admin_set_user_fields(r).await },
         )?;
         Ok(())
     }

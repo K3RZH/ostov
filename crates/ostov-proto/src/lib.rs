@@ -47,7 +47,10 @@ mod status;
 #[cfg(test)]
 mod tests;
 
-pub use convert::{fields_from_pb, fields_to_pb, post_action_from_pb, session_from_pb};
+pub use convert::{
+    fields_from_pb, fields_to_pb, post_action_from_pb, session_from_pb, user_fields_from_pb,
+    user_fields_to_pb,
+};
 pub use status::{from_status, to_status};
 
 /// Заголовок с токеном сессии: `authorization: Bearer <токен>`.

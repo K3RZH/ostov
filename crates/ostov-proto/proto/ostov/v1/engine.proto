@@ -31,6 +31,8 @@ service Engine {
   rpc AdminAddUser(NewUser) returns (Empty);
   rpc AdminSetUserActive(UserActive) returns (Empty);
   rpc AdminSetUserPassword(UserPassword) returns (Empty);
+  rpc AdminUserFields(UserLogin) returns (UserFields);
+  rpc AdminSetUserFields(UserFields) returns (Empty);
   rpc AdminJournal(JournalRequest) returns (JournalList);
   rpc AdminBackup(BackupRequest) returns (JobId);
   rpc GetClosingDate(Empty) returns (ClosingDate);
@@ -199,6 +201,13 @@ message Meta {
   reserved 3;
   repeated Role roles = 4;
   repeated RegisterMeta registers = 5;
+  repeated UserFieldDef user_fields = 6;
+}
+
+// Свойство пользователя (ADR-043): значения хранятся в базе у пользователя.
+message UserFieldDef {
+  FieldDef field = 1;
+  bool many = 2;
 }
 
 message RegisterMeta {
@@ -366,6 +375,20 @@ message UserActive {
 message UserPassword {
   string login = 1;
   string password = 2;
+}
+
+message UserLogin {
+  string login = 1;
+}
+
+message UserFieldValues {
+  string name = 1;
+  repeated Value values = 2;
+}
+
+message UserFields {
+  string login = 1;
+  repeated UserFieldValues fields = 2;
 }
 
 message JournalRequest {

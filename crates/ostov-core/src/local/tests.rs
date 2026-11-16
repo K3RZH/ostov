@@ -2853,3 +2853,129 @@ fn busy_store_error_is_retried_and_explained() {
     )));
     assert!(!super::convert::is_busy(&other));
 }
+
+fn user_field(name: &str, kind: ostov_model::FieldKind, many: bool) -> ostov_model::UserFieldDef {
+    let mut field = ostov_model::FieldDef::new(name, kind);
+    if kind == ostov_model::FieldKind::Ref {
+        field.target = Some("warehouses".into());
+    }
+    ostov_model::UserFieldDef { field, many }
+}
+
+#[test]
+fn user_fields_are_set_by_admin_and_read_with_titles() {
+    use ostov_api::UserFields;
+    use ostov_model::FieldKind;
+
+    let base = Base::new("user-fields");
+    let mut model = roles_model();
+    model.user_fields = vec![
+        user_field("warehouses", FieldKind::Ref, true),
+        user_field("badge", FieldKind::Text, false),
+    ];
+    let engine = LocalConnector::new(model)
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let cold = add(&*engine, "warehouses", "Холодный");
+
+    let meta = engine.get_meta().unwrap();
+    let names: Vec<(&str, bool)> = meta
+        .user_fields
+        .iter()
+        .map(|f| (f.field.name.as_str(), f.many))
+        .collect();
+    assert_eq!(names, [("warehouses", true), ("badge", false)]);
+
+    let empty = engine.admin_user_fields("keeper").unwrap();
+    assert!(empty["warehouses"].is_empty() && empty["badge"].is_empty());
+
+    let set = UserFields::from([
+        (
+            "warehouses".into(),
+            vec![refer(main), refer(cold), refer(main)],
+        ),
+        ("badge".into(), vec![text("17")]),
+    ]);
+    engine.admin_set_user_fields(" Keeper ", &set).unwrap();
+    let got = engine.admin_user_fields("keeper").unwrap();
+    let titles: Vec<Option<String>> = got["warehouses"].iter().map(title).collect();
+    assert_eq!(titles, [Some("Основной".into()), Some("Холодный".into())]);
+    assert_eq!(got["badge"], [text("17")]);
+
+    // Меняются только переданные свойства; пустой список очищает.
+    engine
+        .admin_set_user_fields("keeper", &UserFields::from([("badge".into(), vec![])]))
+        .unwrap();
+    let got = engine.admin_user_fields("keeper").unwrap();
+    assert!(got["badge"].is_empty());
+    assert_eq!(got["warehouses"].len(), 2);
+    assert!(
+        journal(&*engine)
+            .iter()
+            .any(|e| e.details.contains("свойства пользователя keeper"))
+    );
+
+    let code = |name: &str, values: Vec<Value>| {
+        engine
+            .admin_set_user_fields("keeper", &UserFields::from([(name.to_owned(), values)]))
+            .unwrap_err()
+            .code
+    };
+    assert_eq!(code("shoe", vec![]), ErrorCode::Validation);
+    assert_eq!(
+        code("badge", vec![text("1"), text("2")]),
+        ErrorCode::Validation
+    );
+    assert_eq!(
+        code("warehouses", vec![text("Основной")]),
+        ErrorCode::Validation
+    );
+    assert_eq!(code("warehouses", vec![refer(999)]), ErrorCode::Validation);
+    let nobody = engine.admin_set_user_fields("nobody", &set).unwrap_err();
+    assert_eq!(nobody.code, ErrorCode::NotFound);
+    assert_eq!(
+        engine.admin_user_fields("keeper").unwrap()["warehouses"].len(),
+        2
+    );
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert_eq!(
+        engine.admin_user_fields("keeper").unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        engine
+            .admin_set_user_fields("keeper", &set)
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden
+    );
+}
+
+#[test]
+fn user_field_ref_points_to_a_catalog() {
+    use ostov_model::FieldKind;
+
+    let mut model = super::warehouse_model();
+    model.user_fields = vec![user_field("warehouses", FieldKind::Ref, true)];
+    assert!(super::Config::from_model(&model).is_ok());
+    model.user_fields[0].field.target = Some("issue".into());
+    assert!(super::Config::from_model(&model).is_err());
+    model.user_fields[0].field.target = None;
+    assert!(super::Config::from_model(&model).is_err());
+    model.user_fields = vec![
+        user_field("badge", FieldKind::Text, false),
+        user_field("badge", FieldKind::Int, false),
+    ];
+    assert!(super::Config::from_model(&model).is_err());
+}

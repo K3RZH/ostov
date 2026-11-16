@@ -74,6 +74,7 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
             .into_iter()
             .map(|role| role_def(role.value))
             .collect(),
+        user_fields: Vec::new(),
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
     JournalPage, ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult,
-    ReportQuery, Saved, SchemaPlan, SessionInfo, TrialPost, UserInfo,
+    ReportQuery, Saved, SchemaPlan, SessionInfo, TrialPost, UserFields, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -109,6 +109,14 @@ pub trait Engine: Send + Sync {
     /// Новый пароль пользователю от администратора: его сессии на сервере закрываются.
     fn admin_set_user_password(&self, _login: &str, _password: &str) -> EngineResult<()> {
         Err(EngineError::not_implemented("AdminSetUserPassword"))
+    }
+    /// Свойства пользователя (`Meta.user_fields`), ссылки с названиями; незаполненное — пусто.
+    fn admin_user_fields(&self, _login: &str) -> EngineResult<UserFields> {
+        Err(EngineError::not_implemented("AdminUserFields"))
+    }
+    /// Записывает переданные свойства, остальные не трогает; пустой список очищает свойство.
+    fn admin_set_user_fields(&self, _login: &str, _fields: &UserFields) -> EngineResult<()> {
+        Err(EngineError::not_implemented("AdminSetUserFields"))
     }
     /// Записи журнала без ключа следующей страницы; новое — `admin_journal_page`.
     fn admin_journal(&self, after_key: Option<&str>, size: u32) -> EngineResult<Vec<JournalEntry>> {

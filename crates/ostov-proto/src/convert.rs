@@ -330,6 +330,14 @@ impl From<api::Meta> for pb::Meta {
                     resources: r.resources.into_iter().map(Into::into).collect(),
                 })
                 .collect(),
+            user_fields: m
+                .user_fields
+                .into_iter()
+                .map(|u| pb::UserFieldDef {
+                    field: Some(u.field.into()),
+                    many: u.many,
+                })
+                .collect(),
         }
     }
 }
@@ -374,10 +382,24 @@ impl TryFrom<pb::Meta> for api::Meta {
                 resources: defs_from_pb(r.resources)?,
             });
         }
+        let mut user_fields = Vec::with_capacity(m.user_fields.len());
+        for u in m.user_fields {
+            let field = u
+                .field
+                .ok_or_else(|| broken("свойство пользователя без поля"))?;
+            let Some(field) = defs_from_pb(vec![field])?.pop() else {
+                return Err(broken("свойство пользователя"));
+            };
+            user_fields.push(api::UserFieldDef {
+                field,
+                many: u.many,
+            });
+        }
         Ok(Self {
             menu: m.menu.into_iter().map(Into::into).collect(),
             objects,
             registers,
+            user_fields,
             roles: m
                 .roles
                 .into_iter()
@@ -388,6 +410,33 @@ impl TryFrom<pb::Meta> for api::Meta {
                 .collect(),
         })
     }
+}
+
+pub fn user_fields_to_pb(login: &str, fields: api::UserFields) -> pb::UserFields {
+    pb::UserFields {
+        login: login.to_owned(),
+        fields: fields
+            .into_iter()
+            .map(|(name, values)| pb::UserFieldValues {
+                name,
+                values: values.into_iter().map(Into::into).collect(),
+            })
+            .collect(),
+    }
+}
+
+pub fn user_fields_from_pb(fields: Vec<pb::UserFieldValues>) -> Result<api::UserFields> {
+    fields
+        .into_iter()
+        .map(|f| {
+            let values = f
+                .values
+                .into_iter()
+                .map(api::Value::try_from)
+                .collect::<Result<_>>()?;
+            Ok((f.name, values))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- списки и объекты

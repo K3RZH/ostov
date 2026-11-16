@@ -51,7 +51,7 @@ fn start(name: &str, connect: Option<Connect>) -> Server {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let (ready, port) = mpsc::channel();
     let thread = std::thread::spawn(move || {
-        let hub = Arc::new(Hub::start(Base::new(connect, warehouse_model())).unwrap());
+        let hub = Arc::new(Hub::start(Base::new(connect, model())).unwrap());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -85,6 +85,15 @@ fn postgres(schema: &'static str) -> Option<Connect> {
         db.execute(&format!("SET search_path TO {schema}"), &[])?;
         Ok(Box::new(db) as Box<dyn Driver + Send>)
     }))
+}
+
+/// «Склад» и свойство пользователя «Склады» (ADR-043).
+fn model() -> ostov_model::Config {
+    let mut model = warehouse_model();
+    let mut field = ostov_model::FieldDef::new("warehouses", ostov_model::FieldKind::Ref);
+    field.target = Some("warehouses".into());
+    model.user_fields = vec![ostov_model::UserFieldDef { field, many: true }];
+    model
 }
 
 fn admin() -> NewAdmin {
@@ -143,6 +152,28 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
     let flour = add(&*engine, "goods", "Мука");
     let main = add(&*engine, "warehouses", "Основной");
     let mill = add(&*engine, "suppliers", "Мельница");
+
+    // Свойства пользователя: описание в метаданных, значения туда и обратно с названиями.
+    let meta = engine.get_meta().unwrap();
+    assert_eq!(meta.user_fields.len(), 1);
+    assert!(meta.user_fields[0].many);
+    assert_eq!(
+        meta.user_fields[0].field.target.as_deref(),
+        Some("warehouses")
+    );
+    let mine = ostov_api::UserFields::from([("warehouses".to_owned(), vec![refer(main)])]);
+    engine.admin_set_user_fields("boss", &mine).unwrap();
+    let got = engine.admin_user_fields("boss").unwrap();
+    assert_eq!(
+        got["warehouses"],
+        [Value::Ref {
+            id: main,
+            title: Some("Основной".into())
+        }]
+    );
+    let wrong = ostov_api::UserFields::from([("shoe".to_owned(), vec![])]);
+    let refused = engine.admin_set_user_fields("boss", &wrong).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Validation);
     let receipt = ObjectData {
         fields: fields(&[
             ("date", Value::Date("2026-02-01".into())),
