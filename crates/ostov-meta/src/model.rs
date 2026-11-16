@@ -96,6 +96,21 @@ pub struct Manifest {
     /// Разделы меню по порядку; каждый раздел из `subsystems/` должен быть здесь.
     #[serde(default)]
     pub menu: Vec<Spanned<String>>,
+    /// Свойства пользователя (ADR-043): на них ссылаются ограничения ролей.
+    #[serde(default)]
+    pub user_fields: Vec<UserField>,
+}
+
+/// Свойство пользователя: поле и признак «несколько значений».
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserField {
+    pub name: Spanned<String>,
+    pub title: String,
+    #[serde(rename = "type")]
+    pub kind: Spanned<FieldType>,
+    #[serde(default)]
+    pub many: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +170,18 @@ pub struct Register {
     pub kind: RegisterKind,
     pub dimensions: Vec<Field>,
     pub resources: Vec<Field>,
+    /// Себестоимость по скользящей средней (ADR-042).
+    #[serde(default)]
+    pub cost: Option<Spanned<RegisterCost>>,
+}
+
+/// `cost:` регистра: ресурсы количества и суммы, измерения средней.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterCost {
+    pub qty: Spanned<String>,
+    pub sum: Spanned<String>,
+    pub by: Vec<Spanned<String>>,
 }
 
 /// Роль: права на справочники и документы и системные права, как они записаны в файле.
@@ -168,7 +195,31 @@ pub struct Role {
     pub objects: ObjectRights,
     #[serde(default)]
     pub system: Vec<Spanned<String>>,
+    /// Ограничения по записям (ADR-043): условия одного объекта действуют вместе.
+    #[serde(default)]
+    pub restrictions: Vec<RoleRestriction>,
 }
+
+/// Ограничение роли на объект: `object` и условия `where`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleRestriction {
+    pub object: Spanned<String>,
+    #[serde(rename = "where")]
+    pub conditions: Vec<Condition>,
+}
+
+/// Условие: поле объекта среди значений свойства пользователя (`in: user.warehouses`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    pub field: Spanned<String>,
+    #[serde(rename = "in")]
+    pub user_field: Spanned<String>,
+}
+
+/// Так начинается ссылка на свойство пользователя в условии.
+pub(crate) const USER_PREFIX: &str = "user.";
 
 /// `объект: [право, ...]` в порядке файла. Повтор объекта отвергает разбор (повтор ключа).
 #[derive(Debug, Default)]

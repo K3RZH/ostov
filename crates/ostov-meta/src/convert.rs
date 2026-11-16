@@ -1,15 +1,21 @@
 //! Проверенные файлы → модель для ядра (`ostov-model`). Номера строк здесь уже не нужны.
 
 use ostov_model::{
-    CatalogDef, Config, DocumentDef, FieldDef, FieldKind, MenuItem, RegisterDef, RegisterKind,
-    Rights, RoleDef, SystemRights, TablePartDef,
+    CatalogDef, Config, Cost, DocumentDef, FieldDef, FieldKind, MenuItem, RegisterDef,
+    RegisterKind, Restriction, Rights, RoleDef, SystemRights, TablePartDef, UserFieldDef,
 };
 use serde_saphyr::Spanned;
 
-use crate::{ConfigFiles, Field, FieldType, MenuEntry, Subsystem};
+use crate::model::USER_PREFIX;
+
+use crate::{ConfigFiles, Field, FieldType, MenuEntry, Subsystem, UserField};
 
 pub(crate) fn into_model(files: ConfigFiles) -> Config {
-    let manifest = files.manifest.value;
+    let mut manifest = files.manifest.value;
+    let user_fields = std::mem::take(&mut manifest.user_fields)
+        .into_iter()
+        .map(user_field)
+        .collect();
     let catalogs: Vec<CatalogDef> = files
         .catalogs
         .into_iter()
@@ -41,6 +47,14 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
                 },
                 dimensions: fields(register.dimensions),
                 resources: fields(register.resources),
+                cost: register.cost.map(|cost| {
+                    let cost = cost.value;
+                    Cost {
+                        qty: cost.qty.value,
+                        sum: cost.sum.value,
+                        by: cost.by.into_iter().map(|d| d.value).collect(),
+                    }
+                }),
             }
         })
         .collect();
@@ -74,7 +88,22 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
             .into_iter()
             .map(|role| role_def(role.value))
             .collect(),
-        user_fields: Vec::new(),
+        user_fields,
+    }
+}
+
+fn user_field(field: UserField) -> UserFieldDef {
+    let (kind, target) = kind(field.kind.value);
+    UserFieldDef {
+        field: FieldDef {
+            name: field.name.value,
+            title: field.title,
+            kind,
+            target,
+            required: false,
+            read_only: false,
+        },
+        many: field.many,
     }
 }
 
@@ -106,7 +135,24 @@ fn role_def(role: crate::Role) -> RoleDef {
             admin: has(&role.system, "admin"),
             update_config: has(&role.system, "update_config"),
         },
-        restrictions: Vec::new(),
+        restrictions: role
+            .restrictions
+            .into_iter()
+            .flat_map(|r| {
+                let object = r.object.value;
+                r.conditions.into_iter().map(move |c| Restriction {
+                    object: object.clone(),
+                    field: c.field.value,
+                    // `user.` проверил check.
+                    user_field: c
+                        .user_field
+                        .value
+                        .strip_prefix(USER_PREFIX)
+                        .unwrap_or_default()
+                        .to_owned(),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -174,14 +220,18 @@ fn fields(fields: Vec<Field>) -> Vec<FieldDef> {
     fields.into_iter().map(field).collect()
 }
 
-fn field(field: Field) -> FieldDef {
-    let (kind, target) = match field.kind.value {
+fn kind(kind: FieldType) -> (FieldKind, Option<String>) {
+    match kind {
         FieldType::Int => (FieldKind::Int, None),
         FieldType::Text => (FieldKind::Text, None),
         FieldType::Date => (FieldKind::Date, None),
         FieldType::Decimal { scale } => (FieldKind::Decimal { scale }, None),
         FieldType::Ref(target) => (FieldKind::Ref, Some(target)),
-    };
+    }
+}
+
+fn field(field: Field) -> FieldDef {
+    let (kind, target) = kind(field.kind.value);
     FieldDef {
         name: field.name.value,
         title: field.title,

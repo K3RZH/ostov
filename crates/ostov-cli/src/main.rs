@@ -44,10 +44,13 @@ fn schema(dir: &Path) -> ExitCode {
 
 /// Проверка без базы: печатает все ошибки как «файл:строка — причина».
 fn check(dir: &Path) -> ExitCode {
-    let config = match ostov_meta::load(dir) {
-        Ok(config) => config,
+    let (config, warnings) = match ostov_meta::load_with_warnings(dir) {
+        Ok(loaded) => loaded,
         Err(errors) => return failure(&errors),
     };
+    for warning in &warnings {
+        eprintln!("{warning}");
+    }
     if let Err(errors) = check_scripts(dir, &config) {
         return failure(&errors);
     }

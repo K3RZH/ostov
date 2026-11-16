@@ -7,3 +7,14 @@ objects:
   receipt: [read, create, update, post, unpost, delete]
   issue: [read, create, update, post, unpost]
 system: [closed_period]
+# Кладовщик видит расходы и остатки только своих складов (ADR-043); поступления — все.
+# Пока администратор не задал ему «Склады», расходов и остатков он не видит.
+restrictions:
+  - object: issue
+    where:
+      - field: warehouse
+        in: user.warehouses
+  - object: stock
+    where:
+      - field: warehouse
+        in: user.warehouses

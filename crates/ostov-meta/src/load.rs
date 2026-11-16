@@ -40,6 +40,17 @@ pub fn load(dir: &Path) -> Result<ostov_model::Config, Vec<Error>> {
     checked(parse(dir)?).map(crate::convert::into_model)
 }
 
+/// Как [`load`], плюс предупреждения [`crate::warnings`]: с ними конфигурация работает.
+/// Предупреждения считаются только у конфигурации без ошибок.
+///
+/// # Errors
+/// Те же, что у [`load`].
+pub fn load_with_warnings(dir: &Path) -> Result<(ostov_model::Config, Vec<Error>), Vec<Error>> {
+    let files = checked(parse(dir)?)?;
+    let warnings = crate::warnings(&files);
+    Ok((crate::convert::into_model(files), warnings))
+}
+
 /// Читает папку `dir` как есть, с номерами строк, без проверки ссылок и имён.
 ///
 /// # Errors

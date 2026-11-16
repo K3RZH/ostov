@@ -91,11 +91,14 @@ impl Config {
         for r in &model.registers {
             match r.kind {
                 RegisterKind::Accumulation => {
-                    let register = AccumulationRegister::new(
+                    let mut register = AccumulationRegister::new(
                         &r.name,
                         r.dimensions.clone(),
                         r.resources.clone(),
                     )?;
+                    if let Some(cost) = &r.cost {
+                        register = register.with_cost(cost.clone())?;
+                    }
                     registers.insert(r.name.clone(), register);
                 }
             }
@@ -296,6 +299,7 @@ pub fn warehouse_model() -> ostov_model::Config {
             kind: RegisterKind::Accumulation,
             dimensions: vec![warehouse(), goods()],
             resources: vec![qty()],
+            cost: None,
         }],
         menu: vec![MenuItem {
             title: "Склад".to_owned(),

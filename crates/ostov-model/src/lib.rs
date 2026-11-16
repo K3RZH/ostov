@@ -108,6 +108,20 @@ pub struct RegisterDef {
     pub kind: RegisterKind,
     pub dimensions: Vec<FieldDef>,
     pub resources: Vec<FieldDef>,
+    /// Себестоимость по скользящей средней (ADR-042); `None` — регистр без себестоимости.
+    pub cost: Option<Cost>,
+}
+
+/// Себестоимость скользящей средней (СТ-К10, ADR-042): у расхода без суммы ядро считает её
+/// само — сумма остатка × количество ÷ остаток на дату документа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cost {
+    /// Ресурс-количество.
+    pub qty: String,
+    /// Ресурс-сумма.
+    pub sum: String,
+    /// Измерения, по которым считается средняя: все, кроме партии.
+    pub by: Vec<String>,
 }
 
 /// Конфигурация целиком: манифест, все объекты и меню.

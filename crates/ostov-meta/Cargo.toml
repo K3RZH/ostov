@@ -18,3 +18,4 @@ ostov-model = { path = "../ostov-model" }
 # Только тесты: модель из YAML сверяется с «Складом» ядра и запускается в нём.
 ostov-api = { path = "../ostov-api" }
 ostov-core = { path = "../ostov-core" }
+ostov-store = { path = "../ostov-store" }
