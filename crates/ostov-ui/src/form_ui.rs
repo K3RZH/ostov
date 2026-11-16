@@ -62,12 +62,31 @@ impl fmt::Display for OpenError {
 
 impl std::error::Error for OpenError {}
 
-/// Что стоит над формой: ошибка или предупреждение и, если есть, кнопка. Обе кнопки берут
-/// объект из ядра заново.
+/// Что делает кнопка в полосе над формой.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeAction {
+    /// «Перечитать»: объект из ядра заново, правки в форме пропадают.
+    Reload,
+    /// «Повторить» чтение, которое не удалось.
+    RetryLoad,
+    /// «Повторить» запись тем же действием: данные были заняты или пропала связь.
+    RetrySubmit(PostAction),
+}
+
+impl NoticeAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reload => RELOAD,
+            Self::RetryLoad | Self::RetrySubmit(_) => RETRY,
+        }
+    }
+}
+
+/// Что стоит над формой: ошибка или предупреждение и, если есть, кнопка.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Notice {
     text: String,
-    action: Option<&'static str>,
+    action: Option<NoticeAction>,
 }
 
 impl Notice {
@@ -78,17 +97,22 @@ impl Notice {
         }
     }
 
-    /// Ошибка записи или проведения. Конфликт версий лечится перечитыванием, остальное
-    /// сообщение ядра говорит само.
-    fn from_save_error(error: &EngineError) -> Self {
-        if error.code == ErrorCode::VersionConflict {
-            return Self {
+    /// Ошибка записи или проведения `action`. Конфликт версий лечится перечитыванием, занятые
+    /// данные и обрыв связи — повтором того же действия (ядро уже повторило само несколько раз),
+    /// остальное сообщение ядра говорит само.
+    fn from_save_error(error: &EngineError, action: PostAction) -> Self {
+        match error.code {
+            ErrorCode::VersionConflict => Self {
                 text: "Объект изменён другим пользователем. Нажмите «Перечитать»: правки в форме пропадут."
                     .to_owned(),
-                action: Some(RELOAD),
-            };
+                action: Some(NoticeAction::Reload),
+            },
+            ErrorCode::Unavailable => Self {
+                text: error.message.clone(),
+                action: Some(NoticeAction::RetrySubmit(action)),
+            },
+            _ => Self::plain(error.message.clone()),
         }
-        Self::plain(error.message.clone())
     }
 }
 
@@ -343,6 +367,14 @@ impl FormUi {
                 }
             }
         });
+        data.on_notice_action({
+            let (ui, window) = bound();
+            move || {
+                if let Some(window) = window.upgrade() {
+                    ui.notice_action(&window);
+                }
+            }
+        });
         data.on_close({
             let (ui, window) = bound();
             move || {
@@ -567,6 +599,25 @@ impl FormUi {
         self.refresh_tabs(key);
     }
 
+    /// Кнопка в полосе над формой: перечитать или повторить то, что не удалось.
+    fn notice_action(&self, window: &AppWindow) {
+        let Some(key) = shown_key(window) else {
+            return;
+        };
+        let action = self
+            .base
+            .borrow()
+            .forms
+            .get(&key)
+            .and_then(|form| form.notice.as_ref())
+            .and_then(|notice| notice.action);
+        match action {
+            Some(NoticeAction::Reload | NoticeAction::RetryLoad) => self.reload(window),
+            Some(NoticeAction::RetrySubmit(action)) => self.submit(window, action),
+            None => {}
+        }
+    }
+
     /// «Записать», «Провести», «Отменить проведение»: проверка, потом запись в фоне.
     fn submit(&self, window: &AppWindow, action: PostAction) {
         let Some(key) = shown_key(window) else {
@@ -640,7 +691,7 @@ impl FormUi {
                     new_key
                 }
                 Err(error) => {
-                    form.notice = Some(Notice::from_save_error(&error));
+                    form.notice = Some(Notice::from_save_error(&error, action));
                     key.clone()
                 }
             };
@@ -746,7 +797,7 @@ impl FormUi {
                     // Перечитывание открытой формы не удалось: правки остаются, можно повторить.
                     form.notice = Some(Notice {
                         text: error.message,
-                        action: Some(RETRY),
+                        action: Some(NoticeAction::RetryLoad),
                     });
                     if !matches!(form.content, Content::Ready(_)) {
                         form.content = Content::Failed;
@@ -842,7 +893,7 @@ fn apply_outcome(
                     "Записано, но заново прочитать не удалось: {}",
                     error.message
                 ),
-                action: Some(RELOAD),
+                action: Some(NoticeAction::Reload),
             });
         }
     }
@@ -926,7 +977,7 @@ fn render(window: &AppWindow, key: &DocKey, form: &Form, draw: Draw) {
         form.notice
             .as_ref()
             .and_then(|notice| notice.action)
-            .unwrap_or("")
+            .map_or("", NoticeAction::label)
             .into(),
     );
     show_flags(&data, state);
@@ -1214,14 +1265,30 @@ mod tests {
     #[test]
     fn version_conflict_offers_to_reread_other_errors_do_not() {
         let conflict = EngineError::new(ErrorCode::VersionConflict, "версия");
-        let notice = Notice::from_save_error(&conflict);
-        assert_eq!(notice.action, Some(RELOAD));
+        let notice = Notice::from_save_error(&conflict, PostAction::Write);
+        assert_eq!(notice.action, Some(NoticeAction::Reload));
+        assert_eq!(NoticeAction::Reload.label(), RELOAD);
         assert!(notice.text.contains("Перечитать"));
         let other = EngineError::new(ErrorCode::PeriodClosed, "Период закрыт.");
         assert_eq!(
-            Notice::from_save_error(&other),
+            Notice::from_save_error(&other, PostAction::Post),
             Notice::plain("Период закрыт.")
         );
+    }
+
+    #[test]
+    fn busy_data_offers_to_repeat_the_same_action() {
+        let busy = EngineError::new(
+            ErrorCode::Unavailable,
+            "Эти данные сейчас меняет другой пользователь. Повторите действие.",
+        );
+        for action in [PostAction::Write, PostAction::Post, PostAction::Unpost] {
+            let notice = Notice::from_save_error(&busy, action);
+            assert_eq!(notice.text, busy.message);
+            assert_eq!(notice.action, Some(NoticeAction::RetrySubmit(action)));
+        }
+        assert_eq!(NoticeAction::RetrySubmit(PostAction::Post).label(), RETRY);
+        assert_eq!(NoticeAction::RetryLoad.label(), RETRY);
     }
 
     #[test]
@@ -1278,7 +1345,10 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, ErrorCode::VersionConflict);
-        assert_eq!(Notice::from_save_error(&error).action, Some(RELOAD));
+        assert_eq!(
+            Notice::from_save_error(&error, PostAction::Write).action,
+            Some(NoticeAction::Reload)
+        );
         remove(engine, &path);
     }
 
@@ -1349,7 +1419,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.code, ErrorCode::PeriodClosed);
-        let notice = Notice::from_save_error(&error);
+        let notice = Notice::from_save_error(&error, PostAction::Write);
         assert_eq!(notice.text, error.message);
         assert_eq!(notice.action, None);
         // Форма та же: набранное на месте, можно исправить дату и записать снова.

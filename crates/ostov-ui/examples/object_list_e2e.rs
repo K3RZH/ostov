@@ -3,13 +3,20 @@
 //! щелчок по шапке сортирует, поиск фильтрует, прокрутка догружает дальние строки, «Открыть»,
 //! двойной щелчок и пункт меню открывают форму строки, «Создать» форму нового объекта, а
 //! записанная форма обновляет строку списка. Правая кнопка открывает меню строки: пункты по
-//! виду объекта, состоянию строки и правам, действие идёт в настоящее ядро.
+//! виду объекта, состоянию строки и правам, действие идёт в настоящее ядро. Занятые данные
+//! (ответ ядра `Unavailable`) дают ошибку с «Повторить», и повтор выполняет то же действие.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example object_list_e2e`.
 // Стенд, а не приложение: падение на unwrap и есть провал сценария.
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/busy.rs"]
+mod busy;
+
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+
+use busy::BusyEngine;
 
 use ostov_ui::app::{refresh, wire_tabs};
 use ostov_ui::form_ui::FormUi;
@@ -220,12 +227,15 @@ fn main() {
     refresh(&window, &shell.borrow());
     receipts.attach(engine.clone());
     wire_tabs(&window, &shell, &receipts, &windows);
+    // Списки и формы ходят в ядро через подставное: оно передаёт всё настоящему, пока его не
+    // попросят ответить «данные заняты».
+    let busy = Arc::new(BusyEngine::new(engine.clone()));
     let forms = FormUi::new(window.as_weak(), windows.clone(), shell.clone());
     forms.attach_window(&window);
-    forms.start(engine.clone(), &meta.objects);
+    forms.start(busy.clone(), &meta.objects);
     let lists = ListUi::new(window.as_weak(), windows, forms.clone());
     lists.attach_window(&window);
-    lists.start(engine.clone(), &meta.objects);
+    lists.start(busy.clone(), &meta.objects);
     settle();
 
     let mut failed = 0;
@@ -540,6 +550,48 @@ fn main() {
         data.get_selected_row() == -1
             && wait_for(|| summary(&window) == format!("Показано {total} из {total}"))
             && wait_for(|| status(0) == "Проведён"),
+    );
+    click(&window, NEUTRAL);
+
+    // Данные заняты другим пользователем: ядро уже повторило само и сдалось. У ошибки над
+    // таблицей кнопка «Повторить», она выполняет то же действие над той же строкой.
+    busy.fail_next(1);
+    right_click(&window, FIRST_ROW);
+    data.invoke_action(0, "unpost".into());
+    check(
+        "занятые данные: ошибка с названием строки и «Повторить», строка не тронута",
+        wait_for(|| data.get_notice().contains("меняет другой пользователь"))
+            && data.get_notice().starts_with("Расход № ")
+            && data.get_notice_action() == "Повторить"
+            && status(0) == "Проведён",
+    );
+    data.invoke_notice_retry();
+    check(
+        "«Повторить» снимает проведение той же строки, ошибка уходит",
+        wait_for(|| status(0) == "Записан")
+            && data.get_notice().is_empty()
+            && data.get_notice_action().is_empty(),
+    );
+    click(&window, NEUTRAL);
+    right_click(&window, FIRST_ROW);
+    data.invoke_action(0, "post".into());
+    check(
+        "документ проведён обратно",
+        wait_for(|| status(0) == "Проведён") && data.get_notice().is_empty(),
+    );
+    // Крестик убирает ошибку вместе с повтором: строка осталась проведённой.
+    busy.fail_next(1);
+    click(&window, NEUTRAL);
+    right_click(&window, FIRST_ROW);
+    data.invoke_action(0, "unpost".into());
+    check(
+        "после крестика повторять нечего, строка проведена",
+        wait_for(|| data.get_notice_action() == "Повторить")
+            && {
+                data.invoke_dismiss_notice();
+                data.get_notice().is_empty() && data.get_notice_action().is_empty()
+            }
+            && status(0) == "Проведён",
     );
     click(&window, NEUTRAL);
 

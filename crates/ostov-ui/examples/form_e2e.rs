@@ -2,14 +2,20 @@
 //! настоящей демо-базы. Проверяет открытие формы справочника и документа, набор в первом поле
 //! (фокус при открытии), что Enter не записывает, запись кнопкой, конфликт версий и «Перечитать»,
 //! новый объект с проверкой обязательного поля, проведение и отмену, закрытие без воскрешения
-//! несохранённых правок, ошибку чтения, форму в дополнительном окне.
+//! несохранённых правок, ошибку чтения, форму в дополнительном окне. «Повторить» после ответа
+//! ядра «данные заняты» при проведении.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example form_e2e`.
 // Стенд, а не приложение: падение на unwrap и есть провал сценария.
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/busy.rs"]
+mod busy;
+
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use busy::BusyEngine;
 use ostov_api::{Engine, ListQuery, PostAction, Value};
 use ostov_ui::app::{refresh, wire_tabs};
 use ostov_ui::form_ui::FormUi;
@@ -95,6 +101,10 @@ fn main() {
         .create_demo(path.to_str().unwrap(), 50)
         .unwrap();
 
+    // Формы ходят в ядро через подставное: оно передаёт всё настоящему, пока его не попросят
+    // ответить «данные заняты».
+    let busy = Arc::new(BusyEngine::new(engine.clone()));
+
     let window = AppWindow::new().unwrap();
     // Маска и разбор поля даты: в приложении их ставит каждому окну `apply_settings`.
     ostov_ui::date_input::install(&window);
@@ -117,7 +127,7 @@ fn main() {
         let forms = forms.clone();
         move |host| forms.attach_window(host)
     });
-    forms.start(engine.clone(), &meta.objects);
+    forms.start(busy.clone(), &meta.objects);
     settle(&window);
 
     let mut failed = 0;
@@ -438,12 +448,24 @@ fn main() {
         "дата набрана в поле даты: форма изменена",
         data.get_modified() && active().modified,
     );
+    // Данные заняты: ядро уже повторило само и сдалось. «Повторить» проводит заново.
+    busy.fail_next(1);
     data.invoke_post();
     check(
-        "«Провести» записывает и проводит одним вызовом",
+        "занятые данные при проведении: ошибка над формой с «Повторить», правки на месте",
+        wait_for(&window, || {
+            data.get_error().contains("меняет другой пользователь")
+        }) && data.get_error_action() == "Повторить"
+            && data.get_modified()
+            && !data.get_busy()
+            && !engine.get("receipt", draft).unwrap().posted,
+    );
+    data.invoke_notice_action();
+    check(
+        "«Повторить» записывает и проводит тем же действием одним вызовом",
         wait_for(&window, || {
             data.get_posted() && data.get_status() == "Проведён" && !data.get_modified()
-        }),
+        }) && data.get_error().is_empty(),
     );
     let stored = engine.get("receipt", draft).unwrap();
     check(

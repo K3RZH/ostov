@@ -29,8 +29,10 @@ export global ListData {
     // Меню строки: Rust строит пункты под строку в menu-opening (вид объекта, права, состояние
     // строки); выбранный пункт приходит в action. Пустой список: меню не открывается.
     in property <[MenuAction]> menu-actions;
-    // Ошибка действия над строкой (пусто: нет); закрывается крестиком.
+    // Ошибка действия над строкой (пусто: нет); закрывается крестиком. Если действие можно
+    // повторить (данные были заняты), у ошибки кнопка с этой подписью.
     in property <string> notice;
+    in property <string> notice-action;
     // Подтверждение опасного действия: окно показывает и скрывает Rust.
     in property <bool> confirm-open;
     in property <string> confirm-title;
@@ -46,6 +48,8 @@ export global ListData {
     callback menu-opening(int);
     callback action(int, string);
     callback dismiss-notice();
+    // Повторить действие над строкой, которое не удалось из-за занятых данных.
+    callback notice-retry();
     callback confirm-accepted();
     callback confirm-cancelled();
     callback sort(int);
@@ -104,7 +108,9 @@ export component ObjectListView inherits Rectangle {
         }
         if ListData.notice != "" : AlertBanner {
             text: ListData.notice;
+            action-text: ListData.notice-action;
             closable: true;
+            action => { ListData.notice-retry(); }
             dismissed => { ListData.dismiss-notice(); }
         }
         ErpGrid {

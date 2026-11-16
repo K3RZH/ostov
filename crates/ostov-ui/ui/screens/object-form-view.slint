@@ -20,7 +20,8 @@ export global FormData {
     in property <[FormFieldItem]> fields;
     // Табличные части появятся позже: если они у объекта есть, под шапкой одна фраза про это.
     in property <string> tables-note;
-    // Ошибка ядра или загрузки над формой; у неё может быть кнопка («Перечитать», «Повторить»).
+    // Ошибка ядра или загрузки над формой; у неё может быть кнопка («Перечитать», «Повторить»):
+    // что она делает, решает Rust по своей ошибке (notice-action).
     in property <string> error;
     in property <string> error-action;
     in property <bool> loading;
@@ -48,6 +49,8 @@ export global FormData {
     callback unpost();
     // Взять документ из ядра заново (после конфликта версий или ошибки загрузки).
     callback reload();
+    // Кнопка в полосе ошибки: перечитать или повторить то же действие.
+    callback notice-action();
     callback close();
 }
 
@@ -213,7 +216,7 @@ export component ObjectFormView inherits Rectangle {
         if FormData.error != "" : AlertBanner {
             text: FormData.error;
             action-text: FormData.error-action;
-            action => { FormData.reload(); }
+            action => { FormData.notice-action(); }
         }
 
         if FormData.loading : Text {

@@ -35,6 +35,8 @@ use crate::{AppWindow, GridColumn, GridRow, ListData, MenuAction};
 
 /// Пауза после последней буквы поиска: запрос в ядро не уходит на каждое нажатие.
 const SEARCH_PAUSE: Duration = Duration::from_millis(250);
+/// Кнопка у ошибки, которую лечит повтор: так же подписана кнопка у ошибки загрузки списка.
+const RETRY: &str = "Повторить";
 
 /// Список одного объекта: модель строк и то, что выбрал пользователь.
 struct ObjectList {
@@ -57,6 +59,8 @@ struct ObjectList {
     resize_start: RefCell<Option<Vec<GridColumn>>>,
     /// Ошибка последнего действия над строкой; пусто: ошибки нет.
     notice: RefCell<String>,
+    /// Действие, которое можно повторить из полосы ошибки: данные были заняты или нет связи.
+    retry: RefCell<Option<(RowTarget, RowCommand)>>,
     /// Действие над строкой выполняется в ядре: пока оно не кончилось, меню не открывается
     /// (версия строки уже устарела бы).
     busy: Cell<bool>,
@@ -86,6 +90,7 @@ impl ObjectList {
             pause: slint::Timer::default(),
             resize_start: RefCell::new(None),
             notice: RefCell::default(),
+            retry: RefCell::default(),
             busy: Cell::new(false),
         })
     }
@@ -433,7 +438,20 @@ impl ListUi {
             move || {
                 if let Some((_, list)) = ui.shown(&window) {
                     list.notice.borrow_mut().clear();
+                    list.retry.borrow_mut().take();
                     ui.show_state(&list);
+                }
+            }
+        });
+        data.on_notice_retry({
+            let (ui, window, _) = bound();
+            move || {
+                let Some((_, list)) = ui.shown(&window) else {
+                    return;
+                };
+                let retry = list.retry.borrow_mut().take();
+                if let Some((target, command)) = retry {
+                    ui.run(target, command);
                 }
             }
         });
@@ -488,6 +506,7 @@ impl ListUi {
 
     fn fail(&self, list: &ObjectList, text: String) {
         *list.notice.borrow_mut() = text;
+        list.retry.borrow_mut().take();
         self.show_state(list);
     }
 
@@ -512,6 +531,7 @@ impl ListUi {
     /// «Обновить список»: строки читаются заново с первой, выбор и прошлая ошибка снимаются.
     fn reload(&self, list: &ObjectList) {
         list.notice.borrow_mut().clear();
+        list.retry.borrow_mut().take();
         self.each_showing(&list.object, |window| {
             window.global::<ListData>().set_selected_row(-1);
         });
@@ -533,6 +553,7 @@ impl ListUi {
             return;
         }
         list.notice.borrow_mut().clear();
+        list.retry.borrow_mut().take();
         self.show_state(&list);
         // Ответ может прийти, когда база уже закрыта: тогда список, а с ним и ответ, не нужны.
         let (ui, waiting) = (self.downgrade(), Rc::downgrade(&list));
@@ -563,12 +584,20 @@ impl ListUi {
             }
             Err(error) => {
                 *list.notice.borrow_mut() = failure_text(&target.label, &error.message);
-                // Строку изменил кто-то другой: в списке она устарела, читаем заново.
-                if error.code == ErrorCode::VersionConflict {
-                    self.each_showing(&list.object, |window| {
-                        window.global::<ListData>().set_selected_row(-1);
-                    });
-                    list.model.reload();
+                match error.code {
+                    // Строку изменил кто-то другой: в списке она устарела, читаем заново.
+                    ErrorCode::VersionConflict => {
+                        self.each_showing(&list.object, |window| {
+                            window.global::<ListData>().set_selected_row(-1);
+                        });
+                        list.model.reload();
+                    }
+                    // Данные заняты или нет связи (ядро уже повторило само): строка та же,
+                    // действие можно повторить кнопкой.
+                    ErrorCode::Unavailable => {
+                        *list.retry.borrow_mut() = Some((target.clone(), command));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -725,6 +754,14 @@ fn show_state_in(window: &AppWindow, list: &ObjectList) {
     data.set_sort_dirs(ModelRc::new(VecModel::from(directions)));
     data.set_sort_count(i32::try_from(sorting.keys().len()).unwrap_or_default());
     data.set_notice(list.notice.borrow().as_str().into());
+    data.set_notice_action(
+        if list.retry.borrow().is_some() {
+            RETRY
+        } else {
+            ""
+        }
+        .into(),
+    );
 }
 
 /// Окно без списка: база закрыта или объекта нет. `error` пустой: просто пустой экран.
@@ -742,6 +779,7 @@ fn show_nothing(window: &AppWindow, object: &str, error: &str) {
     data.set_sort_dirs(ModelRc::default());
     data.set_sort_count(0);
     data.set_notice("".into());
+    data.set_notice_action("".into());
     data.set_menu_actions(ModelRc::default());
     data.set_confirm_open(false);
     data.set_can_create(false);
