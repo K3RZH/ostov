@@ -3,8 +3,9 @@
 //!
 //! Тестовая база лежит в самой папке конфигурации: `<папка>/.ostov-test/test.sqlite`, рядом
 //! `.gitignore` со строкой `*`, чтобы база не попала в git. Имя постоянное, из манифеста не
-//! берётся. Файл базы держит один процесс (ADR-024, `<база>.lock`): конфигуратор берёт замок
-//! только на время плана, клиент предпросмотра держит его, пока открыт.
+//! берётся. Файл базы держит один процесс (ADR-024, `<база>.lock`): клиент предпросмотра держит
+//! замок, пока открыт. План ядро строит без замка, поэтому перед планом и сбросом конфигуратор
+//! сам пробует тот же замок: занятую базу нельзя ни сбрасывать, ни показывать ей план.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -57,6 +58,7 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, RunError> {
     let config = Config::load(config_dir).map_err(RunError::Config)?;
     let base = base_path(config_dir);
     let created = ensure_base(&config, &base)?;
+    ensure_free(&base)?;
     let plan = config.plan(&base.to_string_lossy())?;
     Ok(Prepared {
         base,
@@ -70,17 +72,35 @@ pub fn prepare(config_dir: &Path) -> Result<Prepared, RunError> {
 /// # Errors
 /// Базу держит другая программа: её не трогаем (`AlreadyOpen`). Файл не удалить, ошибки ядра.
 pub fn reset(config_dir: &Path) -> Result<Prepared, RunError> {
-    let config = Config::load(config_dir).map_err(RunError::Config)?;
+    // Сломанная конфигурация: базу не удаляем, создать новую всё равно не из чего.
+    Config::load(config_dir).map_err(RunError::Config)?;
     let base = base_path(config_dir);
-    // План берёт тот же замок, что и открытие: занятую базу так видно до удаления. Остальные
-    // ошибки плана (файл испорчен, не база Ostov) как раз повод для сброса.
-    if let Err(error) = config.plan(&base.to_string_lossy())
-        && error.code == ErrorCode::AlreadyOpen
-    {
-        return Err(error.into());
-    }
+    // Испорченный файл или чужая база как раз повод для сброса, а занятую базу не трогаем.
+    ensure_free(&base)?;
     remove_base(&base)?;
     prepare(config_dir)
+}
+
+/// Базу не держит другой процесс: тот же замок `<база>.lock`, что берёт ядро при открытии
+/// (`File::try_lock`), берётся и сразу отпускается. Файла замка нет: базу никто не открывал.
+fn ensure_free(base: &Path) -> Result<(), EngineError> {
+    let mut lock_path = base.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let file = match std::fs::OpenOptions::new().write(true).open(&lock_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(unavailable("файл замка тестовой базы", &error)),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => Err(EngineError::new(
+            ErrorCode::AlreadyOpen,
+            "База уже открыта в другом окне или программе.",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(unavailable("файл замка тестовой базы", &error))
+        }
+    }
 }
 
 /// Создаёт базу, если её нет; `true`, если создала.
