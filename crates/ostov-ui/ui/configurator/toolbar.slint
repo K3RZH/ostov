@@ -7,6 +7,7 @@ import { Chip } from "../components/chip.slint";
 export component Toolbar inherits Rectangle {
     in property <string> config-title;
     in property <string> config-version;
+    in property <string> config-folder;
     callback check-requested();
 
     height: Theme.control-md + 2 * Theme.space-8;
@@ -28,14 +29,18 @@ export component Toolbar inherits Rectangle {
             alignment: center;
             min-width: 0px;
             Text {
-                text: root.config-title;
+                text: root.config-title != "" ? root.config-title
+                    : root.config-folder != "" ? "Конфигурация не прочиталась"
+                    : "Папка не открыта";
                 font-size: Theme.font-body;
                 font-weight: 700;
                 color: Theme.text;
                 overflow: elide;
             }
             Text {
-                text: "v" + root.config-version;
+                text: root.config-folder == "" ? "Откройте папку конфигурации"
+                    : root.config-version == "" ? root.config-folder
+                    : "v" + root.config-version + " · " + root.config-folder;
                 font-size: Theme.font-caption;
                 color: Theme.text-muted;
                 overflow: elide;

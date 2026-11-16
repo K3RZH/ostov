@@ -10,6 +10,8 @@ import { CheckPanel } from "configurator/check-panel.slint";
 export component ConfiguratorWindow inherits Window {
     in property <string> config-title;
     in property <string> config-version;
+    // Открытая папка конфигурации; пусто, пока папку не выбрали.
+    in property <string> config-folder;
 
     // Дерево конфигурации.
     in property <[NavRow]> tree-rows;
@@ -46,7 +48,8 @@ export component ConfiguratorWindow inherits Window {
     callback check-resize-column <=> check-panel.resize-column;
     callback check-resize-end <=> check-panel.resize-end;
 
-    title: "Ostov Конфигуратор: " + root.config-title + ", версия " + root.config-version;
+    title: root.config-title == "" ? "Ostov Конфигуратор"
+        : "Ostov Конфигуратор: " + root.config-title + ", версия " + root.config-version;
     min-width: 960px;
     min-height: 600px;
     preferred-width: 1200px;
@@ -58,6 +61,7 @@ export component ConfiguratorWindow inherits Window {
         Toolbar {
             config-title: root.config-title;
             config-version: root.config-version;
+            config-folder: root.config-folder;
             check-requested => { root.check-requested(); }
         }
         HorizontalLayout {

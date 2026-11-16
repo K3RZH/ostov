@@ -337,14 +337,19 @@ fn issue_screen(
     Ok(())
 }
 
-/// Окно конфигуратора на встроенной «Склад»: щелчки по строкам дерева, затем раздел и проверка.
+/// Папка `config/` репозитория: «Склад» в файлах.
+fn config_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+}
+
+/// Окно конфигуратора на папке `config/`: щелчки по строкам дерева, затем раздел и проверка.
 fn configurator_window(
     clicks: &[i32],
     section: Option<ostov_ui::EditorSection>,
     check: bool,
 ) -> Result<ostov_ui::ConfiguratorWindow, Box<dyn std::error::Error>> {
-    let config = ostov_ui::configurator::Configuration::embedded()?;
-    let window = ostov_ui::configurator_ui::create_window(config)?;
+    let folder = config_dir().canonicalize()?;
+    let window = ostov_ui::configurator_ui::create_window(Some(folder))?;
     window
         .window()
         .set_size(slint::LogicalSize::new(1200.0, 780.0));

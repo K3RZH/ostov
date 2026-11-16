@@ -1,7 +1,8 @@
 //! Окно «Ostov Конфигуратор»: связывает `Browser` (src/configurator.rs) с окном Slint.
-//! Только просмотр: обработчики ничего не пишут ни в конфигурацию, ни на диск.
+//! Конфигурацию правят в редакторе; окно её показывает и проверяет, в файлы не пишет.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -11,20 +12,58 @@ use crate::receipts_ui::{resized_columns, snapshot_of, write_columns};
 use crate::settings::Settings;
 use crate::{ConfiguratorWindow, GridColumn, GridRow, InfoRow, NavRow, Shape, Theme};
 
-/// Создаёт окно конфигуратора для конфигурации `config` и подключает обработчики.
+/// Открытая папка конфигурации; `None`, пока её не выбрали.
+type Folder = Rc<RefCell<Option<PathBuf>>>;
+
+/// Создаёт окно конфигуратора и открывает папку `folder`, если она задана.
 ///
 /// # Errors
 /// Окно не создалось: нет графической подсистемы.
-pub fn create_window(config: Configuration) -> Result<ConfiguratorWindow, slint::PlatformError> {
+pub fn create_window(folder: Option<PathBuf>) -> Result<ConfiguratorWindow, slint::PlatformError> {
     let window = ConfiguratorWindow::new()?;
+    let browser = Rc::new(RefCell::new(Browser::new(Configuration::empty())));
+    let opened: Folder = Rc::default();
+    connect_browser(&window, &browser);
+    connect_check(&window, &browser, &opened);
+    match folder {
+        Some(dir) => open_folder(&window, &browser, &opened, dir),
+        None => {
+            show_browser(&window, &browser.borrow());
+            show_check(&window, &CheckReport::NotRun);
+        }
+    }
+    Ok(window)
+}
+
+/// Читает папку: дерево, название и версия из манифеста и сразу проверка. Если конфигурация
+/// не прочиталась, дерево пустое, а причины в панели «Проверка».
+fn open_folder(
+    window: &ConfiguratorWindow,
+    browser: &Rc<RefCell<Browser>>,
+    opened: &Folder,
+    dir: PathBuf,
+) {
+    let config = Configuration::load(&dir).unwrap_or_else(|_| Configuration::empty());
     window.set_config_title(config.title.as_str().into());
     window.set_config_version(config.version.as_str().into());
-    let browser = Rc::new(RefCell::new(Browser::new(config)));
-    show_browser(&window, &browser.borrow());
-    show_check(&window, &CheckReport::NotRun);
-    connect_browser(&window, &browser);
-    connect_check(&window);
-    Ok(window)
+    window.set_config_folder(dir.display().to_string().into());
+    *browser.borrow_mut() = Browser::new(config);
+    show_browser(window, &browser.borrow());
+    show_check(window, &CheckReport::run(&dir));
+    *opened.borrow_mut() = Some(dir);
+}
+
+/// «Проверить»: файлы могли поменяться в редакторе, поэтому папка читается заново; открытый
+/// элемент остаётся, если он ещё есть.
+fn recheck(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, dir: &Path) {
+    let report = CheckReport::run(dir);
+    if let Ok(config) = Configuration::load(dir) {
+        window.set_config_title(config.title.as_str().into());
+        window.set_config_version(config.version.as_str().into());
+        browser.borrow_mut().reload(config);
+        show_browser(window, &browser.borrow());
+    }
+    show_check(window, &report);
 }
 
 /// Тема, скругление, размер шрифта и плотность строк из настроек пользователя: те же, что у приложения.
@@ -89,13 +128,14 @@ fn connect_browser(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>) 
     window.on_field_resize_end(move || resize.end());
 }
 
-fn connect_check(window: &ConfiguratorWindow) {
-    // Проверка читает файлы из памяти и занимает миллисекунды, поэтому идёт прямо в обработчике.
+fn connect_check(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, opened: &Folder) {
+    // Проверка читает десяток маленьких файлов за миллисекунды, поэтому идёт прямо в обработчике.
     window.on_check_requested({
-        let weak = window.as_weak();
+        let (weak, browser, opened) = (window.as_weak(), browser.clone(), opened.clone());
         move || {
-            if let Some(window) = weak.upgrade() {
-                show_check(&window, &CheckReport::run());
+            let Some(window) = weak.upgrade() else { return };
+            if let Some(dir) = opened.borrow().as_deref() {
+                recheck(&window, &browser, dir);
             }
         }
     });

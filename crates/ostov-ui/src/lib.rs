@@ -36,6 +36,8 @@ pub mod settings;
 pub mod shell;
 pub mod shortcuts;
 pub mod sorting;
+#[cfg(test)]
+mod test_support;
 pub mod users;
 pub mod values;
 pub mod windows;

@@ -2,10 +2,12 @@
 //!
 //! Чистая логика без интерфейса: дерево по видам объектов, выбранный элемент, разделы редактора,
 //! таблицы полей и результат проверки. Окно берёт готовые значения у `Browser`
-//! (src/configurator_ui.rs). Только просмотр: ни в конфигурацию, ни на диск ничего не пишется.
-//! Что задумано в конфигураторе: документ «Состав конфигурации», раздел 11.
+//! (src/configurator_ui.rs). Конфигурация читается из папки и здесь не меняется: правят её
+//! в редакторе (решение на R1). Что задумано в конфигураторе: документ «Состав конфигурации»,
+//! раздел 11.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use ostov_api::{
     FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, RegisterMeta, RoleInfo,
@@ -120,20 +122,31 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    /// Встроенная конфигурация «Склад», как у приложения. Выбор папки (К-1) появится позже.
+    /// Конфигурация из папки `dir`: те же чтение и проверка, что у `ostov check`.
     ///
     /// # Errors
-    /// Текст ошибки, если встроенные файлы не прошли проверку.
-    pub fn embedded() -> Result<Self, String> {
-        let config = ostov_meta::demo().map_err(|errors| {
-            let first = errors.first().map(ToString::to_string).unwrap_or_default();
-            format!("Встроенная конфигурация не прошла проверку: {first}")
-        })?;
+    /// Ошибки разбора или проверки с файлом и строкой; их показывает панель «Проверка».
+    pub fn load(dir: &Path) -> Result<Self, Vec<ostov_meta::Error>> {
+        let config = ostov_meta::load(dir)?;
         Ok(Self {
             meta: Meta::new(&config),
             title: config.title,
             version: config.version,
         })
+    }
+
+    /// Пустая конфигурация: папка не открыта или не прочиталась.
+    pub fn empty() -> Self {
+        Self {
+            title: String::new(),
+            version: String::new(),
+            meta: Meta {
+                menu: Vec::new(),
+                objects: Vec::new(),
+                roles: Vec::new(),
+                registers: Vec::new(),
+            },
+        }
     }
 
     /// Сколько элементов этого вида в метаданных.
@@ -483,6 +496,24 @@ impl Browser {
         }
     }
 
+    /// Новая версия той же папки (файлы правили в редакторе): раскрытые группы, элемент и раздел
+    /// остаются, если элемент ещё есть; иначе как у нового окна.
+    pub fn reload(&mut self, config: Configuration) {
+        let kept = self
+            .selected
+            .filter(|element| element.index < config.count(element.kind));
+        if kept.is_none() {
+            let expanded = std::mem::take(&mut self.expanded);
+            *self = Self::new(config);
+            self.expanded = expanded;
+            return;
+        }
+        self.config = config;
+        if self.part >= self.part_titles().len() {
+            self.part = 0;
+        }
+    }
+
     /// Строки дерева с учётом раскрытых групп и выбранного элемента.
     pub fn tree_rows(&self) -> Vec<TreeRow> {
         self.config.tree_rows(&self.expanded, self.selected)
@@ -613,13 +644,14 @@ pub enum CheckReport {
 }
 
 impl CheckReport {
-    /// Проверяет встроенную конфигурацию той же функцией, что `ostov check`: чтение из памяти,
-    /// без базы и записи.
-    pub fn run() -> Self {
-        match ostov_meta::demo() {
-            Ok(_) => Self::Passed,
-            Err(errors) => Self::from_errors(&errors),
-        }
+    /// Проверяет папку конфигурации теми же функциями, что `ostov check`: сначала разбор,
+    /// затем ссылки и имена. Без базы и без записи на диск. Файлы в отчёте указаны от папки.
+    pub fn run(dir: &Path) -> Self {
+        let errors = match ostov_meta::parse(dir) {
+            Ok(files) => ostov_meta::check(&files),
+            Err(errors) => errors,
+        };
+        Self::from_errors(&relative_to(dir, errors))
     }
 
     /// Результат по списку ошибок `ostov-meta`; пустой список значит «ошибок нет».
@@ -652,7 +684,7 @@ impl CheckReport {
     pub fn empty_text(&self) -> &'static str {
         match self {
             Self::NotRun => "Проверка не запускалась. Нажмите «Проверить».",
-            Self::Passed => "Проверена встроенная конфигурация, ошибок нет.",
+            Self::Passed => "Файлы конфигурации прочитаны и проверены, ошибок нет.",
             // Со списком ошибок пустого места нет.
             Self::Failed(_) => "",
         }
@@ -689,13 +721,31 @@ impl CheckReport {
     }
 }
 
+/// Пути файлов от папки конфигурации: `catalogs/goods.yaml` читается легче полного пути.
+pub(crate) fn relative_to(dir: &Path, errors: Vec<ostov_meta::Error>) -> Vec<ostov_meta::Error> {
+    errors
+        .into_iter()
+        .map(|error| match error.file.strip_prefix(dir) {
+            Ok(file) => ostov_meta::Error::new(file, error.line, error.reason),
+            Err(_) => error,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{config_copy, config_dir, replace_in};
     use ostov_api::{ObjectMeta, Rights, TablePartDef};
 
+    /// Встроенная «Склад»: та же, что в `config/`, но без чтения диска.
     fn embedded() -> Configuration {
-        Configuration::embedded().expect("встроенная конфигурация проходит проверку")
+        let config = ostov_meta::demo().expect("встроенная конфигурация проходит проверку");
+        Configuration {
+            meta: Meta::new(&config),
+            title: config.title,
+            version: config.version,
+        }
     }
 
     fn object(name: &str, kind: ObjectKind) -> ObjectMeta {
@@ -984,6 +1034,31 @@ mod tests {
     }
 
     #[test]
+    fn reload_keeps_the_open_element_while_it_exists() {
+        let mut browser = Browser::new(embedded());
+        browser.click(0);
+        let rows = browser.tree_rows();
+        let row = rows
+            .iter()
+            .position(|row| !row.is_group)
+            .expect("есть элемент");
+        browser.click(row);
+        browser.choose_section(EditorSection::Fields);
+        let selected = browser.selected();
+
+        browser.reload(embedded());
+        assert_eq!(browser.selected(), selected);
+        assert_eq!(browser.section(), EditorSection::Fields);
+        assert_eq!(browser.tree_rows().len(), rows.len());
+
+        // Элемента больше нет: открыт первый, раздел «Общие», свёрнутое осталось свёрнутым.
+        browser.reload(config_of(empty_meta()));
+        assert_eq!(browser.selected(), None);
+        assert_eq!(browser.section(), EditorSection::General);
+        assert!(!browser.tree_rows()[0].expanded);
+    }
+
+    #[test]
     fn section_survives_a_move_between_kinds_that_share_it_and_resets_otherwise() {
         let mut meta = empty_meta();
         meta.objects.push(object("cat", ObjectKind::Catalog));
@@ -1089,8 +1164,44 @@ mod tests {
     }
 
     #[test]
-    fn embedded_configuration_passes_the_check() {
-        assert_eq!(CheckReport::run(), CheckReport::Passed);
+    fn repository_config_folder_loads_and_passes_the_check() {
+        let config = Configuration::load(&config_dir()).expect("config/ читается");
+        assert_eq!(config.title, embedded().title);
+        assert_eq!(config.meta, embedded().meta);
+        assert_eq!(CheckReport::run(&config_dir()), CheckReport::Passed);
+    }
+
+    #[test]
+    fn broken_yaml_is_reported_with_its_file_and_line() {
+        let dir = config_copy("configurator-broken");
+        let goods = dir.join("catalogs").join("goods.yaml");
+        replace_in(&goods, "title: Товары", "title: Товары\ncolour: red");
+        let report = CheckReport::run(&dir);
+        let CheckReport::Failed(issues) = &report else {
+            panic!("ожидались ошибки: {report:?}");
+        };
+        let issue = issues
+            .iter()
+            .find(|issue| issue.file.ends_with("goods.yaml"))
+            .expect("ошибка в goods.yaml");
+        assert_eq!(
+            issue.file,
+            Path::new("catalogs")
+                .join("goods.yaml")
+                .display()
+                .to_string()
+        );
+        assert_eq!(issue.line, "3");
+        assert!(Configuration::load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(&dir));
+    }
+
+    #[test]
+    fn missing_folder_is_reported_as_missing_manifest() {
+        let dir = config_dir().join("нет-такой-папки");
+        let report = CheckReport::run(&dir);
+        assert!(report.is_failed(), "{report:?}");
+        assert_eq!(report.table().rows[0][0], "ostov.yaml");
     }
 
     #[test]
