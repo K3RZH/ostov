@@ -145,6 +145,7 @@ impl Configuration {
                 objects: Vec::new(),
                 roles: Vec::new(),
                 registers: Vec::new(),
+                user_fields: Vec::new(),
             },
         }
     }
@@ -777,6 +778,7 @@ mod tests {
             objects: Vec::new(),
             roles: Vec::new(),
             registers: Vec::new(),
+            user_fields: Vec::new(),
         }
     }
 
