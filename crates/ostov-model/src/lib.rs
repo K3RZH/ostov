@@ -124,6 +124,8 @@ pub struct Config {
     pub menu: Vec<MenuItem>,
     /// Роли из `roles/`; встроенной `admin` здесь нет, она есть всегда.
     pub roles: Vec<RoleDef>,
+    /// Свойства пользователя (ADR-043), например его склады для ограничений по записям.
+    pub user_fields: Vec<UserFieldDef>,
 }
 
 /// Имя встроенной роли со всеми правами. В YAML её не описывают.
@@ -138,6 +140,18 @@ pub struct RoleDef {
     /// Объекты, которых нет в списке, роли недоступны.
     pub objects: Vec<(String, Rights)>,
     pub system: SystemRights,
+    /// Ограничения по записям (СТ-52): несколько на один объект действуют вместе.
+    pub restrictions: Vec<Restriction>,
+}
+
+/// Ограничение по записям (ADR-043): роли видно только то, где поле объекта — одно из значений
+/// свойства пользователя (`warehouse` среди `user.warehouses`). Свойство пустое — не видно ничего.
+/// У регистра поле — измерение.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restriction {
+    pub object: String,
+    pub field: String,
+    pub user_field: String,
 }
 
 /// Права не на объект, а на всю базу.
@@ -184,6 +198,17 @@ pub struct Meta {
     pub roles: Vec<RoleInfo>,
     /// Регистры: по ним строятся отчёты `<имя>_balance` и `<имя>_turnover`.
     pub registers: Vec<RegisterMeta>,
+    /// Свойства пользователя для формы в карточке пользователя (ADR-043).
+    pub user_fields: Vec<UserFieldDef>,
+}
+
+/// Свойство пользователя (ADR-043): объявляется в конфигурации, значения хранятся в базе
+/// у пользователя; на него ссылаются ограничения по записям (`user.warehouses`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFieldDef {
+    pub field: FieldDef,
+    /// Несколько значений: например, склады кладовщика.
+    pub many: bool,
 }
 
 /// Регистр для отчётов: измерения и ресурсы в порядке конфигурации.
@@ -293,6 +318,7 @@ impl Meta {
                     resources: r.resources.clone(),
                 })
                 .collect(),
+            user_fields: config.user_fields.clone(),
         }
     }
 }

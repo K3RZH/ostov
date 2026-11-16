@@ -74,6 +74,7 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
             .into_iter()
             .map(|role| role_def(role.value))
             .collect(),
+        user_fields: Vec::new(),
     }
 }
 
@@ -105,6 +106,7 @@ fn role_def(role: crate::Role) -> RoleDef {
             admin: has(&role.system, "admin"),
             update_config: has(&role.system, "update_config"),
         },
+        restrictions: Vec::new(),
     }
 }
 

@@ -7,10 +7,12 @@ mod convert;
 mod demo;
 mod describe;
 mod journal;
+mod restrict;
 mod schema;
 mod settings;
 #[cfg(test)]
 mod tests;
+mod user_fields;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions, TryLockError};
@@ -444,6 +446,8 @@ fn parse_token(token: &str) -> EngineResult<(String, ListQuery)> {
             posted: unflag(posted),
             deleted: unflag(deleted),
             filter: decode_filter(filter)?,
+            // Ограничения не из ключа: их каждый раз берут у того, кто вошёл.
+            within: Vec::new(),
         },
     ))
 }
@@ -557,6 +561,7 @@ impl LocalEngine {
             posted: q.posted,
             deleted: q.deleted,
             filter: fields_from_api(&q.filter)?,
+            within: self.within(&q.object)?,
         };
         let token = token(&q.object, &query)?;
         let mut db = self.db()?;
@@ -573,8 +578,9 @@ impl LocalEngine {
     }
 
     fn run_seek(&self, token: &str, position: u64, size: u32) -> EngineResult<ListPage> {
-        let (object, query) = parse_token(token)?;
+        let (object, mut query) = parse_token(token)?;
         self.need(&object, Need::Read)?;
+        query.within = self.within(&object)?;
         let source = self.source(&object)?;
         let mut db = self.db()?;
         let mut cache = self.milestones();
@@ -1065,6 +1071,20 @@ impl Engine for LocalEngine {
         })
     }
 
+    fn admin_user_fields(&self, login: &str) -> EngineResult<ostov_api::UserFields> {
+        self.guarded("AdminUserFields", || self.run_admin_user_fields(login))
+    }
+
+    fn admin_set_user_fields(
+        &self,
+        login: &str,
+        fields: &ostov_api::UserFields,
+    ) -> EngineResult<()> {
+        self.guarded("AdminSetUserFields", || {
+            self.run_admin_set_user_fields(login, fields)
+        })
+    }
+
     fn admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
         self.guarded("AdminSetUserActive", || {
             self.run_admin_set_user_active(login, active)
@@ -1085,6 +1105,7 @@ impl Engine for LocalEngine {
     fn get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
         self.guarded("Get", || {
             self.need(object, Need::Read)?;
+            self.need_visible(object, id)?;
             self.run_get(object, id)
         })
     }
@@ -1092,6 +1113,7 @@ impl Engine for LocalEngine {
     fn save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
         self.guarded("Save", || {
             self.need_save(object, data, post)?;
+            self.need_fits(object, data)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             busy_retry(|| self.run_save(object, data, post))
         })
@@ -1101,6 +1123,8 @@ impl Engine for LocalEngine {
         self.guarded("SaveBatch", || {
             for (n, item) in items.iter().enumerate() {
                 self.need_save(&item.object, &item.data, item.post)
+                    .map_err(|e| numbered(n, e))?;
+                self.need_fits(&item.object, &item.data)
                     .map_err(|e| numbered(n, e))?;
             }
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
@@ -1117,6 +1141,7 @@ impl Engine for LocalEngine {
     ) -> EngineResult<Saved> {
         self.guarded("MarkDeleted", || {
             self.need(object, Need::Delete)?;
+            self.need_visible(object, id)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             busy_retry(|| self.run_mark_deleted(object, id, version, deleted))
         })
@@ -1125,6 +1150,7 @@ impl Engine for LocalEngine {
     fn post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         self.guarded("Post", || {
             self.need(document, Need::Post)?;
+            self.need_visible(document, id)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             busy_retry(|| self.run_post(document, id))
         })
@@ -1133,6 +1159,7 @@ impl Engine for LocalEngine {
     fn unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         self.guarded("Unpost", || {
             self.need(document, Need::Unpost)?;
+            self.need_visible(document, id)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             busy_retry(|| self.run_unpost(document, id))
         })
@@ -1141,6 +1168,7 @@ impl Engine for LocalEngine {
     fn trial_post(&self, document: &str, data: &ObjectData) -> EngineResult<ostov_api::TrialPost> {
         self.guarded("TrialPost", || {
             self.need_save(document, data, PostAction::Post)?;
+            self.need_fits(document, data)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
             self.run_trial_post(document, data)
         })
@@ -1157,6 +1185,7 @@ impl Engine for LocalEngine {
     fn query(&self, sql: &str, params: &ostov_api::Fields) -> EngineResult<ostov_api::QueryResult> {
         self.guarded("Query", || {
             self.need_system(|_| true, "запросы")?;
+            self.need_query(sql)?;
             let params = params
                 .iter()
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
@@ -1285,6 +1314,7 @@ impl LocalEngine {
             }
         }
 
+        let within = self.within(register.name())?;
         let mut db = self.db()?;
         let mut rows: Vec<ostov_api::Fields> = match kind {
             "balance" => register
@@ -1326,6 +1356,7 @@ impl LocalEngine {
             _ => return Err(no_report()),
         };
 
+        Self::keep_within(&within, &mut rows)?;
         let total = rows.len();
         let start: usize = match q.after_key.as_deref() {
             None => 0,
@@ -1571,7 +1602,8 @@ impl Connector for LocalConnector {
         if !Path::new(path).exists() {
             return Err(not_found(path));
         }
-        let _lock = lock_base(path)?;
+        // Без замка базы: план только читает (всё в транзакции с откатом), и конфигуратор
+        // строит его, пока база открыта со старой конфигурацией (К-16).
         let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
         base_config(&mut db, path)?;
         let config = self.config()?;
@@ -1710,6 +1742,7 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
     record_config(db, config)?;
     config.create_tables(db)?;
     settings::create_table(db)?;
+    user_fields::create_table(db)?;
     ostov_sec::create_tables(db)?;
     schema::record(db, config)
 }
@@ -1729,6 +1762,7 @@ fn upgrade_noting(
     crate::closing::create_table(db)?;
     crate::object::document::create_numbers_table(db)?;
     settings::create_table(db)?;
+    user_fields::create_table(db)?;
     ostov_sec::create_tables(db)?;
     if !schema::recorded(db)? {
         // Базы до реструктуризации создавались только под встроенный «Склад».

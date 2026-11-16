@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use ostov_core::local::Rules;
-use ostov_server::{Base, CERT_FILE, Connect, Hub, Tls, serve};
+use ostov_server::{Base, CA_FILE, Connect, Hub, Tls, serve};
 use ostov_store::Driver;
 
 const USAGE: &str = "ostov-server --config <папка конфигурации> [--listen 0.0.0.0:7700] \
@@ -191,7 +191,7 @@ fn run() -> Result<(), String> {
         println!(
             "Ostov: сервер «{title}» слушает {}, логика документов: {logic}. Сертификат для клиентов: {}",
             args.listen,
-            args.tls.join(CERT_FILE).display()
+            args.tls.join(CA_FILE).display()
         );
         let stop = async {
             let _ = tokio::signal::ctrl_c().await;

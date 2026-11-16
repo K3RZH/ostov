@@ -55,7 +55,7 @@ fn start(name: &str, connect: Option<Connect>) -> Server {
         })
     });
     let tls = Tls::load_or_create(&dir.join("tls"), &["localhost".to_owned()]).unwrap();
-    let cert = tls.cert_pem.clone();
+    let cert = tls.ca_pem.clone();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let (ready, port) = mpsc::channel();
     let thread = std::thread::spawn(move || {

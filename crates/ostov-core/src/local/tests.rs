@@ -1297,6 +1297,7 @@ fn roles_model() -> ostov_model::Config {
             ("issue".into(), work),
         ],
         system: ostov_model::SystemRights::default(),
+        restrictions: Vec::new(),
     });
     model
 }
@@ -2624,22 +2625,21 @@ fn plan_shows_changes_without_touching_base() {
             },
         ]
     );
-    // План ничего не записал: тот же план второй раз, а открытие делает ровно его.
+    // Открытая база плану не мешает: так конфигуратор проверяет новую конфигурацию, не
+    // закрывая старую (К-16). И план ничего не записал: тот же план второй раз.
+    let open = LocalConnector::new(super::warehouse_model())
+        .open_local(&base.path, None)
+        .unwrap();
     assert_eq!(changed.plan_local(&base.path).unwrap(), plan);
+    assert!(open.hello().is_ok());
+    drop(open);
+    // Открытие с новой конфигурацией делает ровно этот план.
     drop(changed.open_local(&base.path, None).unwrap());
     let after = changed.plan_local(&base.path).unwrap();
     assert!(
         after.changes.is_empty() && after.refused.is_none(),
         "{after:?}"
     );
-
-    // Открытую базу план не трогает.
-    let open = changed.open_local(&base.path, None).unwrap();
-    assert_eq!(
-        changed.plan_local(&base.path).unwrap_err().code,
-        ErrorCode::AlreadyOpen
-    );
-    drop(open);
 }
 
 #[test]
@@ -2852,4 +2852,305 @@ fn busy_store_error_is_retried_and_explained() {
         "syntax error".into(),
     )));
     assert!(!super::convert::is_busy(&other));
+}
+
+fn user_field(name: &str, kind: ostov_model::FieldKind, many: bool) -> ostov_model::UserFieldDef {
+    let mut field = ostov_model::FieldDef::new(name, kind);
+    if kind == ostov_model::FieldKind::Ref {
+        field.target = Some("warehouses".into());
+    }
+    ostov_model::UserFieldDef { field, many }
+}
+
+#[test]
+fn user_fields_are_set_by_admin_and_read_with_titles() {
+    use ostov_api::UserFields;
+    use ostov_model::FieldKind;
+
+    let base = Base::new("user-fields");
+    let mut model = roles_model();
+    model.user_fields = vec![
+        user_field("warehouses", FieldKind::Ref, true),
+        user_field("badge", FieldKind::Text, false),
+    ];
+    let engine = LocalConnector::new(model)
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let cold = add(&*engine, "warehouses", "Холодный");
+
+    let meta = engine.get_meta().unwrap();
+    let names: Vec<(&str, bool)> = meta
+        .user_fields
+        .iter()
+        .map(|f| (f.field.name.as_str(), f.many))
+        .collect();
+    assert_eq!(names, [("warehouses", true), ("badge", false)]);
+
+    let empty = engine.admin_user_fields("keeper").unwrap();
+    assert!(empty["warehouses"].is_empty() && empty["badge"].is_empty());
+
+    let set = UserFields::from([
+        (
+            "warehouses".into(),
+            vec![refer(main), refer(cold), refer(main)],
+        ),
+        ("badge".into(), vec![text("17")]),
+    ]);
+    engine.admin_set_user_fields(" Keeper ", &set).unwrap();
+    let got = engine.admin_user_fields("keeper").unwrap();
+    let titles: Vec<Option<String>> = got["warehouses"].iter().map(title).collect();
+    assert_eq!(titles, [Some("Основной".into()), Some("Холодный".into())]);
+    assert_eq!(got["badge"], [text("17")]);
+
+    // Меняются только переданные свойства; пустой список очищает.
+    engine
+        .admin_set_user_fields("keeper", &UserFields::from([("badge".into(), vec![])]))
+        .unwrap();
+    let got = engine.admin_user_fields("keeper").unwrap();
+    assert!(got["badge"].is_empty());
+    assert_eq!(got["warehouses"].len(), 2);
+    assert!(
+        journal(&*engine)
+            .iter()
+            .any(|e| e.details.contains("свойства пользователя keeper"))
+    );
+
+    let code = |name: &str, values: Vec<Value>| {
+        engine
+            .admin_set_user_fields("keeper", &UserFields::from([(name.to_owned(), values)]))
+            .unwrap_err()
+            .code
+    };
+    assert_eq!(code("shoe", vec![]), ErrorCode::Validation);
+    assert_eq!(
+        code("badge", vec![text("1"), text("2")]),
+        ErrorCode::Validation
+    );
+    assert_eq!(
+        code("warehouses", vec![text("Основной")]),
+        ErrorCode::Validation
+    );
+    assert_eq!(code("warehouses", vec![refer(999)]), ErrorCode::Validation);
+    let nobody = engine.admin_set_user_fields("nobody", &set).unwrap_err();
+    assert_eq!(nobody.code, ErrorCode::NotFound);
+    assert_eq!(
+        engine.admin_user_fields("keeper").unwrap()["warehouses"].len(),
+        2
+    );
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert_eq!(
+        engine.admin_user_fields("keeper").unwrap_err().code,
+        ErrorCode::Forbidden
+    );
+    assert_eq!(
+        engine
+            .admin_set_user_fields("keeper", &set)
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden
+    );
+}
+
+#[test]
+fn user_field_ref_points_to_a_catalog() {
+    use ostov_model::FieldKind;
+
+    let mut model = super::warehouse_model();
+    model.user_fields = vec![user_field("warehouses", FieldKind::Ref, true)];
+    assert!(super::Config::from_model(&model).is_ok());
+    model.user_fields[0].field.target = Some("issue".into());
+    assert!(super::Config::from_model(&model).is_err());
+    model.user_fields[0].field.target = None;
+    assert!(super::Config::from_model(&model).is_err());
+    model.user_fields = vec![
+        user_field("badge", FieldKind::Text, false),
+        user_field("badge", FieldKind::Int, false),
+    ];
+    assert!(super::Config::from_model(&model).is_err());
+}
+
+/// Кладовщику свойство «Склады» и ограничения на расходы и остатки по складу (СТ-52).
+fn restricted_model() -> ostov_model::Config {
+    let mut model = roles_model();
+    model.user_fields = vec![user_field("warehouses", ostov_model::FieldKind::Ref, true)];
+    for object in ["issue", "stock"] {
+        model.roles[0].restrictions.push(ostov_model::Restriction {
+            object: object.into(),
+            field: "warehouse".into(),
+            user_field: "warehouses".into(),
+        });
+    }
+    model
+}
+
+fn stock_doc(warehouse: i64, supplier: Option<i64>, goods: i64) -> ObjectData {
+    let mut header = fields(&[
+        ("date", Value::Date("2026-05-01".into())),
+        ("warehouse", refer(warehouse)),
+    ]);
+    if let Some(s) = supplier {
+        header.insert("supplier".into(), refer(s));
+    }
+    let line = fields(&[
+        ("goods", refer(goods)),
+        (
+            "qty",
+            Value::Decimal {
+                units: 1000,
+                scale: 3,
+            },
+        ),
+    ]);
+    ObjectData {
+        fields: header,
+        tables: [("lines".to_owned(), vec![line])].into(),
+        ..ObjectData::default()
+    }
+}
+
+#[test]
+fn storekeeper_sees_and_writes_only_own_warehouse() {
+    use ostov_api::{ReportQuery, UserFields};
+
+    let base = Base::new("restrictions");
+    let engine = LocalConnector::new(restricted_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let cold = add(&*engine, "warehouses", "Холодный");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let flour = add(&*engine, "goods", "Мука");
+    for w in [main, cold] {
+        engine
+            .save(
+                "receipt",
+                &stock_doc(w, Some(mill), flour),
+                PostAction::Post,
+            )
+            .unwrap();
+    }
+    let mine = engine
+        .save("issue", &stock_doc(main, None, flour), PostAction::Write)
+        .unwrap();
+    let other = engine
+        .save("issue", &stock_doc(cold, None, flour), PostAction::Write)
+        .unwrap();
+    let set = |list: Vec<Value>| {
+        engine
+            .admin_set_user_fields("keeper", &UserFields::from([("warehouses".into(), list)]))
+            .unwrap();
+    };
+    set(vec![refer(main)]);
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let list = |engine: &dyn Engine| {
+        let page = engine
+            .list(&ListQuery {
+                object: "issue".into(),
+                size: 50,
+                ..ListQuery::default()
+            })
+            .unwrap();
+        let again = engine.seek(&page.token, 0, 50).unwrap();
+        let ids: Vec<i64> = page.rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, again.rows.iter().map(|r| r.id).collect::<Vec<_>>());
+        ids
+    };
+    assert_eq!(list(&*engine), [mine.id]);
+    assert!(engine.get("issue", mine.id).is_ok());
+    let code = |r: ostov_api::EngineResult<ostov_api::Saved>| r.unwrap_err().code;
+    assert_eq!(
+        engine.get("issue", other.id).unwrap_err().code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(code(engine.post("issue", other.id)), ErrorCode::NotFound);
+    assert_eq!(code(engine.unpost("issue", other.id)), ErrorCode::NotFound);
+    // Чужой склад нельзя ни выбрать в новом документе, ни подставить в свой.
+    let foreign = stock_doc(cold, None, flour);
+    assert_eq!(
+        code(engine.save("issue", &foreign, PostAction::Write)),
+        ErrorCode::Forbidden
+    );
+    let moved = ObjectData {
+        id: Some(mine.id),
+        version: mine.version,
+        ..stock_doc(cold, None, flour)
+    };
+    assert_eq!(
+        code(engine.save("issue", &moved, PostAction::Write)),
+        ErrorCode::Forbidden
+    );
+
+    let report = engine
+        .run_report(&ReportQuery {
+            report: "stock_balance".into(),
+            params: Fields::new(),
+            after_key: None,
+            size: 100,
+        })
+        .unwrap();
+    let places: Vec<Option<i64>> = report
+        .rows
+        .iter()
+        .map(|r| match r.values["warehouse"] {
+            Value::Ref { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(places, [Some(main)]);
+    engine.post("issue", mine.id).unwrap();
+    // Запросом ограничения не обойти: к ограниченному объекту он закрыт, к остальным открыт.
+    assert!(
+        engine
+            .query("SELECT id FROM issue", &Fields::new())
+            .is_err()
+    );
+    assert!(
+        engine
+            .query("SELECT warehouse FROM stock", &Fields::new())
+            .is_err()
+    );
+    assert!(engine.query("SELECT id FROM goods", &Fields::new()).is_ok());
+
+    // Пустое свойство — не видно ничего; администратор видит всё.
+    engine.login("boss", ADMIN_PASSWORD).unwrap();
+    assert_eq!(list(&*engine).len(), 2);
+    set(Vec::new());
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    assert!(list(&*engine).is_empty());
+}
+
+#[test]
+fn restriction_is_checked_with_configuration() {
+    let ok = super::Config::from_model(&restricted_model());
+    assert!(ok.is_ok(), "{:?}", ok.err());
+    let broken = |change: fn(&mut ostov_model::Restriction)| {
+        let mut model = restricted_model();
+        change(&mut model.roles[0].restrictions[0]);
+        super::Config::from_model(&model).is_err()
+    };
+    assert!(broken(|r| r.object = "nothing".into()));
+    assert!(broken(|r| r.field = "shelf".into()));
+    assert!(broken(|r| r.user_field = "shops".into()));
+    assert!(broken(|r| r.field = "number".into()));
 }

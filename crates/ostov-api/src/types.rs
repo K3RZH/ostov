@@ -63,8 +63,11 @@ pub struct BaseInfo {
 /// Метаданные — те же типы, что строит `ostov-meta` из конфигурации: одно описание на всех.
 pub use ostov_model::{
     FieldDef, FieldKind, MenuItem, Meta, ObjectKind, ObjectMeta, RegisterMeta, Rights, RoleInfo,
-    SystemRights, TablePartDef,
+    SystemRights, TablePartDef, UserFieldDef,
 };
+
+/// Значения свойств пользователя (`Meta.user_fields`): у поля без `many` — не больше одного.
+pub type UserFields = BTreeMap<String, Vec<Value>>;
 
 // ---------------------------------------------------------------- списки
 

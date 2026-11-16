@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use ostov_store::{Driver, Value};
 
-use crate::object::{FieldDef, FieldKind, Fields, read_fields, to_value};
+use crate::object::{FieldDef, FieldKind, FieldValue, Fields, read_fields, to_value};
 use crate::{Catalog, CoreError, DocumentKind};
 use cursor::Cursor;
 pub use milestones::{MILESTONE_STEP, Milestones};
@@ -69,6 +69,8 @@ pub struct ListQuery {
     pub deleted: Option<bool>,
     /// Точный отбор по полям; текст без учёта регистра.
     pub filter: Fields,
+    /// Ограничения по записям (СТ-52): поле среди значений; пустой список — ни одной строки.
+    pub within: Vec<(String, Vec<FieldValue>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +141,7 @@ struct Plan {
     deleted: Option<bool>,
     /// Номер поля в `fields` и значение для сравнения (текст уже в нижнем регистре).
     filter: Vec<(usize, Value)>,
+    within: Vec<(usize, Vec<Value>)>,
     titles: TitleColumns,
 }
 
@@ -192,6 +195,21 @@ impl Plan {
             };
             filter.push((i, value));
         }
+        let mut within = Vec::with_capacity(query.within.len());
+        for (name, values) in &query.within {
+            let found = fields.iter().enumerate().find(|(_, f)| &f.name == name);
+            let Some((i, def)) = found else {
+                return Err(CoreError::Invalid(format!(
+                    "в {} нет поля {name} для ограничения по записям",
+                    source.table()
+                )));
+            };
+            let values = values
+                .iter()
+                .map(|v| to_value(def, v))
+                .collect::<Result<_, _>>()?;
+            within.push((i, values));
+        }
         let raw = query
             .search
             .as_deref()
@@ -207,6 +225,7 @@ impl Plan {
             posted: query.posted,
             deleted: query.deleted,
             filter,
+            within,
             titles: titles.clone(),
         })
     }
@@ -426,6 +445,26 @@ impl Plan {
                 col
             };
             parts.push(format!("{col} = {}", d.placeholder(params.len())));
+        }
+        for (i, values) in &self.within {
+            let Some(field) = self.fields.get(*i) else {
+                continue;
+            };
+            let mut marks = Vec::with_capacity(values.len());
+            for value in values {
+                params.push(value.clone());
+                marks.push(d.placeholder(params.len()));
+            }
+            parts.push(if marks.is_empty() {
+                "1 = 0".to_owned()
+            } else {
+                format!(
+                    "{}.{} IN ({})",
+                    d.quote_ident(&self.table),
+                    d.quote_ident(&field.name),
+                    marks.join(", ")
+                )
+            });
         }
         (!parts.is_empty()).then(|| parts.join(" AND "))
     }

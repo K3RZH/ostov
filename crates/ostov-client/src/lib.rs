@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use ostov_api::{
     BatchItem, Connector, Engine, EngineError, EngineResult, ErrorCode, Fields, HelloInfo, JobId,
     JournalPage, ListPage, ListQuery, Meta, NewAdmin, NewUser, ObjectData, PROTOCOL_VERSION,
-    PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserInfo,
+    PostAction, QueryResult, ReportQuery, Saved, SessionInfo, UserFields, UserInfo,
 };
 use ostov_proto::pb::engine_client::EngineClient;
 use ostov_proto::{AUTH_HEADER, fields_from_pb, fields_to_pb, from_status, pb, session_from_pb};
@@ -22,8 +22,8 @@ use tonic::{Request, Status};
 /// Порт сервера, если в адресе он не указан.
 pub const DEFAULT_PORT: u16 = 7700;
 
-/// Подключается к серверу. `ca_pem` — его сертификат (`server.crt`): клиент доверяет
-/// только ему, чужой сервер не примет (СТ-33).
+/// Подключается к серверу. `ca_pem` — корневой сертификат сервера (`ca.crt`, у установки
+/// до него — `server.crt`): клиент доверяет только ему, чужой сервер не примет (СТ-33).
 #[derive(Clone)]
 pub struct RemoteConnector {
     ca_pem: String,
@@ -341,6 +341,23 @@ impl Engine for RemoteEngine {
         self.call(
             u,
             |mut c, r| async move { c.admin_set_user_active(r).await },
+        )?;
+        Ok(())
+    }
+
+    fn admin_user_fields(&self, login: &str) -> EngineResult<UserFields> {
+        let u = pb::UserLogin {
+            login: login.to_owned(),
+        };
+        let reply = self.call(u, |mut c, r| async move { c.admin_user_fields(r).await })?;
+        ostov_proto::user_fields_from_pb(reply.fields)
+    }
+
+    fn admin_set_user_fields(&self, login: &str, fields: &UserFields) -> EngineResult<()> {
+        let u = ostov_proto::user_fields_to_pb(login, fields.clone());
+        self.call(
+            u,
+            |mut c, r| async move { c.admin_set_user_fields(r).await },
         )?;
         Ok(())
     }

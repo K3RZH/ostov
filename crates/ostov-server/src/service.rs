@@ -220,6 +220,23 @@ impl Remote for Service {
         .await
     }
 
+    async fn admin_user_fields(&self, req: Request<pb::UserLogin>) -> Reply<pb::UserFields> {
+        self.with(req, |e, u| {
+            let fields = e.admin_user_fields(&u.login)?;
+            Ok(ostov_proto::user_fields_to_pb(&u.login, fields))
+        })
+        .await
+    }
+
+    async fn admin_set_user_fields(&self, req: Request<pb::UserFields>) -> Reply<pb::Empty> {
+        self.with(req, |e, u| {
+            let fields = ostov_proto::user_fields_from_pb(u.fields)?;
+            e.admin_set_user_fields(&u.login, &fields)?;
+            Ok(pb::Empty {})
+        })
+        .await
+    }
+
     async fn admin_set_user_password(&self, req: Request<pb::UserPassword>) -> Reply<pb::Empty> {
         let hub = Arc::clone(&self.hub);
         let token = token(&req);

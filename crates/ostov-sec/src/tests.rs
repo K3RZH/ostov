@@ -52,6 +52,7 @@ pub(crate) fn roles() -> Vec<RoleDef> {
             admin: true,
             ..SystemRights::default()
         },
+        restrictions: Vec::new(),
     });
     roles
 }

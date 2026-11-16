@@ -182,6 +182,13 @@ fn meta_survives_the_wire() {
                 title: "Кладовщик".into(),
             },
         ],
+        user_fields: vec![api::UserFieldDef {
+            field: api::FieldDef {
+                target: Some("warehouses".into()),
+                ..field(api::FieldKind::Ref)
+            },
+            many: true,
+        }],
     };
     let back: api::Meta = wire(pb::Meta::from(meta.clone())).try_into().unwrap();
     assert_eq!(back, meta);

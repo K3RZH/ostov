@@ -84,6 +84,9 @@ impl Config {
             .map(|c| Ok((c.name.clone(), Catalog::new(&c.name, c.fields.clone())?)))
             .collect::<Result<BTreeMap<_, _>, CoreError>>()?;
 
+        super::user_fields::check(&model.user_fields, &catalogs)?;
+        super::restrict::check(model)?;
+
         let mut registers = BTreeMap::new();
         for r in &model.registers {
             match r.kind {
@@ -303,6 +306,7 @@ pub fn warehouse_model() -> ostov_model::Config {
                 .into(),
         }],
         roles: Vec::new(),
+        user_fields: Vec::new(),
     }
 }
 

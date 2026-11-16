@@ -32,6 +32,18 @@ pub struct Movement {
     pub resources: BTreeMap<String, Decimal>,
 }
 
+/// Себестоимость скользящей средней (СТ-К10, ADR-042): у расхода без суммы ядро считает её
+/// само — сумма остатка × количество ÷ остаток на дату документа.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cost {
+    /// Ресурс-количество.
+    pub qty: String,
+    /// Ресурс-сумма.
+    pub sum: String,
+    /// Измерения, по которым считается средняя: все, кроме партии.
+    pub by: Vec<String>,
+}
+
 /// Регистр накопления: движения документов и итоги по измерениям.
 /// Итоги — кэш, их всегда можно пересчитать из движений (СТ-21).
 #[derive(Debug, Clone)]
@@ -40,6 +52,7 @@ pub struct AccumulationRegister {
     pub(super) dims: Vec<FieldDef>,
     pub(super) resources: Vec<FieldDef>,
     allow_negative: bool,
+    cost: Option<Cost>,
 }
 
 type Key = Vec<Value>;
@@ -89,7 +102,38 @@ impl AccumulationRegister {
             dims,
             resources,
             allow_negative: false,
+            cost: None,
         })
+    }
+
+    /// Регистр с себестоимостью: остаток в минус не уходит (СТ-23), сумму расхода считает ядро,
+    /// приход задним числом под уже списанный товар отклоняется (СТ-53).
+    pub fn with_cost(mut self, cost: Cost) -> Result<Self, CoreError> {
+        let bad = |why: String| {
+            Err(CoreError::Invalid(format!(
+                "себестоимость регистра {}: {why}",
+                self.name
+            )))
+        };
+        let resource = |name: &str| self.resources.iter().any(|r| r.name == name);
+        if !resource(&cost.qty) || !resource(&cost.sum) || cost.qty == cost.sum {
+            return bad("количество и сумма — два разных ресурса регистра".into());
+        }
+        if cost.by.is_empty() {
+            return bad("не указаны измерения, по которым считается средняя".into());
+        }
+        for (i, name) in cost.by.iter().enumerate() {
+            if !self.dims.iter().any(|d| &d.name == name) || cost.by[..i].contains(name) {
+                return bad(format!("измерение {name} не найдено или повторяется"));
+            }
+        }
+        self.allow_negative = false;
+        self.cost = Some(cost);
+        Ok(self)
+    }
+
+    pub fn cost(&self) -> Option<&Cost> {
+        self.cost.as_ref()
     }
 
     pub fn name(&self) -> &str {
@@ -124,9 +168,9 @@ impl AccumulationRegister {
         Ok(())
     }
 
-    /// Разрешить уход итогов в минус. По умолчанию запрещено.
+    /// Разрешить уход итогов в минус. По умолчанию запрещено, с себестоимостью — всегда.
     pub fn allow_negative(mut self) -> Self {
-        self.allow_negative = true;
+        self.allow_negative = self.cost.is_none();
         self
     }
 
@@ -252,6 +296,10 @@ impl AccumulationRegister {
             keys.push(self.key(&movement.dims)?);
         }
         self.lock_keys(db, keys)?;
+        if let Some(cost) = &self.cost {
+            let place = (recorder, recorder_id, period);
+            self.check_cost_order(db, cost, place, &recorded, movements)?;
+        }
 
         for (sign, key, amounts, old) in recorded {
             self.add(db, &key, &amounts, -sign)?;
@@ -273,7 +321,14 @@ impl AccumulationRegister {
 
         for movement in movements {
             let key = self.key(&movement.dims)?;
-            let amounts = self.amounts(movement)?;
+            let mut amounts = self.amounts(movement)?;
+            if let Some(cost) = &self.cost
+                && movement.kind == MovementKind::Issue
+                && !movement.resources.contains_key(&cost.sum)
+            {
+                let (q, s) = (self.resource(&cost.qty), self.resource(&cost.sum));
+                amounts[s] = self.cost_of(db, cost, &key, period, amounts[q])?;
+            }
             let place = (recorder, recorder_id, period);
             self.insert_movement(db, place, movement.kind, &key, &amounts)?;
             self.add(db, &key, &amounts, movement.kind.sign())?;
@@ -748,6 +803,205 @@ impl AccumulationRegister {
         Ok(())
     }
 }
+
+impl AccumulationRegister {
+    fn resource(&self, name: &str) -> usize {
+        self.resources
+            .iter()
+            .position(|r| r.name == name)
+            .unwrap_or_default()
+    }
+
+    /// Ключ средней: значения измерений `by` из полного ключа.
+    fn cost_key(&self, cost: &Cost, key: &Key) -> Key {
+        cost.by
+            .iter()
+            .filter_map(|b| self.dims.iter().position(|d| &d.name == b))
+            .map(|i| key[i].clone())
+            .collect()
+    }
+
+    fn where_cost(&self, d: &dyn Dialect, cost: &Cost) -> String {
+        cost.by
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{} = {}", d.quote_ident(name), d.placeholder(i + 1)))
+            .collect::<Vec<_>>()
+            .join(" AND ")
+    }
+
+    /// Себестоимость расхода `qty` на конец дня документа: остаток — итоги по всем партиям
+    /// ключа минус движения более поздних дней. Весь остаток уходит со всей суммой, без
+    /// копеечных хвостов (СТ-К15).
+    fn cost_of(
+        &self,
+        db: &mut dyn Driver,
+        cost: &Cost,
+        key: &Key,
+        period: Option<&str>,
+        qty: Decimal,
+    ) -> Result<Decimal, CoreError> {
+        let q = &self.resources[self.resource(&cost.qty)];
+        let s = &self.resources[self.resource(&cost.sum)];
+        let (totals, later) = {
+            let d = db.dialect();
+            let (qn, sn) = (d.quote_ident(&q.name), d.quote_ident(&s.name));
+            let kind = d.quote_ident("kind");
+            (
+                format!(
+                    "SELECT {qn}, {sn} FROM {} WHERE {}{}",
+                    d.quote_ident(&self.totals()),
+                    self.where_cost(d, cost),
+                    d.lock_rows(),
+                ),
+                format!(
+                    "SELECT CAST(SUM({kind} * {qn}) AS BIGINT), CAST(SUM({kind} * {sn}) AS BIGINT) \
+                     FROM {} WHERE {} AND {} > {}",
+                    d.quote_ident(&self.name),
+                    self.where_cost(d, cost),
+                    d.quote_ident("period"),
+                    d.placeholder(cost.by.len() + 1),
+                ),
+            )
+        };
+        let mut params = self.cost_key(cost, key);
+        let units = |v: Option<&Value>| match v {
+            Some(Value::Int(u)) => *u,
+            _ => 0,
+        };
+        let (mut left_q, mut left_s) = (0_i64, 0_i64);
+        for row in db.query(&totals, &params)? {
+            left_q = left_q.saturating_add(units(row.first()));
+            left_s = left_s.saturating_add(units(row.get(1)));
+        }
+        params.push(Value::Text(period.unwrap_or(NO_DATE).to_owned()));
+        if let Some(row) = db.query(&later, &params)?.first() {
+            left_q = left_q.saturating_sub(units(row.first()));
+            left_s = left_s.saturating_sub(units(row.get(1)));
+        }
+        let left_q = Decimal::new(left_q, scale(q))?;
+        let left_s = Decimal::new(left_s, scale(s))?;
+        if left_q.is_negative() || left_q.is_zero() {
+            return Ok(Decimal::zero(scale(s))?);
+        }
+        if qty >= left_q {
+            return Ok(left_s);
+        }
+        Ok(left_s.checked_mul_div(qty, left_q)?)
+    }
+
+    /// СТ-53: приход по ключу средней меняется, а этот товар после него уже списан по старой
+    /// средней — отказ, пока не отменят более поздний расход. Убранный приход дня D мешает
+    /// расходам с D, новый — расходам после D: в один день новый приход идёт после расходов.
+    fn check_cost_order(
+        &self,
+        db: &mut dyn Driver,
+        cost: &Cost,
+        (recorder, recorder_id, period): (&str, i64, Option<&str>),
+        recorded: &[Recorded],
+        movements: &[Movement],
+    ) -> Result<(), CoreError> {
+        let day = period.unwrap_or(NO_DATE);
+        let mut old: Vec<Receipt> = recorded
+            .iter()
+            .filter(|(sign, ..)| *sign > 0)
+            .map(|(_, key, amounts, d)| {
+                let units = amounts.iter().map(|a| a.units()).collect();
+                (self.cost_key(cost, key), d.clone(), key.clone(), units)
+            })
+            .collect();
+        let mut new = Vec::new();
+        for m in movements.iter().filter(|m| m.kind == MovementKind::Receipt) {
+            let key = self.key(&m.dims)?;
+            let units = self.amounts(m)?.iter().map(|a| a.units()).collect();
+            new.push((self.cost_key(cost, &key), day.to_owned(), key, units));
+        }
+        old.sort_by_cached_key(|row| format!("{row:?}"));
+        new.sort_by_cached_key(|row| format!("{row:?}"));
+        if old == new {
+            return Ok(());
+        }
+        let of =
+            |v: &[Receipt], by: &Key| v.iter().filter(|r| &r.0 == by).cloned().collect::<Vec<_>>();
+        let mut changed: Vec<Key> = Vec::new();
+        for (by, ..) in old.iter().chain(&new) {
+            if of(&old, by) != of(&new, by) {
+                push_unique(&mut changed, by.clone());
+            }
+        }
+        for by in changed {
+            let removed = old.iter().filter(|r| r.0 == by).map(|r| r.1.as_str()).min();
+            let added = new.iter().filter(|r| r.0 == by).map(|r| r.1.as_str()).min();
+            let place = (recorder, recorder_id);
+            let blockers = self.later_issues(db, cost, &by, place, removed, added)?;
+            if !blockers.is_empty() {
+                let list: Vec<String> = blockers
+                    .iter()
+                    .map(|(table, id, d)| match d.as_str() {
+                        NO_DATE => format!("{table} #{id}"),
+                        d => format!("{table} #{id} от {d}"),
+                    })
+                    .collect();
+                return Err(CoreError::Invalid(format!(
+                    "нельзя изменить приход по регистру {}: этот товар после него уже списан \
+                     по средней себестоимости ({}). Сначала отмените более поздний расход",
+                    self.name,
+                    list.join(", ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn later_issues(
+        &self,
+        db: &mut dyn Driver,
+        cost: &Cost,
+        by: &Key,
+        (recorder, recorder_id): (&str, i64),
+        removed: Option<&str>,
+        added: Option<&str>,
+    ) -> Result<Vec<(String, i64, String)>, CoreError> {
+        let mut params = by.clone();
+        params.push(recorder.into());
+        params.push(Value::Int(recorder_id));
+        let sql = {
+            let d = db.dialect();
+            let period = format!("COALESCE({}, '{NO_DATE}')", d.quote_ident("period"));
+            let (rec, id) = (d.quote_ident("recorder"), d.quote_ident("recorder_id"));
+            let mut since = Vec::new();
+            for (day, op) in [(removed, ">="), (added, ">")] {
+                if let Some(day) = day {
+                    params.push(Value::Text(day.to_owned()));
+                    since.push(format!("{period} {op} {}", d.placeholder(params.len())));
+                }
+            }
+            format!(
+                "SELECT DISTINCT {rec}, {id}, {period} FROM {} WHERE {} AND {} = -1 \
+                 AND NOT ({rec} = {} AND {id} = {}) AND ({}) ORDER BY 3, 1, 2 LIMIT 5",
+                d.quote_ident(&self.name),
+                self.where_cost(d, cost),
+                d.quote_ident("kind"),
+                d.placeholder(by.len() + 1),
+                d.placeholder(by.len() + 2),
+                since.join(" OR "),
+            )
+        };
+        Ok(db
+            .query(&sql, &params)?
+            .into_iter()
+            .filter_map(|row| match row.as_slice() {
+                [Value::Text(t), Value::Int(id), Value::Text(d)] => {
+                    Some((t.clone(), *id, d.clone()))
+                }
+                _ => None,
+            })
+            .collect())
+    }
+}
+
+/// Приход для сравнения старых и новых движений: ключ средней, день, ключ, ресурсы.
+type Receipt = (Key, String, Key, Vec<i64>);
 
 /// Движения без даты (документ без поля даты) считаем самыми ранними.
 pub(super) const NO_DATE: &str = "0000-00-00";

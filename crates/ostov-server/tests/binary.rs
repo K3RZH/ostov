@@ -60,7 +60,7 @@ async fn server_program_runs_with_yaml_config() {
         .spawn()
         .unwrap();
     let _server = Process(child, dir.clone());
-    let cert = dir.join("tls").join(ostov_server::CERT_FILE);
+    let cert = dir.join("tls").join(ostov_server::CA_FILE);
     let check = cert.clone();
     tokio::task::spawn_blocking(move || wait_for(&check, port))
         .await
