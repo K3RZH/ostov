@@ -107,22 +107,53 @@ fn python_home() -> Result<PathBuf, PyLoadError> {
 }
 
 /// Без своей стандартной библиотеки Python не ошибку вернёт, а завершит процесс.
-/// Поэтому сначала проверяем `Lib/os.py`, и только потом запускаем интерпретатор.
+/// Поэтому сначала ищем её `os.py`, и только потом запускаем интерпретатор.
 fn start_python() -> Result<(), PyLoadError> {
     let home = python_home()?;
-    let landmark = home.join("Lib").join("os.py");
-    if !landmark.is_file() {
+    let dirs = stdlib_dirs(&home);
+    if !dirs.iter().any(|dir| dir.join("os.py").is_file()) {
+        let looked: Vec<String> = dirs
+            .iter()
+            .map(|dir| dir.join("os.py").display().to_string())
+            .collect();
         return Err(PyLoadError::new(
             &home,
             None,
             format!(
-                "рядом с программой нет Python: не найден {}",
-                landmark.display()
+                "рядом с программой нет Python: не найдена стандартная библиотека, искали {}",
+                looked.join(", ")
             ),
         ));
     }
     Python::initialize();
     Ok(())
+}
+
+/// Где лежит стандартная библиотека: в Windows `<home>/Lib`, в Linux и macOS
+/// `<home>/lib/python3.<N>`. Версию берём из имени папки, а не зашиваем.
+fn stdlib_dirs(home: &Path) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        return vec![home.join("Lib")];
+    }
+    let lib = home.join("lib");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&lib)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("python3."))
+        })
+        .map(|entry| entry.path())
+        .collect();
+    dirs.sort();
+    if dirs.is_empty() {
+        // Для сообщения: показать, какую папку ждали.
+        dirs.push(lib.join("python3.N"));
+    }
+    dirs
 }
 
 /// Модуль создаётся ровно один раз: параллельные загрузки ждут первую, иначе класс
@@ -665,5 +696,31 @@ fn from_plain(kind: FieldKind, value: Option<&Plain>) -> Result<FieldValue, Stri
             .map(FieldValue::Decimal)
             .map_err(|e| e.to_string()),
         _ => Err(format!("значение не подходит к типу {}", kind_code(kind))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::stdlib_dirs;
+
+    #[test]
+    fn stdlib_layout_by_os() {
+        let home = std::env::temp_dir().join(format!("ostov-py-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        if cfg!(windows) {
+            assert_eq!(stdlib_dirs(&home), vec![home.join("Lib")]);
+        } else {
+            // Папки ещё нет: в сообщении видно, где искали.
+            assert_eq!(stdlib_dirs(&home), vec![home.join("lib/python3.N")]);
+            let dir = home.join("lib/python3.13");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("os.py"), "").unwrap();
+            std::fs::create_dir_all(home.join("lib/pkgconfig")).unwrap();
+            assert_eq!(stdlib_dirs(&home), vec![dir]);
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
