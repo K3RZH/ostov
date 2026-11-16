@@ -4,7 +4,8 @@
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
 //! list-goods, list-issue, list-sorted, list-search, list-error, list-confirm, list-notice,
 //! form-catalog, form-document, form-catalog-narrow, form-document-narrow, form-new-errors,
-//! form-date-empty, form-error, configurator, configurator-fields,
+//! form-date-empty, form-error, form-issue, form-issue-narrow, form-picker, form-row,
+//! form-row-picker, form-busy, configurator, configurator-fields,
 //! configurator-parts, configurator-role, configurator-later, configurator-check.
 
 use std::io::Write;
@@ -267,6 +268,22 @@ fn form_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
             window.global::<ostov_ui::FormData>().invoke_save();
         }
         "form-date-empty" => forms.open_new("issue")?,
+        "form-issue" | "form-issue-narrow" | "form-picker" | "form-row" | "form-row-picker" => {
+            forms.open_new("issue")?;
+            pump(300)?;
+            issue_screen(screen, &window)?;
+        }
+        "form-busy" => {
+            // Данные заняты другим пользователем: ошибка над формой с «Повторить».
+            forms.open_form(DocKey::new("receipt", 1))?;
+            pump(800)?;
+            let data = window.global::<ostov_ui::FormData>();
+            data.set_error(
+                "Эти данные сейчас меняет другой пользователь. Повторите действие.".into(),
+            );
+            data.set_error_action("Повторить".into());
+            return save(&window, dark, path);
+        }
         "form-error" => {
             // Закрытый период: ядро не проводит документ, ошибка видна над формой.
             engine.set_closing_date(Some("2026-12-31"))?;
@@ -281,6 +298,43 @@ fn form_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
     }
     pump(800)?;
     save(&window, dark, path)
+}
+
+/// Новый расход по шагам, как его заполняет пользователь: дата, склад из выбора, строки товаров.
+/// Экраны останавливаются на разных шагах: открытый выбор склада, окно строки с ошибками,
+/// выбор товара поверх окна строки, заполненная форма.
+fn issue_screen(
+    screen: &str,
+    window: &ostov_ui::AppWindow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = window.global::<ostov_ui::FormData>();
+    data.invoke_edited(0, "12.03.2026".into());
+    data.invoke_pick(1);
+    pump(400)?;
+    if screen == "form-picker" {
+        return Ok(());
+    }
+    data.invoke_picker_choose(1);
+    pump(100)?;
+    for (goods, qty) in [(0, "2,5"), (3, "12")] {
+        data.invoke_row_add(0);
+        data.invoke_row_pick(0);
+        pump(400)?;
+        data.invoke_picker_choose(goods);
+        data.invoke_row_edited(1, qty.into());
+        data.invoke_row_done();
+    }
+    data.invoke_row_add(0);
+    match screen {
+        "form-row" => data.invoke_row_done(),
+        "form-row-picker" => {
+            data.invoke_row_edited(1, "1,2345".into());
+            data.invoke_row_pick(0);
+            pump(400)?;
+        }
+        _ => data.invoke_row_cancel(),
+    }
+    Ok(())
 }
 
 /// Окно конфигуратора на встроенной «Склад»: щелчки по строкам дерева, затем раздел и проверка.
@@ -352,7 +406,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | "form-document-narrow"
         | "form-new-errors"
         | "form-date-empty"
-        | "form-error" => form_screen(&screen, dark, &path),
+        | "form-error"
+        | "form-issue"
+        | "form-issue-narrow"
+        | "form-picker"
+        | "form-row"
+        | "form-row-picker"
+        | "form-busy" => form_screen(&screen, dark, &path),
         "main-meta" => {
             // Меню из встроенной конфигурации «Склад», как его строит приложение.
             let window = app_window(2)?;
