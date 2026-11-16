@@ -79,8 +79,8 @@ pub fn run(
     params: &BTreeMap<String, Param>,
     trace: Option<&Trace>,
 ) -> Result<QueryRows, CoreError> {
-    let prepared =
-        ostov_sql::prepare(sql, params, model, can_read, db.dialect()).map_err(CoreError::Query)?;
+    let prepared = ostov_sql::prepare(sql, params, model, can_read, &|_| None, db.dialect())
+        .map_err(CoreError::Query)?;
     let started = Instant::now();
     let raw = db.query(&prepared.sql, &prepared.params)?;
     if let Some(trace) = trace {

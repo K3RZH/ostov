@@ -114,11 +114,20 @@ pub enum SqlError {
         name: String,
         scale: u8,
     },
+    /// Ограничение роли по полю, которого нет у объекта: ошибка конфигурации или ядра.
+    BadRestriction {
+        object: String,
+        field: String,
+    },
 }
 
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BadRestriction { object, field } => write!(
+                f,
+                "Ограничение по записям на «{object}» по полю «{field}», которого у него нет"
+            ),
             Self::TooLong { len } => write!(
                 f,
                 "Запрос слишком длинный: {len} байт, можно до {}",

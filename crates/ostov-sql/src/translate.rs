@@ -24,7 +24,12 @@ struct Source {
     /// Псевдоним в выходном SQL: `t1`, `t2`, … — пользовательские имена туда не попадают.
     out: String,
     table: Table,
+    /// Ограничения по записям роли (СТ-52): поле → разрешённые значения.
+    within: Option<crate::Limits>,
 }
+
+/// Ограничения роли по записям: `None` — нет, иначе поле и разрешённые значения.
+pub(crate) type Within<'a> = &'a dyn Fn(&str) -> Option<crate::Limits>;
 
 type Typed = (String, Option<FieldKind>);
 
@@ -40,6 +45,7 @@ pub(crate) fn run(
     params: &BTreeMap<String, Param>,
     config: &Config,
     can_read: &dyn Fn(&str) -> bool,
+    within: Within<'_>,
     dialect: &dyn Dialect,
 ) -> Result<Prepared, SqlError> {
     let mut t = Translator {
@@ -53,7 +59,7 @@ pub(crate) fn run(
         literals: BTreeMap::new(),
         depth: 0,
     };
-    let (sql, columns) = t.query(query, config, can_read)?;
+    let (sql, columns) = t.query(query, config, can_read, within)?;
     if let Some(extra) = params.keys().find(|k| !t.used.contains(*k)) {
         return Err(SqlError::ExtraParam {
             name: extra.clone(),
@@ -123,6 +129,7 @@ impl Translator<'_> {
         query: ast::Query,
         config: &Config,
         can_read: &dyn Fn(&str) -> bool,
+        within: Within<'_>,
     ) -> Result<(String, Vec<Column>), SqlError> {
         let ast::Query {
             with,
@@ -227,7 +234,7 @@ impl Translator<'_> {
         }
         let mut joins = Vec::new();
         if let Some(first) = from.into_iter().next() {
-            self.add_source(&first.relation, config, can_read)?;
+            self.add_source(&first.relation, config, can_read, within)?;
             for join in first.joins {
                 let ast::Join {
                     relation,
@@ -237,7 +244,7 @@ impl Translator<'_> {
                 if global {
                     return Err(no_pos("GLOBAL JOIN"));
                 }
-                self.add_source(&relation, config, can_read)?;
+                self.add_source(&relation, config, can_read, within)?;
                 joins.push(join_operator);
             }
         }
@@ -305,14 +312,30 @@ impl Translator<'_> {
                     return Err(no_pos("JOIN без ON (USING, NATURAL)"));
                 };
                 let on = self.expr(on)?.0;
+                // У присоединённой таблицы ограничение — в ON: в WHERE оно отсекло бы и строки
+                // основной таблицы при LEFT JOIN.
+                let on = match self.restriction_sql(i + 1)? {
+                    Some(limit) => format!("({on}) AND {limit}"),
+                    None => on,
+                };
                 sql.push_str(&format!(" {kind} {} ON {on}", self.table_sql(i + 1)));
             }
         }
 
-        if let Some(cond) = &selection {
-            let cond = self.expr(cond)?.0;
-            sql.push_str(" WHERE ");
-            sql.push_str(&cond);
+        let user_where = match &selection {
+            Some(cond) => Some(self.expr(cond)?.0),
+            None => None,
+        };
+        let limit = if self.sources.is_empty() {
+            None
+        } else {
+            self.restriction_sql(0)?
+        };
+        match (user_where, limit) {
+            (Some(cond), Some(limit)) => sql.push_str(&format!(" WHERE ({cond}) AND {limit}")),
+            (Some(cond), None) => sql.push_str(&format!(" WHERE {cond}")),
+            (None, Some(limit)) => sql.push_str(&format!(" WHERE {limit}")),
+            (None, None) => {}
         }
 
         match &group_by {
@@ -413,6 +436,7 @@ impl Translator<'_> {
         factor: &TableFactor,
         config: &Config,
         can_read: &dyn Fn(&str) -> bool,
+        within: Within<'_>,
     ) -> Result<(), SqlError> {
         let (name, alias) = match factor {
             TableFactor::Table {
@@ -478,12 +502,96 @@ impl Translator<'_> {
             return Err(SqlError::DuplicateSource { name: binding });
         }
         let out = format!("t{}", self.sources.len() + 1);
+        // Пустой список полей — то же, что «ограничений нет»: так их хранит ядро.
+        let limits = table
+            .right
+            .as_ref()
+            .and_then(|(object, _)| within(object))
+            .filter(|limits| !limits.is_empty());
         self.sources.push(Source {
             name: binding,
             out,
             table,
+            within: limits,
         });
         Ok(())
+    }
+
+    /// Условие ограничений по записям для источника `i`; `None` — ограничений нет.
+    /// Табличная часть отбирается по шапке своего документа.
+    fn restriction_sql(&mut self, i: usize) -> Result<Option<String>, SqlError> {
+        let source = &self.sources[i];
+        let Some(limits) = source.within.clone() else {
+            return Ok(None);
+        };
+        let out = source.out.clone();
+        let parent = source.table.parent.clone();
+        let (columns, object) = match &parent {
+            Some((document, header)) => (header.clone(), document.clone()),
+            None => (source.table.columns.clone(), source.table.physical.clone()),
+        };
+        // В подзапросе по документу свой псевдоним: имена колонок не пересекутся.
+        let alias = match &parent {
+            Some(_) => format!("{out}_doc"),
+            None => out.clone(),
+        };
+        let mut parts = Vec::with_capacity(limits.len());
+        for (field, values) in &limits {
+            let Some(kind) = columns
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, kind)| *kind)
+            else {
+                return Err(SqlError::BadRestriction {
+                    object: object.clone(),
+                    field: field.clone(),
+                });
+            };
+            if values.is_empty() {
+                parts.push("1 = 0".to_owned());
+                continue;
+            }
+            let mut placeholders = Vec::with_capacity(values.len());
+            for value in values {
+                let value = match value {
+                    Param::Null => Value::Null,
+                    Param::Int(n) => Value::Int(*n),
+                    Param::Text(text) if text.contains('\0') => return Err(SqlError::NulInText),
+                    Param::Text(text) => Value::Text(text.clone()),
+                    // Сумма — только в единицах того же масштаба, что у поля.
+                    Param::Decimal { units, scale } => match kind {
+                        FieldKind::Decimal { scale: own } if own == *scale => Value::Int(*units),
+                        FieldKind::Decimal { scale: own } => {
+                            return Err(SqlError::ScaleMismatch {
+                                left: own,
+                                right: *scale,
+                            });
+                        }
+                        _ => Value::Int(*units),
+                    },
+                };
+                placeholders.push(self.push_value(value));
+            }
+            parts.push(format!(
+                "{}.{} IN ({})",
+                self.dialect.quote_ident(&alias),
+                self.dialect.quote_ident(field),
+                placeholders.join(", ")
+            ));
+        }
+        let condition = format!("({})", parts.join(" AND "));
+        Ok(Some(match parent {
+            None => condition,
+            Some((document, _)) => format!(
+                "({}.{} IN (SELECT {}.{} FROM {} AS {} WHERE {condition}))",
+                self.dialect.quote_ident(&out),
+                self.dialect.quote_ident("doc_id"),
+                self.dialect.quote_ident(&alias),
+                self.dialect.quote_ident("id"),
+                self.dialect.quote_ident(&document),
+                self.dialect.quote_ident(&alias),
+            ),
+        }))
     }
 
     fn table_sql(&self, i: usize) -> String {
