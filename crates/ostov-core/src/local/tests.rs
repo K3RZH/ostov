@@ -1501,6 +1501,7 @@ fn sales_model() -> ostov_model::Config {
         kind: ostov_model::RegisterKind::Accumulation,
         dimensions: vec![FieldDef::reference("goods", "goods")],
         resources: vec![FieldDef::new("qty", FieldKind::Decimal { scale: 3 })],
+        cost: None,
     });
     let issue = model
         .documents

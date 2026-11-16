@@ -296,6 +296,7 @@ pub fn warehouse_model() -> ostov_model::Config {
             kind: RegisterKind::Accumulation,
             dimensions: vec![warehouse(), goods()],
             resources: vec![qty()],
+            cost: None,
         }],
         menu: vec![MenuItem {
             title: "Склад".to_owned(),

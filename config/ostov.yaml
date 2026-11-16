@@ -5,3 +5,9 @@ version: 0.1.0
 format: 1
 menu:
   - warehouse
+# Свойства пользователя (ADR-043): значения задаёт администратор в карточке пользователя.
+user_fields:
+  - name: warehouses
+    title: Склады
+    type: ref(warehouses)
+    many: true
