@@ -387,3 +387,64 @@ fn repo_config_has_no_warnings() {
     let (_, warnings) = load_with_warnings(&repo_config()).unwrap();
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
+
+#[test]
+fn cost_from_yaml_reaches_the_core_calculation() {
+    use std::collections::BTreeMap;
+
+    use ostov_core::{FieldValue, Fields, Movement, MovementKind};
+    use ostov_store::Decimal;
+    use ostov_store::drivers::sqlite::SqliteDriver;
+
+    let config = base("access-cost-core");
+    config.write(
+        "registers/stock.yaml",
+        &cost(
+            "  qty: qty
+  sum: amount
+  by: [warehouse, goods]
+",
+        ),
+    );
+    let core = ostov_core::local::Config::from_model(&load(&config.dir).unwrap()).unwrap();
+    let stock = &core.registers["stock"];
+    assert!(stock.cost().is_some());
+
+    // Эталон СТ-К10: 10 кг на 500 ₽ и 10 кг на 700 ₽, расход 5 кг без суммы стоит 300 ₽.
+    let mut db = SqliteDriver::open_in_memory().unwrap();
+    stock.create_tables(&mut db).unwrap();
+    let d = |s: &str| s.parse::<Decimal>().unwrap();
+    let dims = Fields::from([
+        ("warehouse".to_owned(), FieldValue::Ref(1)),
+        ("goods".to_owned(), FieldValue::Ref(1)),
+    ]);
+    let mv = |kind, qty: &str, amount: Option<&str>| {
+        let mut resources = BTreeMap::from([("qty".to_owned(), d(qty))]);
+        if let Some(a) = amount {
+            resources.insert("amount".to_owned(), d(a));
+        }
+        Movement {
+            kind,
+            dims: dims.clone(),
+            resources,
+        }
+    };
+    let receipts = [
+        mv(MovementKind::Receipt, "10", Some("500")),
+        mv(MovementKind::Receipt, "10", Some("700")),
+    ];
+    stock
+        .replace_dated(&mut db, "receipt", 1, Some("2026-04-01"), &receipts)
+        .unwrap();
+    stock
+        .replace_dated(
+            &mut db,
+            "issue",
+            1,
+            Some("2026-04-02"),
+            &[mv(MovementKind::Issue, "5", None)],
+        )
+        .unwrap();
+    let issued = stock.movements_of(&mut db, "issue", 1).unwrap();
+    assert_eq!(issued[0].resources["amount"], d("300.00"));
+}
