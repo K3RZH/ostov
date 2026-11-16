@@ -3859,14 +3859,14 @@ dependencies = [
 
 [[package]]
 name = "ostov-api"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-model",
 ]
 
 [[package]]
 name = "ostov-cli"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-core",
  "ostov-meta",
@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-client"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-core",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-core"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-model",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-io"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "calamine",
  "ostov-api",
@@ -3915,7 +3915,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-meta"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-core",
@@ -3926,11 +3926,11 @@ dependencies = [
 
 [[package]]
 name = "ostov-model"
-version = "0.7.0"
+version = "0.7.0-alpha"
 
 [[package]]
 name = "ostov-proto"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "prost",
@@ -3942,7 +3942,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-py"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-core",
@@ -3955,7 +3955,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-sec"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "argon2",
  "getrandom 0.4.3",
@@ -3966,7 +3966,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-server"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-core",
@@ -3984,7 +3984,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-sql"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-core",
@@ -3996,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-store"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "postgres",
  "rusqlite",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "ostov-ui"
-version = "0.7.0"
+version = "0.7.0-alpha"
 dependencies = [
  "ostov-api",
  "ostov-client",
