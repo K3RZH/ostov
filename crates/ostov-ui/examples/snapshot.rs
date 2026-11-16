@@ -7,7 +7,8 @@
 //! form-date-empty, form-error, form-issue, form-issue-narrow, form-picker, form-row,
 //! form-row-picker, form-busy, configurator, configurator-fields,
 //! configurator-parts, configurator-role, configurator-later, configurator-check,
-//! configurator-no-folder, configurator-plan, configurator-plan-refused, configurator-run-error.
+//! configurator-no-folder, configurator-plan, configurator-plan-refused, configurator-run-error,
+//! about, configurator-about.
 
 use std::io::Write;
 
@@ -763,6 +764,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "configurator-check" => save(&configurator_window(&[], None, true)?, dark, &path),
         "configurator-plan" | "configurator-plan-refused" | "configurator-run-error" => {
             configurator_run(&screen, dark, &path)
+        }
+        "about" => {
+            let window = app_window(2)?;
+            let meta =
+                ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+            let shell = ostov_ui::shell::Shell::from_meta(&meta, ostov_api::SystemRights::ALL);
+            ostov_ui::app::refresh(&window, &shell);
+            window.set_base_name("Склад".into());
+            window.set_about_open(true);
+            save(&window, dark, &path)
+        }
+        "configurator-about" => {
+            let window = configurator_window(&[], None, false)?;
+            window.set_about_open(true);
+            save(&window, dark, &path)
         }
         "configurator-no-folder" => {
             let window = ostov_ui::configurator_ui::create_window(None)?;

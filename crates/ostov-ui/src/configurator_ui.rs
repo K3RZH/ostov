@@ -25,6 +25,7 @@ type Running = Rc<RefCell<Option<Preview>>>;
 /// Окно не создалось: нет графической подсистемы.
 pub fn create_window(folder: Option<PathBuf>) -> Result<ConfiguratorWindow, slint::PlatformError> {
     let window = ConfiguratorWindow::new()?;
+    window.set_app_version(env!("CARGO_PKG_VERSION").into());
     let browser = Rc::new(RefCell::new(Browser::new(Configuration::empty())));
     let opened: Folder = Rc::default();
     connect_browser(&window, &browser);

@@ -14,6 +14,7 @@ import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 import { ConfirmDialog } from "components/confirm-dialog.slint";
 import { PreviewStart } from "screens/preview-start.slint";
+import { AboutDialog } from "components/about-dialog.slint";
 
 // Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
 // дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
@@ -84,6 +85,9 @@ export component AppWindow inherits Window {
     in-out property <string> nu-password;
     in-out property <string> nu-repeat;
     callback user-add-confirmed();
+
+    // «О программе» из меню справки в шапке.
+    in-out property <bool> about-open;
 
     // Настройки интерфейса: выбранные значения хранит Rust (src/settings.rs).
     in-out property <bool> settings-open;
@@ -193,7 +197,7 @@ export component AppWindow inherits Window {
     // закрытии уносит фокус с собой, поэтому после него фокус возвращается странице. На остальных
     // страницах фокус снимается: иначе Enter достался бы полю пароля уже скрытой страницы входа.
     function restore-focus() {
-        if (root.creating || root.adding || root.forgetting || root.settings-open) {
+        if (root.creating || root.adding || root.forgetting || root.settings-open || root.about-open) {
             return;
         }
         if (root.page == 0) {
@@ -210,6 +214,7 @@ export component AppWindow inherits Window {
     changed adding => { root.restore-focus(); }
     changed forgetting => { root.restore-focus(); }
     changed settings-open => { root.restore-focus(); }
+    changed about-open => { root.restore-focus(); }
 
     start-page := StartPage {
         app-version: "Версия " + root.app-version;
@@ -266,6 +271,7 @@ export component AppWindow inherits Window {
         toggle-maximize => { root.maximized = !root.maximized; }
         close-window => { root.close(); }
         settings-clicked => { root.settings-open = true; }
+        about-clicked => { root.about-open = true; }
         user-add-clicked => { root.adding-user = true; }
     }
 
@@ -394,6 +400,16 @@ export component AppWindow inherits Window {
         density-chosen(mode) => { root.density-chosen(mode); }
         font-chosen(mode) => { root.font-chosen(mode); }
         closed => { root.settings-open = false; }
+    }
+
+    if root.about-open : AboutDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        app-name: "Ostov";
+        version: root.app-version;
+        closed => { root.about-open = false; }
     }
 
     if root.changing-password : PasswordDialog {

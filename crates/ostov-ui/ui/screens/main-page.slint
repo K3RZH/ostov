@@ -62,6 +62,7 @@ export component MainPage inherits Rectangle {
     callback toggle-maximize();
     callback close-window();
     callback settings-clicked();
+    callback about-clicked();
 
     // Вкладка «Пользователи и роли»
     in property <[UserRow]> users;
@@ -124,12 +125,12 @@ export component MainPage inherits Rectangle {
                     Chip { text: "Предпросмотр, тестовая база"; kind: ChipKind.draft; }
                 }
                 Rectangle { horizontal-stretch: 1; }
-                // Поиск, «создать», уведомления и справка ждут команд ядра (глобальный поиск,
-                // фоновые задачи), поэтому пока выключены.
+                // Поиск, «создать» и уведомления ждут команд ядра (глобальный поиск, фоновые
+                // задачи), поэтому пока выключены. В справке пока один пункт, «О программе».
                 VerticalLayout { alignment: center; IconButton { icon: "search"; enabled: false; } }
                 VerticalLayout { alignment: center; IconButton { icon: "plus"; enabled: false; } }
                 VerticalLayout { alignment: center; IconButton { icon: "bell"; enabled: false; } }
-                VerticalLayout { alignment: center; IconButton { icon: "help"; enabled: false; } }
+                help-button := VerticalLayout { alignment: center; IconButton { icon: "help"; clicked => { help-menu.show(); } } }
                 VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
@@ -207,6 +208,34 @@ export component MainPage inherits Rectangle {
                 VerticalLayout { alignment: center; Icon { name: "user"; tint: Theme.text-muted; width: 14px; height: 14px; } }
                 VerticalLayout { alignment: center; Text { text: root.user-text; font-size: Theme.font-caption; color: Theme.text-muted; } }
                 VerticalLayout { alignment: center; Text { text: root.app-version; font-size: Theme.font-caption; color: Theme.text-muted; } }
+            }
+        }
+    }
+
+    // Меню справки под «?».
+    help-menu := PopupWindow {
+        x: help-button.x + help-button.width - self.width;
+        y: 46px;
+        width: MenuMetrics.width + 2 * Theme.space-4;
+        height: MenuMetrics.height(1) + 2 * Theme.space-4;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        Rectangle {
+            border-radius: Shape.surface-radius;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            background: Theme.surface-alt;
+        }
+        VerticalLayout {
+            padding: Theme.space-4;
+            MenuPanel {
+                actions: [
+                    { id: "about", label: "О программе", icon: "help", danger: false, enabled: true, divider: false },
+                ];
+                chosen(id) => {
+                    help-menu.close();
+                    root.about-clicked();
+                }
             }
         }
     }

@@ -1,6 +1,7 @@
 import { Theme } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { Chip } from "../components/chip.slint";
+import { IconButton } from "../components/icon-button.slint";
 
 // Панель инструментов первой очереди (документ «Состав конфигурации», §11.1, К-1…К-8).
 export component Toolbar inherits Rectangle {
@@ -12,6 +13,7 @@ export component Toolbar inherits Rectangle {
     // План (К-6) и «Запустить» (К-16) ведут к одному окну плана: запуск идёт только через него.
     in property <bool> run-busy;
     callback run-requested();
+    callback about-clicked();
 
     height: Theme.control-md + 2 * Theme.space-8;
     background: Theme.surface;
@@ -93,6 +95,14 @@ export component Toolbar inherits Rectangle {
         VerticalLayout {
             alignment: center;
             Chip { text: "Git: нет данных"; }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: "help";
+                control-size: Theme.control-sm;
+                clicked => { root.about-clicked(); }
+            }
         }
     }
 }

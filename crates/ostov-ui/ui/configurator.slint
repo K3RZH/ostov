@@ -6,6 +6,7 @@ import { Editor, EditorSection, InfoRow } from "configurator/editor.slint";
 import { CheckPanel } from "configurator/check-panel.slint";
 import { Notice } from "configurator/notice.slint";
 import { PlanDialog } from "configurator/plan-dialog.slint";
+import { AboutDialog } from "components/about-dialog.slint";
 
 // Окно «Ostov Конфигуратор»: панель инструментов, дерево конфигурации, редактор элемента и
 // панель проверки. Только просмотр. Данные и обработчики задаёт src/configurator_ui.rs.
@@ -14,6 +15,9 @@ export component ConfiguratorWindow inherits Window {
     in property <string> config-version;
     // Открытая папка конфигурации; пусто, пока папку не выбрали.
     in property <string> config-folder;
+    // Версия программы из Cargo.toml для «О программе»: задаёт Rust.
+    in property <string> app-version;
+    in-out property <bool> about-open;
 
     callback open-folder();
 
@@ -85,6 +89,7 @@ export component ConfiguratorWindow inherits Window {
             open-folder => { root.open-folder(); }
             run-busy: root.run-busy;
             run-requested => { root.run-requested(); }
+            about-clicked => { root.about-open = true; }
         }
         if root.python-warning != "" : Notice { text: root.python-warning; }
         if root.run-error != "" : Notice {
@@ -105,6 +110,16 @@ export component ConfiguratorWindow inherits Window {
             }
         }
         check-panel := CheckPanel { }
+    }
+
+    if root.about-open : AboutDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        app-name: "Ostov Конфигуратор";
+        version: root.app-version;
+        closed => { root.about-open = false; }
     }
 
     if root.plan-open : PlanDialog {
