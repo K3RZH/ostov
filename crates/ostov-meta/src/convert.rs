@@ -1,7 +1,10 @@
 //! Проверенные файлы → модель для ядра (`ostov-model`). Номера строк здесь уже не нужны.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use ostov_model::{
-    CatalogDef, Config, Cost, DocumentDef, FieldDef, FieldKind, MenuItem, RegisterDef,
+    CatalogDef, Config, Cost, DocumentDef, FieldDef, FieldKind, MenuItem, Position, RegisterDef,
     RegisterKind, Restriction, Rights, RoleDef, SystemRights, TablePartDef, UserFieldDef,
 };
 use serde_saphyr::Spanned;
@@ -10,7 +13,9 @@ use crate::model::USER_PREFIX;
 
 use crate::{ConfigFiles, Field, FieldType, MenuEntry, Subsystem, UserField};
 
-pub(crate) fn into_model(files: ConfigFiles) -> Config {
+/// `base` — папка конфигурации: пути в `Config.positions` считаются от неё.
+pub(crate) fn into_model(files: ConfigFiles, base: &Path) -> Config {
+    let positions = positions(&files, base);
     let mut manifest = files.manifest.value;
     let user_fields = std::mem::take(&mut manifest.user_fields)
         .into_iter()
@@ -89,7 +94,87 @@ pub(crate) fn into_model(files: ConfigFiles) -> Config {
             .map(|role| role_def(role.value))
             .collect(),
         user_fields,
+        positions,
     }
+}
+
+/// Карта «элемент → файл и строка»: у объекта — строка имени, у поля — строка `name:`.
+fn positions(files: &ConfigFiles, base: &Path) -> BTreeMap<String, Position> {
+    let mut out = BTreeMap::new();
+    let mut put = |key: String, file: &Path, name: &Spanned<String>| {
+        let relative = file.strip_prefix(base).unwrap_or(file);
+        let file = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let at = &name.referenced;
+        let line = u32::try_from(at.line()).unwrap_or(u32::MAX);
+        let column = u32::try_from(at.column()).unwrap_or(u32::MAX);
+        out.insert(key, Position { file, line, column });
+    };
+    let manifest = &files.manifest;
+    put("config".into(), &manifest.file, &manifest.value.name);
+    for field in &manifest.value.user_fields {
+        let key = format!("user_field:{}", field.name.value);
+        put(key, &manifest.file, &field.name);
+    }
+    for catalog in &files.catalogs {
+        let key = format!("catalog:{}", catalog.value.name.value);
+        put(key.clone(), &catalog.file, &catalog.value.name);
+        for field in &catalog.value.fields {
+            put(
+                format!("{key}/field:{}", field.name.value),
+                &catalog.file,
+                &field.name,
+            );
+        }
+    }
+    for document in &files.documents {
+        let key = format!("document:{}", document.value.name.value);
+        put(key.clone(), &document.file, &document.value.name);
+        for field in &document.value.fields {
+            put(
+                format!("{key}/field:{}", field.name.value),
+                &document.file,
+                &field.name,
+            );
+        }
+        for part in &document.value.tables {
+            let part_key = format!("{key}/table:{}", part.name.value);
+            put(part_key.clone(), &document.file, &part.name);
+            for field in &part.fields {
+                let field_key = format!("{part_key}/field:{}", field.name.value);
+                put(field_key, &document.file, &field.name);
+            }
+        }
+    }
+    for register in &files.registers {
+        let key = format!("register:{}", register.value.name.value);
+        put(key.clone(), &register.file, &register.value.name);
+        // Измерения и ресурсы — колонки одной таблицы, имена у них общие.
+        for field in register
+            .value
+            .dimensions
+            .iter()
+            .chain(&register.value.resources)
+        {
+            put(
+                format!("{key}/field:{}", field.name.value),
+                &register.file,
+                &field.name,
+            );
+        }
+    }
+    for subsystem in &files.subsystems {
+        let key = format!("subsystem:{}", subsystem.value.name.value);
+        put(key, &subsystem.file, &subsystem.value.name);
+    }
+    for role in &files.roles {
+        let key = format!("role:{}", role.value.name.value);
+        put(key, &role.file, &role.value.name);
+    }
+    out
 }
 
 fn user_field(field: UserField) -> UserFieldDef {

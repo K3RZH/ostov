@@ -254,6 +254,7 @@ pub fn warehouse_model() -> ostov_model::Config {
     };
 
     ostov_model::Config {
+        positions: BTreeMap::new(),
         name: "warehouse".to_owned(),
         title: "Склад".to_owned(),
         version: "0.1.0".to_owned(),

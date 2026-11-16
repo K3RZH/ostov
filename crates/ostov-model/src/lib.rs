@@ -2,6 +2,7 @@
 //!
 //! Общий язык `ostov-core` и `ostov-meta`: meta строит модель из YAML, ядро — таблицы из модели.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +141,20 @@ pub struct Config {
     pub roles: Vec<RoleDef>,
     /// Свойства пользователя (ADR-043), например его склады для ограничений по записям.
     pub user_fields: Vec<UserFieldDef>,
+    /// Откуда элемент: ключ вида "catalog:goods", "catalog:goods/field:name",
+    /// "document:receipt/table:lines/field:qty", "register:stock", "role:storekeeper".
+    /// Пусто у конфигурации, собранной в коде, а не прочитанной из файлов.
+    pub positions: BTreeMap<String, Position>,
+}
+
+/// Место элемента в файлах конфигурации: для конфигуратора и сообщений об ошибках.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Position {
+    /// Путь относительно папки конфигурации, через `/`: `catalogs/goods.yaml`.
+    pub file: String,
+    /// Строка и столбец, считая с 1.
+    pub line: u32,
+    pub column: u32,
 }
 
 /// Имя встроенной роли со всеми правами. В YAML её не описывают.
