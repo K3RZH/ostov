@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::{
     BaseInfo, BatchItem, EngineError, EngineResult, Fields, HelloInfo, JobId, JournalEntry,
     JournalPage, ListPage, ListQuery, Meta, NewUser, ObjectData, PostAction, QueryResult,
-    ReportQuery, Saved, SessionInfo, UserInfo,
+    ReportQuery, Saved, SchemaPlan, SessionInfo, TrialPost, UserInfo,
 };
 
 /// Контракт интерфейса с ядром. Методы синхронные: интерфейс зовёт их из фонового потока.
@@ -65,6 +65,13 @@ pub trait Engine: Send + Sync {
         Err(EngineError::not_implemented("Unpost"))
     }
 
+    /// Пробное проведение (К-19): запись и «Провести» в транзакции, которая откатывается.
+    /// Не удалось бы провести — та же ошибка, что у настоящего проведения. Только локально:
+    /// режим тестирования конфигурации.
+    fn trial_post(&self, _document: &str, _data: &ObjectData) -> EngineResult<TrialPost> {
+        Err(EngineError::not_implemented("TrialPost"))
+    }
+
     fn run_report(&self, _query: &ReportQuery) -> EngineResult<ListPage> {
         Err(EngineError::not_implemented("RunReport"))
     }
@@ -72,6 +79,9 @@ pub trait Engine: Send + Sync {
     fn query(&self, _sql: &str, _params: &Fields) -> EngineResult<QueryResult> {
         Err(EngineError::not_implemented("Query"))
     }
+    // Импорт и экспорт идут через `ostov-io` поверх этого трейта, у клиента: права, журнал и
+    // проверки те же, и локально, и через сервер. Команды-задачи с `JobId` зарезервированы
+    // под фоновую работу на сервере и пока не нужны.
     fn start_import(&self, _format: &str, _source: &str) -> EngineResult<JobId> {
         Err(EngineError::not_implemented("Import"))
     }
@@ -111,6 +121,7 @@ pub trait Engine: Send + Sync {
     ) -> EngineResult<JournalPage> {
         Err(EngineError::not_implemented("AdminJournal"))
     }
+    /// Резервная копия отложена до пилота (решение 11.11); копия PostgreSQL — `pg_dump`.
     fn admin_backup(&self, _target: &str) -> EngineResult<JobId> {
         Err(EngineError::not_implemented("AdminBackup"))
     }
@@ -160,6 +171,11 @@ pub trait Connector: Send + Sync {
         _admin: Option<&NewAdmin>,
     ) -> EngineResult<Arc<dyn Engine>> {
         Err(EngineError::not_implemented("CreateLocal"))
+    }
+    /// План изменений базы `path` под конфигурацию этого коннектора (СТ-50, К-6): что
+    /// добавится и не откажет ли открытие. Ничего не записывает.
+    fn plan_local(&self, _path: &str) -> EngineResult<SchemaPlan> {
+        Err(EngineError::not_implemented("PlanLocal"))
     }
     fn connect_remote(&self, _address: &str) -> EngineResult<Arc<dyn Engine>> {
         Err(EngineError::not_implemented("ConnectRemote"))

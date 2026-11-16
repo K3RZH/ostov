@@ -193,6 +193,34 @@ impl AccumulationRegister {
             .collect())
     }
 
+    /// Движения документа, как они лежат в регистре.
+    pub fn movements_of(
+        &self,
+        db: &mut dyn Driver,
+        recorder: &str,
+        recorder_id: i64,
+    ) -> Result<Vec<Movement>, CoreError> {
+        self.recorded(db, recorder, recorder_id)?
+            .into_iter()
+            .map(|(sign, key, amounts, _)| {
+                Ok(Movement {
+                    kind: if sign < 0 {
+                        MovementKind::Issue
+                    } else {
+                        MovementKind::Receipt
+                    },
+                    dims: crate::object::read_fields(&self.dims, key.into_iter())?,
+                    resources: self
+                        .resources
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .zip(amounts)
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
     /// Заменяет движения документа новыми и пересчитывает итоги.
     /// Если итог уйдёт в минус, возвращает ошибку — вызывающий откатывает транзакцию.
     pub fn replace(
@@ -218,7 +246,14 @@ impl AccumulationRegister {
         // Самый ранний день, который меняется: старая дата документа или новая.
         let mut earliest = period.unwrap_or(NO_DATE).to_owned();
 
-        for (sign, key, amounts, old) in self.recorded(db, recorder, recorder_id)? {
+        let recorded = self.recorded(db, recorder, recorder_id)?;
+        let mut keys: Vec<Key> = recorded.iter().map(|(_, key, _, _)| key.clone()).collect();
+        for movement in movements {
+            keys.push(self.key(&movement.dims)?);
+        }
+        self.lock_keys(db, keys)?;
+
+        for (sign, key, amounts, old) in recorded {
             self.add(db, &key, &amounts, -sign)?;
             push_unique(&mut touched, key);
             earliest = earliest.min(old);
@@ -391,6 +426,39 @@ impl AccumulationRegister {
             .map(|(i, name)| format!("{name} = {}", d.placeholder(from + i)))
             .collect::<Vec<_>>()
             .join(" AND ")
+    }
+
+    /// Итоги ключей документа — под блокировку до конца транзакции, всегда в одном порядке:
+    /// иначе два документа с ключами A, B и B, A ждали бы друг друга вечно. Строку итога
+    /// нового ключа создаём заранее, чтобы и её было что блокировать.
+    fn lock_keys(&self, db: &mut dyn Driver, mut keys: Vec<Key>) -> Result<(), CoreError> {
+        keys.sort_by_cached_key(|key| format!("{key:?}"));
+        keys.dedup();
+        let insert = {
+            let d = db.dialect();
+            let cols: Vec<String> = names(d, &self.dims)
+                .into_iter()
+                .chain(names(d, &self.resources))
+                .collect();
+            format!(
+                "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
+                d.quote_ident(&self.totals()),
+                cols.join(", "),
+                placeholders(d, 1, cols.len()),
+            )
+        };
+        let zeros: Vec<Value> = self
+            .zeros()?
+            .iter()
+            .map(|z| Value::Int(z.units()))
+            .collect();
+        for key in &keys {
+            let mut values = key.clone();
+            values.extend(zeros.iter().cloned());
+            db.execute(&insert, &values)?;
+            self.totals_row(db, key, true)?;
+        }
+        Ok(())
     }
 
     fn totals_row(

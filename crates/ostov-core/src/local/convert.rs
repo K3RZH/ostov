@@ -70,6 +70,14 @@ pub fn invalid(message: String) -> EngineError {
     EngineError::new(ErrorCode::Validation, message)
 }
 
+/// Метка в `details` занятых данных: по ней ядро повторяет запись (`busy_retry`).
+pub(super) const BUSY: &str = "busy: ";
+
+/// Данные держала другая транзакция — запись можно повторить.
+pub(super) fn is_busy(e: &EngineError) -> bool {
+    e.code == ErrorCode::Unavailable && e.details.starts_with(BUSY)
+}
+
 pub fn error(e: CoreError) -> EngineError {
     if let CoreError::Security(e) = e {
         return super::access::sec_error(e);
@@ -90,6 +98,20 @@ pub fn error(e: CoreError) -> EngineError {
         CoreError::NegativeBalance(_) | CoreError::Invalid(_) => ErrorCode::Validation,
         CoreError::Query(ostov_sql::SqlError::NoRight { .. }) => ErrorCode::Forbidden,
         CoreError::Query(_) => ErrorCode::Validation,
+        CoreError::Store(ostov_store::StoreError::Busy(_)) => {
+            return EngineError {
+                code: ErrorCode::Unavailable,
+                message: "Эти данные сейчас меняет другой пользователь. Повторите действие.".into(),
+                details: format!("{BUSY}{e}"),
+            };
+        }
+        CoreError::Store(ostov_store::StoreError::Timeout(_)) => {
+            return EngineError {
+                code: ErrorCode::Unavailable,
+                message: "Запрос шёл слишком долго и прерван. Сузьте отбор или период.".into(),
+                details: e.to_string(),
+            };
+        }
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.
             return EngineError {

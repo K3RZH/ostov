@@ -18,6 +18,7 @@ path = "src/main.rs"
 python = ["ostov-py/python"]
 
 [dependencies]
+ostov-core = { path = "../ostov-core" }
 ostov-meta = { path = "../ostov-meta" }
 ostov-model = { path = "../ostov-model" }
 ostov-py = { path = "../ostov-py" }

@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use rusqlite::config::DbConfig;
 use rusqlite::functions::FunctionFlags;
@@ -33,41 +37,184 @@ impl Dialect for SqliteDialect {
     }
 }
 
+/// Сколько транзакция ждёт своей очереди на запись, прежде чем сдаться с `Busy`.
+const QUEUE_WAIT: Duration = Duration::from_secs(30);
+
+/// Очередь записи к одному файлу внутри процесса (сервер на SQLite). Сам SQLite ждёт
+/// занятую базу опросом, и под непрерывной записью других сессий одна может не дождаться
+/// никогда; здесь транзакции идут строго по очереди. От других процессов база защищена
+/// как раньше — блокировкой SQLite.
+struct Queue {
+    waiting: Mutex<(u64, VecDeque<u64>)>,
+    turn: Condvar,
+}
+
+impl Queue {
+    fn for_path(path: &Path) -> Arc<Self> {
+        static ALL: OnceLock<Mutex<HashMap<PathBuf, Weak<Queue>>>> = OnceLock::new();
+        let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut all = ALL
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        all.retain(|_, q| q.strong_count() > 0);
+        if let Some(queue) = all.get(&key).and_then(Weak::upgrade) {
+            return queue;
+        }
+        let queue = Arc::new(Self {
+            waiting: Mutex::new((0, VecDeque::new())),
+            turn: Condvar::new(),
+        });
+        all.insert(key, Arc::downgrade(&queue));
+        queue
+    }
+
+    fn enter(&self) -> Result<u64, StoreError> {
+        let mut state = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        let ticket = state.0;
+        state.0 += 1;
+        state.1.push_back(ticket);
+        let until = Instant::now() + QUEUE_WAIT;
+        while state.1.front() != Some(&ticket) {
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                state.1.retain(|t| *t != ticket);
+                self.turn.notify_all();
+                return Err(StoreError::Busy("очередь записи в базу не дошла".into()));
+            };
+            state = self
+                .turn
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        Ok(ticket)
+    }
+
+    fn leave(&self, ticket: u64) {
+        let mut state = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        state.1.retain(|t| *t != ticket);
+        self.turn.notify_all();
+    }
+}
+
 /// База режима «один компьютер»: файл SQLite рядом с приложением.
 pub struct SqliteDriver {
     conn: Connection,
     depth: crate::Depth,
+    queue: Option<Arc<Queue>>,
+    /// Номерок в очереди, пока идёт внешняя транзакция.
+    ticket: Option<u64>,
+    clock: Arc<Clock>,
+    timeout: Duration,
+}
+
+/// Срок текущего запроса для обработчика прогресса SQLite: миллисекунды от `start`,
+/// `u64::MAX` — запроса нет.
+struct Clock {
+    start: Instant,
+    deadline: AtomicU64,
+}
+
+impl Clock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            deadline: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Обработчик прогресса прерывает запрос, который вышел за срок.
+fn watch(conn: &mut Connection) -> Result<Arc<Clock>, StoreError> {
+    let clock = Arc::new(Clock::new());
+    let seen = Arc::clone(&clock);
+    conn.progress_handler(
+        10_000,
+        Some(move || seen.now() > seen.deadline.load(Ordering::Relaxed)),
+    )?;
+    Ok(clock)
+}
+
+impl SqliteDriver {
+    /// Запрос под тайм-аутом; прерванный SQLite-ом становится `StoreError::Timeout`.
+    fn timed<T>(
+        &mut self,
+        run: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let limit = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX);
+        self.clock
+            .deadline
+            .store(self.clock.now().saturating_add(limit), Ordering::Relaxed);
+        let result = run(&self.conn);
+        self.clock.deadline.store(u64::MAX, Ordering::Relaxed);
+        result
+    }
+
+    fn release(&mut self) {
+        if let (Some(queue), Some(ticket)) = (&self.queue, self.ticket.take()) {
+            queue.leave(ticket);
+        }
+    }
+}
+
+impl Drop for SqliteDriver {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl SqliteDriver {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        let mut conn = Connection::open(path.as_ref())?;
+        // Кэш 64 МБ вместо 2 МБ: на базе в миллионы движений страницы индексов регистра
+        // при проведении иначе всё время дочитываются (НТ-П14).
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA cache_size = -65536;",
+        )?;
         add_functions(&conn)?;
+        let clock = watch(&mut conn)?;
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: Some(Queue::for_path(path.as_ref())),
+            ticket: None,
+            clock,
+            timeout: super::QUERY_TIMEOUT,
         })
     }
 
     /// Только чтение: файл не меняется, даже режим журнала.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(path, flags)?;
+        let mut conn = Connection::open_with_flags(path, flags)?;
         add_functions(&conn)?;
+        let clock = watch(&mut conn)?;
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: None,
+            ticket: None,
+            clock,
+            timeout: super::QUERY_TIMEOUT,
         })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         add_functions(&conn)?;
+        let clock = watch(&mut conn)?;
         Ok(Self {
             conn,
             depth: crate::Depth::default(),
+            queue: None,
+            ticket: None,
+            clock,
+            timeout: super::QUERY_TIMEOUT,
         })
     }
 }
@@ -91,29 +238,51 @@ impl Driver for SqliteDriver {
     }
 
     fn execute(&mut self, sql: &str, params: &[Value]) -> Result<usize, StoreError> {
-        Ok(self
-            .conn
-            .execute(sql, params_from_iter(params.iter().map(to_sql)))?)
+        self.timed(|conn| Ok(conn.execute(sql, params_from_iter(params.iter().map(to_sql)))?))
     }
 
     fn query(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>, StoreError> {
-        let mut stmt = self.conn.prepare(sql)?;
-        let columns: Vec<String> = stmt.column_names().map(str::to_owned).collect();
-        let mut rows = stmt.query(params_from_iter(params.iter().map(to_sql)))?;
+        self.timed(|conn| {
+            let mut stmt = conn.prepare(sql)?;
+            let columns: Vec<String> = stmt.column_names().map(str::to_owned).collect();
+            let mut rows = stmt.query(params_from_iter(params.iter().map(to_sql)))?;
 
-        let mut result = Vec::new();
-        while let Some(row) = rows.next()? {
-            let mut values = Vec::with_capacity(columns.len());
-            for (i, column) in columns.iter().enumerate() {
-                values.push(from_sql(row.get_ref(i)?, column)?);
+            let mut result = Vec::new();
+            while let Some(row) = rows.next()? {
+                let mut values = Vec::with_capacity(columns.len());
+                for (i, column) in columns.iter().enumerate() {
+                    values.push(from_sql(row.get_ref(i)?, column)?);
+                }
+                result.push(values);
             }
-            result.push(values);
-        }
-        Ok(result)
+            Ok(result)
+        })
     }
 
+    fn set_query_timeout(&mut self, timeout: Duration) -> Result<(), StoreError> {
+        self.timeout = timeout;
+        Ok(())
+    }
+
+    // Внешняя транзакция сразу берёт запись: иначе в WAL вторая сессия, прочитав, получает
+    // «база занята» без ожидания, когда первая уже пишет.
     fn begin(&mut self) -> Result<(), StoreError> {
-        self.conn.execute_batch(&self.depth.begin())?;
+        let sql = self.depth.begin();
+        let outer = sql == "BEGIN";
+        if outer && let Some(queue) = &self.queue {
+            self.ticket = Some(queue.enter()?);
+        }
+        let sql = if outer {
+            "BEGIN IMMEDIATE".to_owned()
+        } else {
+            sql
+        };
+        if let Err(e) = self.conn.execute_batch(&sql) {
+            if outer {
+                self.release();
+            }
+            return Err(e.into());
+        }
         self.depth.entered();
         Ok(())
     }
@@ -121,13 +290,20 @@ impl Driver for SqliteDriver {
     fn commit(&mut self) -> Result<(), StoreError> {
         self.conn.execute_batch(&self.depth.commit())?;
         self.depth.left();
+        if self.depth.is_outside() {
+            self.release();
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), StoreError> {
         let sql = self.depth.rollback();
         self.depth.left();
-        Ok(self.conn.execute_batch(&sql)?)
+        let done = self.conn.execute_batch(&sql);
+        if self.depth.is_outside() {
+            self.release();
+        }
+        Ok(done?)
     }
 }
 
@@ -155,7 +331,14 @@ fn from_sql(value: ValueRef<'_>, column: &str) -> Result<Value, StoreError> {
 
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        Self::Database(e.to_string())
+        match e.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                Self::Busy(e.to_string())
+            }
+            // Прерывает только наш обработчик прогресса: запрос вышел за тайм-аут.
+            Some(rusqlite::ErrorCode::OperationInterrupted) => Self::Timeout(e.to_string()),
+            _ => Self::Database(e.to_string()),
+        }
     }
 }
 
@@ -316,5 +499,26 @@ mod tests {
         );
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn long_query_is_cut_by_timeout() {
+        let mut db = db();
+        db.set_query_timeout(Duration::from_millis(50)).unwrap();
+        let started = Instant::now();
+        let err = db
+            .query(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n)                  SELECT COUNT(*) FROM n",
+                &[],
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Timeout(_)), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Соединение живо, а обычный запрос тайм-аут не задевает.
+        db.set_query_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(
+            db.query("SELECT 1", &[]).unwrap(),
+            vec![vec![Value::Int(1)]]
+        );
     }
 }

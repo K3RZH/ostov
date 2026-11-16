@@ -17,6 +17,11 @@ pub type Row = Vec<Value>;
 #[derive(Debug)]
 pub enum StoreError {
     Database(String),
+    /// Данные держит другая транзакция: взаимная блокировка, база занята, не дождались
+    /// блокировки. Действие можно повторить.
+    Busy(String),
+    /// Запрос шёл дольше тайм-аута и прерван (СТ-51).
+    Timeout(String),
     /// Тип колонки или параметра, которого нет в `Value` (например float).
     UnsupportedType(String),
 }
@@ -25,6 +30,8 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "ошибка базы данных: {msg}"),
+            Self::Busy(msg) => write!(f, "база занята другой транзакцией: {msg}"),
+            Self::Timeout(msg) => write!(f, "запрос прерван по тайм-ауту: {msg}"),
             Self::UnsupportedType(what) => write!(f, "неподдерживаемый тип: {what}"),
         }
     }
@@ -69,6 +76,11 @@ pub trait Driver {
     fn begin(&mut self) -> Result<(), StoreError>;
     fn commit(&mut self) -> Result<(), StoreError>;
     fn rollback(&mut self) -> Result<(), StoreError>;
+
+    /// Сколько может идти один запрос (СТ-51); дольше — `StoreError::Timeout`.
+    fn set_query_timeout(&mut self, _timeout: std::time::Duration) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 impl From<i64> for Value {

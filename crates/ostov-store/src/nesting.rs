@@ -37,4 +37,9 @@ impl Depth {
     pub(crate) fn left(&mut self) {
         self.0 = self.0.saturating_sub(1);
     }
+
+    /// Вне всякой транзакции.
+    pub(crate) fn is_outside(&self) -> bool {
+        self.0 == 0
+    }
 }

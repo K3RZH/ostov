@@ -88,6 +88,7 @@ impl DocumentKind {
 
     pub fn create_tables(&self, db: &mut dyn Driver) -> Result<(), CoreError> {
         crate::closing::create_table(db)?;
+        create_numbers_table(db)?;
         let mut statements = Vec::new();
         {
             let d = db.dialect();
@@ -310,20 +311,36 @@ impl DocumentKind {
         })
     }
 
+    /// Номер из счётчика вида документа: строка счётчика заблокирована до конца транзакции,
+    /// поэтому две сессии не получат один номер, а откат не оставит пропуска. Счётчик
+    /// старой базы начинается с наибольшего номера.
     fn next_number(&self, db: &mut dyn Driver) -> Result<i64, CoreError> {
-        let sql = {
+        let (start, next) = {
             let d = db.dialect();
-            format!(
-                "SELECT MAX({}) FROM {}",
-                d.quote_ident("number"),
-                d.quote_ident(&self.table)
+            let table = d.quote_ident(NUMBERS);
+            let (doc, last) = (d.quote_ident("doc"), d.quote_ident("last"));
+            (
+                format!(
+                    "INSERT INTO {table} ({doc}, {last}) SELECT {}, COALESCE(MAX({}), 0) FROM {} \
+                     WHERE 1 = 1 ON CONFLICT DO NOTHING",
+                    d.placeholder(1),
+                    d.quote_ident("number"),
+                    d.quote_ident(&self.table),
+                ),
+                format!(
+                    "UPDATE {table} SET {last} = {last} + 1 WHERE {doc} = {} RETURNING {last}",
+                    d.placeholder(1),
+                ),
             )
         };
-        match db.query(&sql, &[])?.first().and_then(|r| r.first()) {
-            Some(Value::Int(n)) => n
-                .checked_add(1)
-                .ok_or_else(|| CoreError::Invalid("номера документов закончились".into())),
-            _ => Ok(1),
+        let name = Value::Text(self.table.clone());
+        db.execute(&start, std::slice::from_ref(&name))?;
+        match db.query(&next, &[name])?.first().and_then(|r| r.first()) {
+            Some(Value::Int(n)) => Ok(*n),
+            _ => Err(CoreError::Invalid(format!(
+                "нет счётчика номеров {}",
+                self.table
+            ))),
         }
     }
 
@@ -483,4 +500,21 @@ impl DocumentKind {
             .map(|row| read_fields(&part.fields, row.into_iter()))
             .collect()
     }
+}
+
+/// Счётчики номеров: вид документа → последний выданный номер.
+const NUMBERS: &str = "ostov_numbers";
+
+pub(crate) fn create_numbers_table(db: &mut dyn Driver) -> Result<(), CoreError> {
+    let sql = {
+        let d = db.dialect();
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} ({} TEXT PRIMARY KEY, {} BIGINT NOT NULL)",
+            d.quote_ident(NUMBERS),
+            d.quote_ident("doc"),
+            d.quote_ident("last"),
+        )
+    };
+    db.execute(&sql, &[])?;
+    Ok(())
 }

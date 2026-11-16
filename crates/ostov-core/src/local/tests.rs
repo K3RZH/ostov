@@ -2584,3 +2584,272 @@ fn journal_page_says_when_it_ends() {
         assert_eq!(paged, all, "size {size}");
     }
 }
+
+#[test]
+fn plan_shows_changes_without_touching_base() {
+    use ostov_api::SchemaChange;
+
+    let base = Base::new("plan");
+    drop(stocked(&base).0);
+    let changed = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("brand", crate::FieldKind::Text));
+        m.registers[0].resources.push(crate::FieldDef::new(
+            "amount",
+            crate::FieldKind::Decimal { scale: 2 },
+        ));
+        let mut units = m.catalogs[0].clone();
+        units.name = "units".into();
+        units.title = "Единицы".into();
+        m.catalogs.push(units);
+    });
+    let plan = changed.plan_local(&base.path).unwrap();
+    assert_eq!(plan.refused, None);
+    assert_eq!(
+        plan.changes,
+        [
+            SchemaChange::NewField {
+                table: "goods".into(),
+                field: "brand".into(),
+                kind: "text".into()
+            },
+            SchemaChange::NewTable {
+                table: "units".into()
+            },
+            SchemaChange::NewField {
+                table: "stock".into(),
+                field: "amount".into(),
+                kind: "decimal(2)".into()
+            },
+        ]
+    );
+    // План ничего не записал: тот же план второй раз, а открытие делает ровно его.
+    assert_eq!(changed.plan_local(&base.path).unwrap(), plan);
+    drop(changed.open_local(&base.path, None).unwrap());
+    let after = changed.plan_local(&base.path).unwrap();
+    assert!(
+        after.changes.is_empty() && after.refused.is_none(),
+        "{after:?}"
+    );
+
+    // Открытую базу план не трогает.
+    let open = changed.open_local(&base.path, None).unwrap();
+    assert_eq!(
+        changed.plan_local(&base.path).unwrap_err().code,
+        ErrorCode::AlreadyOpen
+    );
+    drop(open);
+}
+
+#[test]
+fn plan_explains_refusal() {
+    let base = Base::new("plan-refused");
+    drop(stocked(&base).0);
+    let changed = changed_model(|m| {
+        m.catalogs[0]
+            .fields
+            .push(crate::FieldDef::new("brand", crate::FieldKind::Text));
+        m.catalogs[0].fields[1].kind = crate::FieldKind::Int;
+    });
+    let plan = changed.plan_local(&base.path).unwrap();
+    let why = plan.refused.unwrap();
+    assert!(why.contains("unit"), "{why}");
+    // Отказ — и база как была: старая конфигурация открывает её с данными.
+    let engine = LocalConnector::default()
+        .open_local(&base.path, None)
+        .unwrap();
+    assert_eq!(report(&*engine, "stock_balance", &[]).len(), 1);
+}
+
+#[test]
+fn trial_post_shows_moves_and_leaves_base_alone() {
+    let base = Base::new("trial");
+    let (engine, flour, main, _) = stocked(&base);
+    let receipts = engine.list(&query("receipt", 10)).unwrap().total;
+
+    // Расход 2 из 10: движение и остаток 10 → 8, но ничего не записано.
+    let trial = engine
+        .trial_post("issue", &dated(issue(main, flour, 2_000), "2026-03-01"))
+        .unwrap();
+    let titled = |id: i64, title: &str| Value::Ref {
+        id,
+        title: Some(title.into()),
+    };
+    assert_eq!(trial.moves.len(), 1);
+    let m = &trial.moves[0];
+    assert_eq!((m.register.as_str(), m.receipt), ("stock", false));
+    assert_eq!(m.dims["goods"], titled(flour, "Мука"));
+    assert_eq!(m.resources["qty"], dec(2_000, 3));
+    assert_eq!(trial.balances.len(), 1);
+    let b = &trial.balances[0];
+    assert_eq!(b.dims["warehouse"], titled(main, "Основной"));
+    assert_eq!(
+        (b.before["qty"].clone(), b.after["qty"].clone()),
+        (dec(10_000, 3), dec(8_000, 3))
+    );
+    assert_eq!(engine.list(&query("issue", 10)).unwrap().total, Some(0));
+    assert_eq!(engine.list(&query("receipt", 10)).unwrap().total, receipts);
+    // Номер не израсходован: настоящий расход получает № 1.
+    let saved = engine
+        .save(
+            "issue",
+            &dated(issue(main, flour, 2_000), "2026-03-01"),
+            PostAction::Post,
+        )
+        .unwrap();
+    assert_eq!(saved.number, Some(1));
+
+    // Нехватка — та же ошибка, что у «Провести».
+    let err = engine
+        .trial_post("issue", &dated(issue(main, flour, 50_000), "2026-03-02"))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+    assert!(err.message.contains("остатка"), "{}", err.message);
+
+    // Проведённый документ меняют: учтены и его прежние движения (8 → 7, а не 8 → 5).
+    let mut changed = engine.get("issue", saved.id).unwrap();
+    changed.tables.get_mut("lines").unwrap()[0].insert("qty".into(), dec(3_000, 3));
+    let trial = engine.trial_post("issue", &changed).unwrap();
+    let b = &trial.balances[0];
+    assert_eq!(
+        (b.before["qty"].clone(), b.after["qty"].clone()),
+        (dec(8_000, 3), dec(7_000, 3))
+    );
+    assert_eq!(
+        engine.get("issue", saved.id).unwrap().tables["lines"][0]["qty"],
+        dec(2_000, 3)
+    );
+}
+
+#[test]
+fn trial_post_needs_right_to_post() {
+    let base = Base::new("trial-rights");
+    let engine = with_admin(&base);
+    let flour = add(&*engine, "goods", "Мука");
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    engine.logout().unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let err = engine
+        .trial_post("receipt", &receipt(main, mill, &[(flour, 1_000, 100)]))
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+}
+
+/// Описание схемы (СТ-58) не врёт: каждая описанная колонка есть в настоящей базе.
+#[test]
+fn schema_description_matches_real_base() {
+    use ostov_store::Driver;
+
+    let base = Base::new("describe");
+    drop(base.create());
+    let text = super::describe_schema(&super::warehouse_model());
+    let mut db = ostov_store::drivers::sqlite::SqliteDriver::open_read_only(&base.path).unwrap();
+    let mut table = String::new();
+    let mut checked = 0;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("## `") {
+            table = rest.split('`').next().unwrap().to_owned();
+        } else if let Some(rest) = line.strip_prefix("| `") {
+            let column = rest.split('`').next().unwrap();
+            let sql = format!("SELECT \"{column}\" FROM \"{table}\" LIMIT 0");
+            db.query(&sql, &[])
+                .unwrap_or_else(|e| panic!("{table}.{column}: {e}"));
+            checked += 1;
+        }
+    }
+    assert!(checked > 40, "проверено колонок: {checked}");
+    assert!(text.contains("`doc_id` | `ref(receipt)`"), "{text}");
+}
+
+/// Журнал запуска (К-21): команды, запросы после перевода и правила проведения.
+#[test]
+fn trace_shows_commands_queries_and_rules() {
+    use crate::TraceEvent;
+    use std::sync::Mutex;
+
+    let events: Arc<Mutex<Vec<TraceEvent>>> = Arc::default();
+    let sink = Arc::clone(&events);
+    let trace: crate::Trace = Arc::new(move |e: &TraceEvent| sink.lock().unwrap().push(e.clone()));
+
+    let base = Base::new("trace");
+    let db = ostov_store::drivers::sqlite::SqliteDriver::open(&base.path).unwrap();
+    let config = super::Config::from_model_with(&super::warehouse_model(), &QueryRules).unwrap();
+    let engine = super::LocalEngine::install(Box::new(db), config)
+        .unwrap()
+        .with_trace(trace);
+    let flour = add(&engine, "goods", "Мука");
+    let main = add(&engine, "warehouses", "Основной");
+    let mill = add(&engine, "suppliers", "Мельница");
+    engine
+        .save(
+            "receipt",
+            &receipt(main, mill, &[(flour, 10_000, 100)]),
+            PostAction::Post,
+        )
+        .unwrap();
+    // Расход читает свои строки запросом — запрос из правила тоже в журнале.
+    engine
+        .save("issue", &issue(main, flour, 1_000), PostAction::Post)
+        .unwrap();
+    let _ = engine.query("SELECT name FROM nowhere", &Fields::new());
+
+    let events = events.lock().unwrap();
+    let commands: Vec<(&str, bool)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Command { name, ok, .. } => Some((name.as_str(), *ok)),
+            _ => None,
+        })
+        .collect();
+    assert!(commands.contains(&("Save", true)), "{commands:?}");
+    assert!(commands.contains(&("Query", false)), "{commands:?}");
+    let rules: Vec<(&str, bool)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Rule { document, ok, .. } => Some((document.as_str(), *ok)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rules, [("receipt", true), ("issue", true)]);
+    let query = events
+        .iter()
+        .find_map(|e| match e {
+            TraceEvent::Query {
+                sql, params, rows, ..
+            } => Some((sql, params, *rows)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(query.0.contains("\"issue__lines\""), "{}", query.0);
+    assert_eq!(query.1.len(), 1);
+    assert_eq!(query.2, 1);
+}
+
+/// Занятые данные ядро узнаёт по своей метке, а не по тексту ошибки базы.
+#[test]
+fn busy_store_error_is_retried_and_explained() {
+    let busy = super::convert::error(crate::CoreError::Store(ostov_store::StoreError::Busy(
+        "database is locked".into(),
+    )));
+    assert_eq!(busy.code, ErrorCode::Unavailable);
+    assert!(super::convert::is_busy(&busy), "{busy:?}");
+    assert!(
+        busy.message.contains("другой пользователь"),
+        "{}",
+        busy.message
+    );
+    let other = super::convert::error(crate::CoreError::Store(ostov_store::StoreError::Database(
+        "syntax error".into(),
+    )));
+    assert!(!super::convert::is_busy(&other));
+}

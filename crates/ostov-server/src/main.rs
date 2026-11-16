@@ -18,7 +18,7 @@ use ostov_server::{Base, CERT_FILE, Connect, Hub, Tls, serve};
 use ostov_store::Driver;
 
 const USAGE: &str = "ostov-server --config <папка конфигурации> [--listen 0.0.0.0:7700] \
-[--tls <папка сертификата>] [--host <имя>]...\nБаза: переменная OSTOV_DB_URL — строка \
+[--tls <папка сертификата>] [--host <имя>]... [--query-timeout <секунд, 30>] [--db-connections <число, 10>]\nБаза: переменная OSTOV_DB_URL — строка \
 подключения PostgreSQL или sqlite:<файл>.\nСброс пароля: ostov-server --config <папка> \
 --reset-password <логин> — новый пароль спросит с клавиатуры, сервер не запускается.";
 
@@ -31,6 +31,10 @@ struct Args {
     hosts: Vec<String>,
     /// Не запускать сервер, а сменить пароль этому пользователю.
     reset_password: Option<String>,
+    /// Сколько может идти один запрос к базе (СТ-51).
+    query_timeout: std::time::Duration,
+    /// Соединений с базой на все сессии.
+    connections: usize,
 }
 
 impl Args {
@@ -40,6 +44,8 @@ impl Args {
         let mut tls = PathBuf::from("tls");
         let mut hosts = Vec::new();
         let mut reset_password = None;
+        let mut query_timeout = ostov_store::drivers::QUERY_TIMEOUT;
+        let mut connections = ostov_server::CONNECTIONS;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("после {arg} нужно значение"));
             match arg.as_str() {
@@ -53,6 +59,23 @@ impl Args {
                 "--tls" => tls = PathBuf::from(value()?),
                 "--host" => hosts.push(value()?),
                 "--reset-password" => reset_password = Some(value()?),
+                "--query-timeout" => {
+                    let raw = value()?;
+                    let secs: u64 = raw
+                        .parse()
+                        .ok()
+                        .filter(|s| *s > 0)
+                        .ok_or(format!("«{raw}» — не число секунд больше нуля"))?;
+                    query_timeout = std::time::Duration::from_secs(secs);
+                }
+                "--db-connections" => {
+                    let raw = value()?;
+                    connections = raw
+                        .parse()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or(format!("«{raw}» — не число соединений больше нуля"))?;
+                }
                 "--help" | "-h" => return Err(USAGE.to_owned()),
                 other => return Err(format!("непонятный параметр {other}\n{USAGE}")),
             }
@@ -72,6 +95,8 @@ impl Args {
             tls,
             hosts,
             reset_password,
+            query_timeout,
+            connections,
         })
     }
 }
@@ -84,14 +109,16 @@ fn computer_name() -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-fn database(url: String) -> Connect {
+fn database(url: String, timeout: std::time::Duration) -> Connect {
     match url.strip_prefix("sqlite:").map(PathBuf::from) {
         Some(path) => Arc::new(move || {
-            let db = ostov_store::drivers::sqlite::SqliteDriver::open(&path)?;
+            let mut db = ostov_store::drivers::sqlite::SqliteDriver::open(&path)?;
+            db.set_query_timeout(timeout)?;
             Ok(Box::new(db) as Box<dyn Driver + Send>)
         }),
         None => Arc::new(move || {
-            let db = ostov_store::drivers::postgres::PostgresDriver::connect(&url)?;
+            let mut db = ostov_store::drivers::postgres::PostgresDriver::connect(&url)?;
+            db.set_query_timeout(timeout)?;
             Ok(Box::new(db) as Box<dyn Driver + Send>)
         }),
     }
@@ -144,7 +171,8 @@ fn run() -> Result<(), String> {
     } else {
         "встроенная"
     };
-    let mut base = Base::new(database(url), model);
+    let mut base =
+        Base::new(database(url, args.query_timeout), model).with_connections(args.connections);
     if let Some(rules) = rules {
         base = base.with_rules(rules);
     }
@@ -238,6 +266,14 @@ mod tests {
         assert_eq!(args.tls, PathBuf::from("tls"));
         assert_eq!(args.hosts[..3], ["server.local", "localhost", "127.0.0.1"]);
         assert_eq!(args.reset_password, None);
+        assert_eq!(args.query_timeout, std::time::Duration::from_secs(30));
+        let slow = parse(&["--config", "c", "--query-timeout", "90"]).unwrap();
+        assert_eq!(slow.query_timeout, std::time::Duration::from_secs(90));
+        assert!(parse(&["--config", "c", "--query-timeout", "0"]).is_err());
+        assert_eq!(args.connections, 10);
+        let many = parse(&["--config", "c", "--db-connections", "40"]).unwrap();
+        assert_eq!(many.connections, 40);
+        assert!(parse(&["--config", "c", "--db-connections", "0"]).is_err());
         let reset = parse(&["--config", "c", "--reset-password", "boss"]).unwrap();
         assert_eq!(reset.reset_password.as_deref(), Some("boss"));
 

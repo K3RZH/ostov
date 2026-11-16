@@ -146,11 +146,12 @@ impl LocalEngine {
 
     pub(super) fn run_login(&self, login: &str, password: &str) -> EngineResult<SessionInfo> {
         let password = Password::new(password);
-        // Транзакция фиксируется и при неудаче: счётчик ошибок и запись журнала должны остаться.
+        // Пароль проверяется вне транзакции: Argon2 медленный, и в SQLite он держал бы запись
+        // всем остальным сессиям. Счётчик ошибок пишется сам, журнал — короткой транзакцией.
         let verified = {
-            let mut db = self.db();
+            let mut db = self.db()?;
+            let result = ostov_sec::verify(&mut **db, login, &password);
             in_transaction(&mut **db, |db| {
-                let result = ostov_sec::verify(db, login, &password);
                 let (action, note) = match &result {
                     Ok(user) if self.blocks_weak(user) => {
                         (Action::LoginFailed, "пароль задан для одного компьютера")
@@ -185,7 +186,7 @@ impl LocalEngine {
     /// Сброс пароля из консоли сервера, без входа: на случай, когда войти некому
     /// (например, у всех администраторов слабый пароль из режима 1). Только строгая политика.
     pub fn reset_password(&self, login: &str, password: &str) -> EngineResult<()> {
-        let mut db = self.db();
+        let mut db = self.db()?;
         in_transaction(&mut **db, |db| {
             let password = Password::new(password);
             let user = ostov_sec::set_password(db, login, &password, PasswordPolicy::STRICT)?;
@@ -230,7 +231,7 @@ impl LocalEngine {
 
     pub(super) fn run_admin_users(&self) -> EngineResult<Vec<UserInfo>> {
         self.need_system(|s| s.admin, "администрирование")?;
-        let users = ostov_sec::list_users(&mut **self.db()).map_err(sec_error)?;
+        let users = ostov_sec::list_users(&mut **self.db()?).map_err(sec_error)?;
         Ok(users
             .into_iter()
             .map(|u| UserInfo {
@@ -264,7 +265,7 @@ impl LocalEngine {
     pub(super) fn run_admin_set_user_active(&self, login: &str, active: bool) -> EngineResult<()> {
         self.need_system(|s| s.admin, "администрирование")?;
         let user = {
-            let mut db = self.db();
+            let mut db = self.db()?;
             in_transaction(&mut **db, |db| {
                 let user = ostov_sec::set_active(db, login, active, &self.config.roles)?;
                 let action = if active {
@@ -291,7 +292,7 @@ impl LocalEngine {
         password: &str,
     ) -> EngineResult<()> {
         self.need_system(|s| s.admin, "администрирование")?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         in_transaction(&mut **db, |db| {
             let user =
                 ostov_sec::set_password(db, login, &Password::new(password), self.password_policy)?;
@@ -318,7 +319,7 @@ impl LocalEngine {
 
     fn add_user(&self, user: &ostov_sec::NewUser) -> EngineResult<User> {
         let added = {
-            let mut db = self.db();
+            let mut db = self.db()?;
             in_transaction(&mut **db, |db| {
                 let added =
                     ostov_sec::add_user(db, user, &self.config.roles, self.password_policy)?;

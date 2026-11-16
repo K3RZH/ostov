@@ -5,6 +5,7 @@ mod access;
 mod config;
 mod convert;
 mod demo;
+mod describe;
 mod journal;
 mod schema;
 mod settings;
@@ -29,6 +30,7 @@ use access::Need;
 use config::Parts;
 pub use config::{BuiltinRules, Config, DocumentConfig, Rules, warehouse, warehouse_model};
 use convert::{error, fields_from_api, fields_to_api, invalid, param_from_api, value_to_api};
+pub use describe::describe_schema;
 use ostov_sec::Action;
 
 use crate::closing::ClosedPeriodPass;
@@ -39,8 +41,40 @@ use crate::{
     in_transaction, posting,
 };
 
+/// Откуда ядро берёт соединение: своё (режим 1) или из пула сервера на время команды.
+enum Db {
+    Own(Mutex<Box<dyn Driver + Send>>),
+    Pool(Arc<crate::Pool>),
+}
+
+/// Соединение на время команды: своё под замком или взятое из пула.
+enum DbGuard<'a> {
+    Own(MutexGuard<'a, Box<dyn Driver + Send>>),
+    Pool(crate::pool::Pooled<'a>),
+}
+
+impl std::ops::Deref for DbGuard<'_> {
+    type Target = Box<dyn Driver + Send>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Own(db) => db,
+            Self::Pool(db) => db,
+        }
+    }
+}
+
+impl std::ops::DerefMut for DbGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Own(db) => db,
+            Self::Pool(db) => db,
+        }
+    }
+}
+
 pub struct LocalEngine {
-    db: Mutex<Box<dyn Driver + Send>>,
+    db: Db,
     config: Config,
     /// Вехи по токену списка; сбрасываются при любой записи.
     milestones: Mutex<HashMap<String, Milestones>>,
@@ -52,6 +86,8 @@ pub struct LocalEngine {
     password_policy: PasswordPolicy,
     /// Блокировка файла базы (СТ-55): пока движок жив, второй экземпляр базу не откроет.
     _lock: Option<File>,
+    /// Журнал запуска (К-21), только в режиме тестирования.
+    trace: Option<crate::Trace>,
 }
 
 enum Object<'a> {
@@ -62,6 +98,19 @@ enum Object<'a> {
 impl LocalEngine {
     pub fn new(mut db: Box<dyn Driver + Send>, config: Config) -> Self {
         let users = ostov_sec::has_users(&mut *db).unwrap_or(false);
+        Self::with_db(Db::Own(Mutex::new(db)), users, config)
+    }
+
+    /// Ядро сессии сервера: соединение из общего пула на время каждой команды.
+    pub fn pooled(pool: Arc<crate::Pool>, config: Config) -> EngineResult<Self> {
+        let users = {
+            let mut db = pool.get().map_err(|e| error(e.into()))?;
+            ostov_sec::has_users(&mut **db).unwrap_or(false)
+        };
+        Ok(Self::with_db(Db::Pool(pool), users, config))
+    }
+
+    fn with_db(db: Db, users: bool, config: Config) -> Self {
         let titles = config
             .catalogs
             .iter()
@@ -71,13 +120,14 @@ impl LocalEngine {
             })
             .collect();
         Self {
-            db: Mutex::new(db),
+            db,
             titles,
             config,
             milestones: Mutex::new(HashMap::new()),
             access: Mutex::new(access::Access { users, user: None }),
             password_policy: PasswordPolicy::STRICT,
             _lock: None,
+            trace: None,
         }
     }
 
@@ -99,6 +149,18 @@ impl LocalEngine {
         Ok(Self::new(db, config))
     }
 
+    /// События журнала запуска (К-21): команды, запросы, правила проведения.
+    pub fn with_trace(mut self, trace: crate::Trace) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    fn emit(&self, event: crate::TraceEvent) {
+        if let Some(trace) = &self.trace {
+            trace(&event);
+        }
+    }
+
     fn locked(mut self, lock: File) -> Self {
         self._lock = Some(lock);
         self
@@ -106,8 +168,13 @@ impl LocalEngine {
 
     // Если команда упала с паникой, транзакция уже откачена (см. `in_transaction`),
     // поэтому соединение можно брать и после «отравленного» замка.
-    fn db(&self) -> MutexGuard<'_, Box<dyn Driver + Send>> {
-        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+    fn db(&self) -> EngineResult<DbGuard<'_>> {
+        match &self.db {
+            Db::Own(db) => Ok(DbGuard::Own(
+                db.lock().unwrap_or_else(PoisonError::into_inner),
+            )),
+            Db::Pool(pool) => pool.get().map(DbGuard::Pool).map_err(|e| error(e.into())),
+        }
     }
 
     fn milestones(&self) -> MutexGuard<'_, HashMap<String, Milestones>> {
@@ -118,6 +185,21 @@ impl LocalEngine {
 
     /// Паника внутри команды становится ошибкой `Internal`, а не падением потока интерфейса.
     fn guarded<T>(&self, command: &str, f: impl FnOnce() -> EngineResult<T>) -> EngineResult<T> {
+        let started = std::time::Instant::now();
+        let result = self.guarded_inner(command, f);
+        self.emit(crate::TraceEvent::Command {
+            name: command.to_owned(),
+            took: started.elapsed(),
+            ok: result.is_ok(),
+        });
+        result
+    }
+
+    fn guarded_inner<T>(
+        &self,
+        command: &str,
+        f: impl FnOnce() -> EngineResult<T>,
+    ) -> EngineResult<T> {
         match catch_unwind(AssertUnwindSafe(f)) {
             Ok(result) => result,
             Err(payload) => {
@@ -176,8 +258,16 @@ impl LocalEngine {
             db,
             model: &self.config.model,
             can_read,
+            trace: self.trace.as_ref(),
         };
-        cfg.rule.movements_reading(doc, &mut reader)
+        let started = std::time::Instant::now();
+        let moves = cfg.rule.movements_reading(doc, &mut reader);
+        self.emit(crate::TraceEvent::Rule {
+            document: cfg.kind.table().to_owned(),
+            took: started.elapsed(),
+            ok: moves.is_ok(),
+        });
+        moves
     }
 
     fn forget_lists(&self) {
@@ -267,6 +357,20 @@ fn query_value(column: &ostov_sql::Column, value: &crate::FieldValue) -> ostov_a
         crate::FieldValue::Int(n) if column.flag => ostov_api::Value::Bool(*n != 0),
         other => value_to_api(other),
     }
+}
+
+/// Сколько раз пробуем запись, если данные держала другая транзакция (НТ-Н3).
+const BUSY_TRIES: usize = 3;
+
+/// Запись откатывается целиком, поэтому её можно просто повторить.
+fn busy_retry<T>(mut f: impl FnMut() -> EngineResult<T>) -> EngineResult<T> {
+    for _ in 1..BUSY_TRIES {
+        match f() {
+            Err(e) if convert::is_busy(&e) => {}
+            done => return done,
+        }
+    }
+    f()
 }
 
 fn broken() -> EngineError {
@@ -455,7 +559,7 @@ impl LocalEngine {
             filter: fields_from_api(&q.filter)?,
         };
         let token = token(&q.object, &query)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let page = list_titled(
             &mut **db,
             source,
@@ -472,7 +576,7 @@ impl LocalEngine {
         let (object, query) = parse_token(token)?;
         self.need(&object, Need::Read)?;
         let source = self.source(&object)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let mut cache = self.milestones();
         if !cache.contains_key(token) {
             let built =
@@ -489,7 +593,7 @@ impl LocalEngine {
     }
 
     fn run_get(&self, object: &str, id: i64) -> EngineResult<ObjectData> {
-        let mut db = self.db();
+        let mut db = self.db()?;
         let missing =
             || EngineError::new(ErrorCode::NotFound, format!("в {object} нет записи {id}"));
         match self.object(object)? {
@@ -572,7 +676,7 @@ impl LocalEngine {
 
     fn run_save(&self, object: &str, data: &ObjectData, post: PostAction) -> EngineResult<Saved> {
         let (target, fields, parts) = self.prepare_save(object, data, post)?;
-        let mut guard = self.db();
+        let mut guard = self.db()?;
         let db = &mut **guard;
         let saved = in_transaction(db, |db| {
             self.save_in(db, object, data, post, target, &fields, &parts)
@@ -580,6 +684,94 @@ impl LocalEngine {
         .map_err(|e| self.explain(db, e))?;
         self.forget_lists();
         Ok(saved)
+    }
+
+    /// Запись и проведение, как у `save`, в транзакции, которая всегда откатывается.
+    /// Остатки «после» читаются внутри неё, «до» — после отката.
+    fn run_trial_post(
+        &self,
+        document: &str,
+        data: &ObjectData,
+    ) -> EngineResult<ostov_api::TrialPost> {
+        let cfg = self.document(document)?;
+        let registers = self.config.registers_of(cfg);
+        let (target, fields, parts) = self.prepare_save(document, data, PostAction::Post)?;
+        let mut guard = self.db()?;
+        let db = &mut **guard;
+        db.begin().map_err(|e| error(e.into()))?;
+        let tried = || -> Result<_, crate::CoreError> {
+            // Ключи прежних движений тоже меняют остаток: документ мог убрать строку.
+            let mut keys: Vec<(&crate::AccumulationRegister, crate::Fields)> = Vec::new();
+            if let Some(id) = data.id {
+                for reg in &registers {
+                    for m in reg.movements_of(db, cfg.kind.table(), id)? {
+                        keys.push((reg, m.dims));
+                    }
+                }
+            }
+            let saved = self.save_in(
+                db,
+                document,
+                data,
+                PostAction::Post,
+                target,
+                &fields,
+                &parts,
+            )?;
+            let mut moves = Vec::new();
+            for reg in &registers {
+                for m in reg.movements_of(db, cfg.kind.table(), saved.id)? {
+                    keys.push((reg, m.dims.clone()));
+                    moves.push((*reg, m));
+                }
+            }
+            let mut after = Vec::new();
+            for (reg, dims) in keys {
+                if !after
+                    .iter()
+                    .any(|(r, d, _): &(&crate::AccumulationRegister, _, _)| {
+                        r.name() == reg.name() && *d == dims
+                    })
+                {
+                    let balance = reg.balance(db, &dims)?;
+                    after.push((reg, dims, balance));
+                }
+            }
+            Ok((moves, after))
+        };
+        let result = tried();
+        db.rollback().map_err(|e| error(e.into()))?;
+        let (moves, after) = result.map_err(|e| self.explain(db, e))?;
+
+        let resources = |amounts: &BTreeMap<String, ostov_store::Decimal>| -> ostov_api::Fields {
+            amounts
+                .iter()
+                .map(|(k, v)| (k.clone(), decimal_to_api(*v)))
+                .collect()
+        };
+        let mut trial = ostov_api::TrialPost::default();
+        for (reg, m) in moves {
+            let mut dims = fields_to_api(&m.dims);
+            self.fill_titles(db, reg.dims(), &mut [&mut dims])?;
+            trial.moves.push(ostov_api::TrialMove {
+                register: reg.name().to_owned(),
+                receipt: m.kind == crate::MovementKind::Receipt,
+                dims,
+                resources: resources(&m.resources),
+            });
+        }
+        for (reg, dims, after) in after {
+            let before = reg.balance(db, &dims).map_err(error)?;
+            let mut api_dims = fields_to_api(&dims);
+            self.fill_titles(db, reg.dims(), &mut [&mut api_dims])?;
+            trial.balances.push(ostov_api::TrialBalance {
+                register: reg.name().to_owned(),
+                dims: api_dims,
+                before: resources(&before),
+                after: resources(&after),
+            });
+        }
+        Ok(trial)
     }
 
     /// Пачка в одной транзакции: упала одна запись — не записалось ничего (импорт, Дизайн §12).
@@ -591,7 +783,7 @@ impl LocalEngine {
                 .map_err(|e| numbered(n, e))?;
             prepared.push(ready);
         }
-        let mut guard = self.db();
+        let mut guard = self.db()?;
         let db = &mut **guard;
         let mut failed = 0;
         let saved = in_transaction(db, |db| {
@@ -767,7 +959,7 @@ impl LocalEngine {
         deleted: bool,
     ) -> EngineResult<Saved> {
         let target = self.object(object)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let action = if deleted {
             Action::MarkDeleted
         } else {
@@ -788,7 +980,7 @@ impl LocalEngine {
 
     fn run_post(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
         let can_read = self.can_read();
         in_transaction(&mut **db, |db| {
@@ -809,7 +1001,7 @@ impl LocalEngine {
 
     fn run_unpost(&self, document: &str, id: i64) -> EngineResult<Saved> {
         let cfg = self.document(document)?;
-        let mut db = self.db();
+        let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
         in_transaction(&mut **db, |db| {
             posting::unpost_from(db, &cfg.kind, &registers, id)?;
@@ -901,7 +1093,7 @@ impl Engine for LocalEngine {
         self.guarded("Save", || {
             self.need_save(object, data, post)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_save(object, data, post)
+            busy_retry(|| self.run_save(object, data, post))
         })
     }
 
@@ -912,7 +1104,7 @@ impl Engine for LocalEngine {
                     .map_err(|e| numbered(n, e))?;
             }
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_save_batch(items)
+            busy_retry(|| self.run_save_batch(items))
         })
     }
 
@@ -926,7 +1118,7 @@ impl Engine for LocalEngine {
         self.guarded("MarkDeleted", || {
             self.need(object, Need::Delete)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_mark_deleted(object, id, version, deleted)
+            busy_retry(|| self.run_mark_deleted(object, id, version, deleted))
         })
     }
 
@@ -934,7 +1126,7 @@ impl Engine for LocalEngine {
         self.guarded("Post", || {
             self.need(document, Need::Post)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_post(document, id)
+            busy_retry(|| self.run_post(document, id))
         })
     }
 
@@ -942,7 +1134,15 @@ impl Engine for LocalEngine {
         self.guarded("Unpost", || {
             self.need(document, Need::Unpost)?;
             let _pass = ClosedPeriodPass::new(self.may_edit_closed());
-            self.run_unpost(document, id)
+            busy_retry(|| self.run_unpost(document, id))
+        })
+    }
+
+    fn trial_post(&self, document: &str, data: &ObjectData) -> EngineResult<ostov_api::TrialPost> {
+        self.guarded("TrialPost", || {
+            self.need_save(document, data, PostAction::Post)?;
+            let _pass = ClosedPeriodPass::new(self.may_edit_closed());
+            self.run_trial_post(document, data)
         })
     }
 
@@ -962,9 +1162,17 @@ impl Engine for LocalEngine {
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
-            let mut db = self.db();
-            let found = crate::query::run(&mut **db, &self.config.model, &can_read, sql, &params)
-                .map_err(error)?;
+            let mut db = self.db()?;
+            let trace = self.trace.as_ref();
+            let found = crate::query::run(
+                &mut **db,
+                &self.config.model,
+                &can_read,
+                sql,
+                &params,
+                trace,
+            )
+            .map_err(error)?;
             // Названия ссылок — тем же путём, что в списках: строки по именам колонок.
             let refs: Vec<FieldDef> = found
                 .columns
@@ -1002,14 +1210,14 @@ impl Engine for LocalEngine {
     fn get_settings(&self, key: &str) -> EngineResult<Option<ostov_api::Fields>> {
         self.guarded("GetSettings", || {
             self.need_system(|_| true, "настройки")?;
-            settings::get(&mut **self.db(), key).map_err(error)
+            settings::get(&mut **self.db()?, key).map_err(error)
         })
     }
 
     fn save_settings(&self, key: &str, values: &ostov_api::Fields) -> EngineResult<()> {
         self.guarded("SaveSettings", || {
             self.need_system(|_| true, "настройки")?;
-            settings::save(&mut **self.db(), key, values).map_err(error)
+            settings::save(&mut **self.db()?, key, values).map_err(error)
         })
     }
 
@@ -1020,7 +1228,7 @@ impl Engine for LocalEngine {
     fn closing_date(&self) -> EngineResult<Option<String>> {
         self.guarded("GetClosingDate", || {
             self.need_system(|_| true, "дата закрытия")?;
-            crate::closing::closing_date(&mut **self.db()).map_err(error)
+            crate::closing::closing_date(&mut **self.db()?).map_err(error)
         })
     }
 
@@ -1031,7 +1239,7 @@ impl Engine for LocalEngine {
                 Some(d) => format!("период закрыт по {}", ru_date(d)),
                 None => "период открыт".to_owned(),
             };
-            let mut db = self.db();
+            let mut db = self.db()?;
             in_transaction(&mut **db, |db| {
                 crate::closing::set_closing_date(db, date)?;
                 self.journal(db, Action::ClosingDateSet, "", None, &[], &note)
@@ -1077,7 +1285,7 @@ impl LocalEngine {
             }
         }
 
-        let mut db = self.db();
+        let mut db = self.db()?;
         let mut rows: Vec<ostov_api::Fields> = match kind {
             "balance" => register
                 .balances(&mut **db, date("date")?.as_deref(), &filter)
@@ -1263,6 +1471,7 @@ pub struct LocalConnector {
     model: Option<ostov_model::Config>,
     rules: Option<Arc<dyn Rules + Send + Sync>>,
     password_policy: PasswordPolicy,
+    trace: Option<crate::Trace>,
 }
 
 impl std::fmt::Debug for LocalConnector {
@@ -1280,6 +1489,7 @@ impl LocalConnector {
             model: Some(model),
             rules: None,
             password_policy: PasswordPolicy::STRICT,
+            trace: None,
         }
     }
 
@@ -1287,6 +1497,19 @@ impl LocalConnector {
     pub fn with_password_policy(mut self, policy: PasswordPolicy) -> Self {
         self.password_policy = policy;
         self
+    }
+
+    /// Журнал запуска (К-21) у всех баз, которые откроет или создаст коннектор.
+    pub fn with_trace(mut self, trace: crate::Trace) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    fn traced(&self, engine: LocalEngine) -> LocalEngine {
+        match &self.trace {
+            Some(trace) => engine.with_trace(Arc::clone(trace)),
+            None => engine,
+        }
     }
 
     /// Свои правила документов вместо встроенных, например из Python (`ostov-py`).
@@ -1335,10 +1558,33 @@ impl Connector for LocalConnector {
         let config = self.config()?;
         in_transaction(&mut db, |db| upgrade(db, &config)).map_err(error)?;
         Ok(Arc::new(
-            LocalEngine::new(Box::new(db), config)
-                .with_password_policy(self.password_policy)
-                .locked(lock),
+            self.traced(
+                LocalEngine::new(Box::new(db), config)
+                    .with_password_policy(self.password_policy)
+                    .locked(lock),
+            ),
         ))
+    }
+
+    // Всё то же, что сделает открытие, но в транзакции, которая откатывается.
+    fn plan_local(&self, path: &str) -> EngineResult<ostov_api::SchemaPlan> {
+        if !Path::new(path).exists() {
+            return Err(not_found(path));
+        }
+        let _lock = lock_base(path)?;
+        let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
+        base_config(&mut db, path)?;
+        let config = self.config()?;
+        let mut changes = Vec::new();
+        db.begin().map_err(|e| error(e.into()))?;
+        let result = upgrade_noting(&mut db, &config, &mut changes);
+        db.rollback().map_err(|e| error(e.into()))?;
+        let refused = match result {
+            Ok(()) => None,
+            Err(e @ crate::CoreError::Incompatible(_)) => Some(e.to_string()),
+            Err(e) => return Err(error(e)),
+        };
+        Ok(ostov_api::SchemaPlan { changes, refused })
     }
 
     fn create_local(
@@ -1349,9 +1595,11 @@ impl Connector for LocalConnector {
     ) -> EngineResult<Arc<dyn Engine>> {
         no_file_password(file_password)?;
         let (db, config, lock) = create_base(path, self.config()?)?;
-        let engine = LocalEngine::new(Box::new(db), config)
-            .with_password_policy(self.password_policy)
-            .locked(lock);
+        let engine = self.traced(
+            LocalEngine::new(Box::new(db), config)
+                .with_password_policy(self.password_policy)
+                .locked(lock),
+        );
         if let Some(admin) = admin
             && let Err(e) = engine.create_first_admin(&admin.login, &admin.password)
         {
@@ -1469,15 +1717,24 @@ fn install(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError>
 /// Доводит старую базу до текущей схемы. Сейчас одно: даты в движениях регистра
 /// (их не было до отчётов по периодам) — берутся из поля `date` документов.
 fn upgrade(db: &mut dyn Driver, config: &Config) -> Result<(), crate::CoreError> {
+    upgrade_noting(db, config, &mut Vec::new())
+}
+
+fn upgrade_noting(
+    db: &mut dyn Driver,
+    config: &Config,
+    steps: &mut Vec<ostov_api::SchemaChange>,
+) -> Result<(), crate::CoreError> {
     check_config(db, config)?;
     crate::closing::create_table(db)?;
+    crate::object::document::create_numbers_table(db)?;
     settings::create_table(db)?;
     ostov_sec::create_tables(db)?;
     if !schema::recorded(db)? {
         // Базы до реструктуризации создавались только под встроенный «Склад».
         schema::record(db, &warehouse()?)?;
     }
-    schema::restructure(db, config)?;
+    schema::restructure(db, config, steps)?;
     for doc in config.documents.values() {
         doc.kind.index_parts(db)?;
     }

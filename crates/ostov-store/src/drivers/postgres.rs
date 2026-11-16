@@ -28,10 +28,12 @@ pub struct PostgresDriver {
 impl PostgresDriver {
     // TODO(ADR-026): TLS вместо NoTls, когда дойдём до ostov-server.
     pub fn connect(url: &str) -> Result<Self, StoreError> {
-        Ok(Self {
+        let mut db = Self {
             client: Client::connect(url, NoTls)?,
             depth: crate::Depth::default(),
-        })
+        };
+        db.set_query_timeout(crate::drivers::QUERY_TIMEOUT)?;
+        Ok(db)
     }
 }
 
@@ -73,6 +75,13 @@ impl Driver for PostgresDriver {
         let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
         let n = self.client.execute(&stmt, &refs)?;
         usize::try_from(n).map_err(|_| StoreError::Database(format!("слишком много строк: {n}")))
+    }
+
+    fn set_query_timeout(&mut self, timeout: std::time::Duration) -> Result<(), StoreError> {
+        let ms = timeout.as_millis();
+        self.client
+            .batch_execute(&format!("SET statement_timeout = {ms}"))?;
+        Ok(())
     }
 
     fn query(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>, StoreError> {
@@ -164,7 +173,16 @@ impl From<postgres::Error> for StoreError {
     fn from(e: postgres::Error) -> Self {
         // Сам `postgres::Error` пишет только «db error»; причина — в ответе сервера.
         match e.as_db_error() {
-            Some(db) => Self::Database(format!("{} ({})", db.message(), db.code().code())),
+            Some(db) => {
+                let text = format!("{} ({})", db.message(), db.code().code());
+                // 40P01 взаимная блокировка, 40001 сериализация, 55P03 не дождались блокировки,
+                // 57014 — прерван по statement_timeout.
+                match db.code().code() {
+                    "40P01" | "40001" | "55P03" => Self::Busy(text),
+                    "57014" => Self::Timeout(text),
+                    _ => Self::Database(text),
+                }
+            }
             None => Self::Database(e.to_string()),
         }
     }
@@ -277,5 +295,20 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, StoreError::Database(_)));
+    }
+
+    #[test]
+    fn long_query_is_cut_by_timeout() {
+        let Some(mut db) = db() else { return };
+        db.set_query_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let err = db.query("SELECT pg_sleep(5)", &[]).unwrap_err();
+        assert!(matches!(err, StoreError::Timeout(_)), "{err:?}");
+        db.set_query_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(
+            db.query("SELECT 1::bigint", &[]).unwrap(),
+            vec![vec![Value::Int(1)]]
+        );
     }
 }
