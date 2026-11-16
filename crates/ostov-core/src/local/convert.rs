@@ -105,6 +105,13 @@ pub fn error(e: CoreError) -> EngineError {
                 details: format!("{BUSY}{e}"),
             };
         }
+        CoreError::Store(ostov_store::StoreError::Timeout(_)) => {
+            return EngineError {
+                code: ErrorCode::Unavailable,
+                message: "Запрос шёл слишком долго и прерван. Сузьте отбор или период.".into(),
+                details: e.to_string(),
+            };
+        }
         CoreError::Store(_) => {
             // Текст базы часто английский и технический — человеку общее сообщение.
             return EngineError {
