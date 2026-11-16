@@ -34,9 +34,12 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// Заменяет в файле копии текст `from` на `to`; текста нет: тест устарел.
+/// Заменяет в файле копии текст `from` на `to`; текста нет: тест устарел. Концы строк
+/// приводятся к `\n`: на Windows git отдаёт файлы с `\r\n`, а правки в тестах записаны с `\n`.
 pub fn replace_in(file: &Path, from: &str, to: &str) {
-    let text = std::fs::read_to_string(file).expect("файл читается");
+    let text = std::fs::read_to_string(file)
+        .expect("файл читается")
+        .replace("\r\n", "\n");
     assert!(text.contains(from), "в {} нет «{from}»", file.display());
     std::fs::write(file, text.replacen(from, to, 1)).expect("файл пишется");
 }
