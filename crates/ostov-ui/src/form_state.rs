@@ -4,17 +4,16 @@
 //! (`ObjectMeta`) и значений из ядра (`ObjectData`), либо пустой для нового объекта. Правки идут
 //! текстом: разбор по типу поля делает `values::parse`, ошибка остаётся у поля вместе с введённым
 //! текстом. Перед записью обязательные поля проверяются, а значения собираются обратно в
-//! `ObjectData`. Табличные части форма пока не правит, но хранит как пришли и отдаёт при записи
-//! без изменений, чтобы запись шапки не стёрла строки документа.
+//! `ObjectData`. Табличные части ведёт `form_table::Parts`: строки правятся в окне строки и
+//! уходят в ядро вместе с шапкой.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use ostov_api::{
-    FieldDef, FieldKind, Fields, ObjectData, ObjectKind, ObjectMeta, PostAction, Rights, Saved,
-    Value,
+    FieldDef, FieldKind, ObjectData, ObjectKind, ObjectMeta, PostAction, Rights, Saved, Value,
 };
 
+use crate::form_table::{InvalidRow, Parts};
 use crate::values::{display, parse, parse_iso_date};
 
 /// Что написать у обязательного поля без значения: по виду поля.
@@ -43,7 +42,7 @@ pub struct FormField {
 }
 
 impl FormField {
-    fn new(def: &FieldDef, value: Value) -> Self {
+    pub(crate) fn new(def: &FieldDef, value: Value) -> Self {
         Self {
             name: def.name.clone(),
             title: def.title.clone(),
@@ -77,6 +76,19 @@ impl FormField {
         !self.read_only && self.kind != FieldKind::Ref
     }
 
+    /// Значение поля выбирают из справочника: ссылка, которую не считает ядро.
+    pub fn accepts_choice(&self) -> bool {
+        !self.read_only && self.kind == FieldKind::Ref
+    }
+
+    /// `id` выбранного элемента, если поле ссылка и оно заполнено.
+    pub fn reference_id(&self) -> Option<i64> {
+        match self.value {
+            Value::Ref { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
     /// Поле отличается от открытого: значение другое или введённое не разобралось.
     pub fn is_changed(&self) -> bool {
         self.error.is_some() || self.value != self.original
@@ -102,21 +114,58 @@ impl FormField {
         }
     }
 
-    fn accept_value(&mut self, value: Value) {
+    pub(crate) fn accept_value(&mut self, value: Value) {
         self.text = display(&value, self.kind);
         self.value = value;
         self.error = None;
     }
 
+    /// Правка текстом: разобралось — значение принято, нет — ошибка и набранный текст остаются.
+    pub(crate) fn apply_text(&mut self, text: &str) {
+        match parse(text, self.kind) {
+            Ok(value) => {
+                self.value = value;
+                self.error = None;
+            }
+            Err(message) => self.error = Some(message),
+        }
+        text.clone_into(&mut self.text);
+    }
+
+    /// Выбор ссылки: `id` и название; `None` очищает поле.
+    pub(crate) fn choose(&mut self, chosen: Option<(i64, String)>) {
+        self.accept_value(match chosen {
+            Some((id, title)) => Value::Ref {
+                id,
+                title: Some(title),
+            },
+            None => Value::Null,
+        });
+    }
+
+    /// Проверка перед записью: пустое обязательное поле получает ошибку. `true`: у поля ошибка
+    /// (эта или прежняя ошибка разбора).
+    pub(crate) fn check_required(&mut self) -> bool {
+        if self.required && !self.read_only && self.is_empty() && self.error.is_none() {
+            self.error = Some(self.required_message().to_owned());
+        }
+        self.error.is_some()
+    }
+
     /// Текущее значение как его принимает ядро: у ссылки название не нужно.
     fn value_for_core(&self) -> Value {
-        match &self.value {
-            Value::Ref { id, .. } => Value::Ref {
-                id: *id,
-                title: None,
-            },
-            other => other.clone(),
-        }
+        core_value(&self.value)
+    }
+}
+
+/// Значение для ядра: у ссылки только `id`, название ядро подставит само.
+pub(crate) fn core_value(value: &Value) -> Value {
+    match value {
+        Value::Ref { id, .. } => Value::Ref {
+            id: *id,
+            title: None,
+        },
+        other => other.clone(),
     }
 }
 
@@ -146,20 +195,26 @@ impl Status {
     }
 }
 
-/// Запись не началась: в форме есть поля с ошибкой (они уже отмечены).
+/// Запись не началась: в форме есть поля или строки табличных частей с ошибкой (они уже
+/// отмечены).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidForm {
-    /// Сколько полей с ошибкой.
+    /// Сколько полей шапки с ошибкой.
     pub fields: usize,
+    /// Сколько строк табличных частей с незаполненными обязательными колонками.
+    pub rows: usize,
 }
 
 impl fmt::Display for InvalidForm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Не записано: исправьте отмеченные поля ({}).",
-            self.fields
-        )
+        match (self.fields, self.rows) {
+            (fields, 0) => write!(f, "Не записано: исправьте отмеченные поля ({fields})."),
+            (0, rows) => write!(f, "Не записано: заполните отмеченные строки ({rows})."),
+            (fields, rows) => write!(
+                f,
+                "Не записано: исправьте отмеченные поля ({fields}) и строки ({rows})."
+            ),
+        }
     }
 }
 
@@ -172,15 +227,13 @@ pub struct FormState {
     object_title: String,
     kind: ObjectKind,
     rights: Rights,
-    table_part_titles: Vec<String>,
     id: Option<i64>,
     version: i64,
     number: Option<i64>,
     posted: bool,
     deleted: bool,
     fields: Vec<FormField>,
-    /// Табличные части как пришли из ядра: до их редактора форма отдаёт их назад без изменений.
-    tables: BTreeMap<String, Vec<Fields>>,
+    parts: Parts,
 }
 
 impl FormState {
@@ -212,14 +265,13 @@ impl FormState {
             object_title: meta.title.clone(),
             kind: meta.kind,
             rights: meta.rights,
-            table_part_titles: meta.table_parts.iter().map(|p| p.title.clone()).collect(),
             id: data.and_then(|data| data.id),
             version: data.map_or(0, |data| data.version),
             number: data.and_then(|data| data.number),
             posted: data.is_some_and(|data| data.posted),
             deleted: data.is_some_and(|data| data.deleted),
             fields,
-            tables: data.map(|data| data.tables.clone()).unwrap_or_default(),
+            parts: Parts::new(&meta.table_parts, data.map(|data| &data.tables)),
         }
     }
 
@@ -259,9 +311,9 @@ impl FormState {
         &self.fields
     }
 
-    /// Названия табличных частей объекта: их форма пока не показывает.
-    pub fn table_part_titles(&self) -> &[String] {
-        &self.table_part_titles
+    /// Табличные части объекта и открытое окно строки.
+    pub fn parts(&self) -> &Parts {
+        &self.parts
     }
 
     /// Как объект называется во вкладке и в заголовке: у документа «Расход №5», у элемента
@@ -337,9 +389,20 @@ impl FormState {
         self.can_write() && self.fields.get(index).is_some_and(FormField::accepts_text)
     }
 
-    /// В форме есть правки относительно открытого или записанного.
+    /// Значение поля `index` можно выбрать из справочника: есть право на запись, поле ссылка и
+    /// не вычисляемое.
+    pub fn can_pick(&self, index: usize) -> bool {
+        self.can_write()
+            && self
+                .fields
+                .get(index)
+                .is_some_and(FormField::accepts_choice)
+    }
+
+    /// В форме есть правки относительно открытого или записанного (в шапке, в строках или в
+    /// открытом окне строки).
     pub fn is_modified(&self) -> bool {
-        self.fields.iter().any(FormField::is_changed)
+        self.fields.iter().any(FormField::is_changed) || self.parts.is_changed()
     }
 
     /// Правка поля `index` текстом. Разобралось: значение принято, ошибка снята. Не разобралось:
@@ -349,17 +412,9 @@ impl FormState {
         if !self.is_editable(index) {
             return;
         }
-        let Some(field) = self.fields.get_mut(index) else {
-            return;
-        };
-        match parse(text, field.kind) {
-            Ok(value) => {
-                field.value = value;
-                field.error = None;
-            }
-            Err(message) => field.error = Some(message),
+        if let Some(field) = self.fields.get_mut(index) {
+            field.apply_text(text);
         }
-        text.clone_into(&mut field.text);
     }
 
     /// Выбор значения в поле-ссылке: `id` и название пары. `None`: поле очищено. Поле, которое
@@ -368,42 +423,81 @@ impl FormState {
         if !self.can_write() {
             return;
         }
-        let Some(field) = self
+        if let Some(field) = self
             .fields
             .get_mut(index)
-            .filter(|field| field.kind == FieldKind::Ref && !field.read_only)
-        else {
-            return;
-        };
-        field.accept_value(match chosen {
-            Some((id, title)) => Value::Ref {
-                id,
-                title: Some(title),
-            },
-            None => Value::Null,
-        });
+            .filter(|field| field.accepts_choice())
+        {
+            field.choose(chosen);
+        }
+    }
+
+    /// Выбирает строку `row` табличной части `part` (для «Изменить» и «Удалить»).
+    pub fn select_row(&mut self, part: usize, row: usize) {
+        self.parts.select(part, row);
+    }
+
+    /// «Добавить» строку в табличную часть `part`: открывается пустое окно строки. `false`:
+    /// записывать нельзя, такой части нет или окно строки уже открыто.
+    pub fn add_row(&mut self, part: usize) -> bool {
+        self.can_write() && self.parts.open_new(part)
+    }
+
+    /// Открывает строку в окне строки; без права на запись она только показывается.
+    pub fn open_row(&mut self, part: usize, row: usize) -> bool {
+        let editable = self.can_write();
+        self.parts.open_row(part, row, editable)
+    }
+
+    /// Правка ячейки `cell` открытой строки текстом.
+    pub fn edit_cell(&mut self, cell: usize, text: &str) {
+        self.parts.edit_cell(cell, text);
+    }
+
+    /// Выбор ссылки в ячейке `cell` открытой строки; `None` очищает ячейку.
+    pub fn set_cell_reference(&mut self, cell: usize, chosen: Option<(i64, String)>) {
+        self.parts.choose_cell(cell, chosen);
+    }
+
+    /// «Готово» в окне строки: строка встаёт в таблицу, если обязательные ячейки заполнены.
+    ///
+    /// # Errors
+    /// В строке есть ячейки с ошибкой; они отмечены, окно остаётся открытым.
+    pub fn commit_row(&mut self) -> Result<(), InvalidRow> {
+        self.parts.commit()
+    }
+
+    /// «Отмена» в окне строки: правки строки пропадают.
+    pub fn cancel_row(&mut self) {
+        self.parts.cancel();
+    }
+
+    /// «Удалить» строку `row` табличной части `part`.
+    pub fn remove_row(&mut self, part: usize, row: usize) -> bool {
+        self.can_write() && self.parts.remove(part, row)
     }
 
     /// Проверка перед записью: обязательные поля должны быть заполнены, разбор не должен
     /// падать. Неверные поля помечаются ошибкой; возвращается, сколько их.
     fn check(&mut self) -> usize {
-        for field in &mut self.fields {
-            if field.required && !field.read_only && field.is_empty() && field.error.is_none() {
-                field.error = Some(field.required_message().to_owned());
-            }
-        }
-        self.fields.iter().filter(|f| f.error.is_some()).count()
+        self.fields
+            .iter_mut()
+            .map(FormField::check_required)
+            .filter(|invalid| *invalid)
+            .count()
     }
 
     /// Проверяет форму и собирает объект для записи в ядро. Версия, номер и признаки документа
     /// берутся с открытия: по версии ядро найдёт конфликт.
     ///
     /// # Errors
-    /// В форме есть поле с ошибкой разбора или пустое обязательное поле. Эти поля помечены.
+    /// В форме есть поле с ошибкой разбора, пустое обязательное поле или строка табличной части
+    /// без обязательного значения. Они помечены.
     pub fn to_data(&mut self) -> Result<ObjectData, InvalidForm> {
-        let invalid = self.check();
-        if invalid > 0 {
-            return Err(InvalidForm { fields: invalid });
+        let fields = self.check();
+        let rows = self.parts.check();
+        if fields > 0 || rows > 0 {
+            return Err(InvalidForm { fields, rows });
         }
         Ok(ObjectData {
             id: self.id,
@@ -416,7 +510,7 @@ impl FormState {
                 .iter()
                 .map(|field| (field.name.clone(), field.value_for_core()))
                 .collect(),
-            tables: self.tables.clone(),
+            tables: self.parts.to_core(),
         })
     }
 
@@ -436,12 +530,13 @@ impl FormState {
             field.original = field.value.clone();
             field.error = None;
         }
+        self.parts.mark_saved();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ostov_api::Meta;
+    use ostov_api::{Fields, Meta};
 
     use super::*;
 
@@ -697,7 +792,7 @@ mod tests {
         let mut form = FormState::new_object(&object_meta("receipt"));
         let invalid = form.to_data().unwrap_err();
         // Дата, поставщик и склад обязательные, сумма вычисляемая.
-        assert_eq!(invalid, InvalidForm { fields: 3 });
+        assert_eq!(invalid, InvalidForm { fields: 3, rows: 0 });
         assert_eq!(field(&form, "date").error(), Some("Укажите дату."));
         assert_eq!(field(&form, "supplier").error(), Some("Выберите значение."));
         assert_eq!(field(&form, "amount").error(), None);
@@ -722,7 +817,7 @@ mod tests {
     fn saving_is_refused_while_a_field_has_a_parse_error() {
         let mut form = loaded_receipt();
         edit(&mut form, "date", "31.02");
-        assert_eq!(form.to_data(), Err(InvalidForm { fields: 1 }));
+        assert_eq!(form.to_data(), Err(InvalidForm { fields: 1, rows: 0 }));
         // Ошибка разбора не заменяется сообщением об обязательности.
         assert_eq!(
             field(&form, "date").error(),
@@ -747,8 +842,14 @@ mod tests {
                 scale: 2
             }
         );
-        // Строки табличной части уходят назад как пришли.
-        assert_eq!(data.tables, receipt_data().tables);
+        // Строки табличной части уходят назад как пришли, ссылки одним `id`.
+        let mut expected = receipt_data().tables;
+        for line in expected.values_mut().flatten() {
+            for value in line.values_mut() {
+                *value = core_value(value);
+            }
+        }
+        assert_eq!(data.tables, expected);
         assert_eq!(data.fields.len(), 4);
     }
 
@@ -979,12 +1080,126 @@ mod tests {
     }
 
     #[test]
-    fn table_parts_are_listed_for_the_hint() {
-        assert_eq!(loaded_receipt().table_part_titles(), ["Товары"]);
-        assert!(
-            FormState::new_object(&goods_meta())
-                .table_part_titles()
-                .is_empty()
+    fn table_parts_follow_meta() {
+        let receipt = loaded_receipt();
+        let titles: Vec<&str> = receipt.parts().iter().map(|p| p.title.as_str()).collect();
+        assert_eq!(titles, ["Товары"]);
+        assert_eq!(receipt.parts().iter().next().map(|p| p.len()), Some(1));
+        assert!(FormState::new_object(&goods_meta()).parts().is_empty());
+    }
+
+    #[test]
+    fn invalid_form_names_fields_and_rows() {
+        let only_fields = InvalidForm { fields: 2, rows: 0 };
+        assert_eq!(
+            only_fields.to_string(),
+            "Не записано: исправьте отмеченные поля (2)."
         );
+        let only_rows = InvalidForm { fields: 0, rows: 1 };
+        assert_eq!(
+            only_rows.to_string(),
+            "Не записано: заполните отмеченные строки (1)."
+        );
+        assert!(
+            InvalidForm { fields: 1, rows: 3 }
+                .to_string()
+                .contains("поля (1) и строки (3)")
+        );
+    }
+
+    fn issue_meta() -> ObjectMeta {
+        let mut meta = object_meta("issue");
+        meta.rights = Rights::ALL;
+        meta
+    }
+
+    #[test]
+    fn issue_is_filled_with_a_line_and_goes_to_the_core() {
+        let mut form = FormState::new_object(&issue_meta());
+        edit(&mut form, "date", "12.03.2026");
+        let warehouse = index(&form, "warehouse");
+        assert!(form.can_pick(warehouse));
+        form.set_reference(warehouse, Some((2, "Склад №2".to_owned())));
+        assert!(form.add_row(0));
+        form.set_cell_reference(0, Some((5, "Мука".to_owned())));
+        form.edit_cell(1, "2,5");
+        assert!(form.commit_row().is_ok());
+        assert!(form.is_modified());
+        let data = form.to_data().unwrap();
+        assert_eq!(data.fields["warehouse"], Value::Ref { id: 2, title: None });
+        let lines = &data.tables["lines"];
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["goods"], Value::Ref { id: 5, title: None });
+        assert_eq!(
+            lines[0]["qty"],
+            Value::Decimal {
+                units: 2500,
+                scale: 3
+            }
+        );
+    }
+
+    #[test]
+    fn empty_line_stops_saving_with_an_error_at_the_row() {
+        let mut data = ObjectData::default();
+        data.fields
+            .insert("date".to_owned(), Value::Date("2026-03-12".to_owned()));
+        data.fields
+            .insert("warehouse".to_owned(), reference(1, "Основной"));
+        data.tables.insert(
+            "lines".to_owned(),
+            vec![[("goods".to_owned(), reference(5, "Мука"))].into()],
+        );
+        let mut form = FormState::from_data(&issue_meta(), &data);
+        let invalid = form.to_data().unwrap_err();
+        assert_eq!(invalid, InvalidForm { fields: 0, rows: 1 });
+        let part = form.parts().iter().next().unwrap();
+        assert_eq!(part.row_error(0), Some("Заполните: Количество."));
+    }
+
+    #[test]
+    fn rows_are_not_touched_without_the_right_to_write() {
+        let mut meta = object_meta("issue");
+        meta.rights = Rights {
+            read: true,
+            ..Rights::default()
+        };
+        let mut data = ObjectData {
+            id: Some(3),
+            ..ObjectData::default()
+        };
+        data.tables.insert(
+            "lines".to_owned(),
+            vec![[("goods".to_owned(), reference(5, "Мука"))].into()],
+        );
+        let mut form = FormState::from_data(&meta, &data);
+        assert!(!form.add_row(0));
+        assert!(!form.remove_row(0, 0));
+        assert!(!form.can_pick(index(&form, "warehouse")));
+        // Строку можно открыть посмотреть, но не править.
+        assert!(form.open_row(0, 0));
+        form.edit_cell(1, "3");
+        form.set_cell_reference(0, None);
+        assert!(form.commit_row().is_ok());
+        assert!(!form.is_modified());
+    }
+
+    #[test]
+    fn saved_response_makes_rows_clean() {
+        let mut form = FormState::new_object(&issue_meta());
+        assert!(form.add_row(0));
+        form.set_cell_reference(0, Some((5, "Мука".to_owned())));
+        form.edit_cell(1, "1");
+        form.commit_row().unwrap();
+        assert!(form.is_modified());
+        form.apply_saved(
+            &Saved {
+                id: 4,
+                version: 1,
+                number: Some(2),
+            },
+            PostAction::Write,
+        );
+        assert!(!form.is_modified());
     }
 }

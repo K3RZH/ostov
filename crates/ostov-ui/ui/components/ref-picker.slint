@@ -1,0 +1,213 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "button.slint";
+import { Dialog } from "dialog.slint";
+import { Icon } from "icon.slint";
+import { TextField } from "text-field.slint";
+import { AlertBanner } from "alert-banner.slint";
+import { ListView } from "std-widgets.slint";
+
+// Вариант выбора: название элемента; current: он сейчас стоит в поле.
+export struct PickItem { title: string, current: bool }
+
+// Окно выбора значения ссылки поверх формы: поиск по названию, список первой порции
+// вариантов, «Очистить» и «+ Добавить». Клавиатура: набор идёт в поиск, стрелки двигают
+// выделение, Enter выбирает выделенное, Esc закрывает без выбора. Варианты ищет владелец
+// (src/form_ui/picker.rs) по `query-edited`; здесь только показ и события.
+export component RefPicker inherits Dialog {
+    in property <string> title;
+    in property <[PickItem]> items;
+    // Подпись под списком: «Загрузка…», «Ничего не найдено», «Показаны первые 50 из 120…».
+    in property <string> note;
+    in property <string> error;
+    in property <string> error-action;
+    in property <bool> can-add;
+    in property <bool> can-clear;
+    in-out property <string> query;
+    // Выделенный вариант (-1: нет).
+    in-out property <int> current: -1;
+    callback query-edited(string);
+    callback chosen(int);
+    callback cleared();
+    callback add();
+    callback cancelled();
+    callback retry();
+
+    private property <length> row-height: 32px;
+    // Восемь строк на виду: больше не нужно, порция всё равно ограничена.
+    private property <length> list-height: 8 * root.row-height + 2 * Theme.space-4;
+
+    // Фокус сразу у поля поиска: набор идёт в поиск без щелчка.
+    grab-focus: false;
+    enter-enabled: root.current >= 0 && root.current < root.items.length;
+    enter-pressed => { root.chosen(root.current); }
+    escape-pressed => { root.cancelled(); }
+    scrim-clicked => { root.cancelled(); }
+
+    // Выделение не уходит за видимую часть списка.
+    function reveal() {
+        if (root.current < 0) {
+            return;
+        }
+        if (root.current * root.row-height < -list.content-y) {
+            list.content-y = -root.current * root.row-height;
+        } else if ((root.current + 1) * root.row-height > -list.content-y + list.visible-height) {
+            list.content-y = -((root.current + 1) * root.row-height - list.visible-height);
+        }
+    }
+
+    function move(step: int) {
+        if (root.items.length == 0) {
+            return;
+        }
+        root.current = max(0, min(root.items.length - 1, root.current + step));
+    }
+
+    // Стрелки забираются раньше поля поиска: в однострочном поле им всё равно нечего делать.
+    capture-key-pressed(event) => {
+        if (event.text == Key.DownArrow) {
+            root.move(1);
+            return accept;
+        }
+        if (event.text == Key.UpArrow) {
+            root.move(-1);
+            return accept;
+        }
+        if (event.text == Key.PageDown) {
+            root.move(8);
+            return accept;
+        }
+        if (event.text == Key.PageUp) {
+            root.move(-8);
+            return accept;
+        }
+        reject
+    }
+
+    // Выделение двигают стрелки или ставит владелец по ответу ядра (вариант, который в поле).
+    changed current => { root.reveal(); }
+
+    card := Rectangle {
+        width: min(520px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-12;
+
+            Text {
+                text: root.title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                overflow: elide;
+            }
+            search := TextField {
+                placeholder: "Поиск по названию";
+                text <=> root.query;
+                init => { self.take-focus(); }
+                edited(text) => {
+                    list.content-y = 0;
+                    root.query-edited(text);
+                }
+                accepted => { root.submit(); }
+            }
+            if root.error != "" : AlertBanner {
+                text: root.error;
+                action-text: root.error-action;
+                action => { root.retry(); }
+            }
+            Rectangle {
+                height: root.list-height;
+                border-radius: Shape.control-radius;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                list := ListView {
+                    x: Theme.space-4;
+                    y: Theme.space-4;
+                    width: parent.width - 2 * Theme.space-4;
+                    height: parent.height - 2 * Theme.space-4;
+                    for item[index] in root.items : Rectangle {
+                        height: root.row-height;
+                        border-radius: Shape.control-radius;
+                        background: index == root.current ? Theme.accent-soft
+                            : option-touch.has-hover ? Theme.surface-alt
+                            : transparent;
+                        HorizontalLayout {
+                            padding-left: Theme.space-12;
+                            padding-right: Theme.space-12;
+                            spacing: Theme.space-8;
+                            Text {
+                                text: item.title;
+                                font-size: Theme.font-body;
+                                font-weight: item.current ? 600 : 400;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            if item.current : VerticalLayout {
+                                alignment: center;
+                                Icon { name: "check"; tint: Theme.accent-text; width: 16px; height: 16px; }
+                            }
+                        }
+                        option-touch := TouchArea {
+                            mouse-cursor: MouseCursor.pointer;
+                            clicked => {
+                                root.current = index;
+                                root.chosen(index);
+                            }
+                        }
+                    }
+                }
+                if root.items.length == 0 : Text {
+                    x: Theme.space-12;
+                    width: parent.width - 2 * Theme.space-12;
+                    height: parent.height;
+                    text: root.note;
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+            if root.items.length > 0 && root.note != "" : Text {
+                text: root.note;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                if root.can-add : Button {
+                    text: "+ Добавить";
+                    kind: ButtonKind.text;
+                    clicked => { root.add(); }
+                }
+                if root.can-clear : Button {
+                    text: "Очистить";
+                    kind: ButtonKind.text;
+                    clicked => { root.cleared(); }
+                }
+                Rectangle { }
+                Button {
+                    text: "Отмена";
+                    clicked => { root.cancelled(); }
+                }
+                Button {
+                    text: "Выбрать";
+                    kind: ButtonKind.primary;
+                    enabled: root.enter-enabled;
+                    clicked => { root.chosen(root.current); }
+                }
+            }
+        }
+    }
+}

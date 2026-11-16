@@ -1,0 +1,113 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "icon.slint";
+import { IconButton } from "icon-button.slint";
+
+// Поле-ссылка: значение выбирают из справочника, текстом его не набрать. Щелчок, Enter, пробел,
+// стрелка вниз или F4 просят окно выбора (`pick`); крестик, Delete и Backspace очищают поле.
+// Вид как у TextField: подпись над полем, рамка фокуса 2 px, ошибка красной рамкой.
+export component RefField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> text;
+    in property <string> placeholder: "Выберите…";
+    in property <string> error;
+    in property <bool> read-only;
+    in property <bool> enabled: true;
+    callback pick();
+    callback cleared();
+
+    private property <bool> active: root.enabled && !root.read-only;
+    private property <bool> has-error: root.error != "";
+    private property <bool> focused: scope.has-focus && root.active;
+    private property <bool> hovered: touch.has-hover && root.active;
+
+    spacing: Theme.space-4;
+
+    public function take-focus() {
+        scope.focus();
+    }
+
+    if root.label != "" : Text {
+        text: root.label;
+        font-size: Theme.font-caption;
+        font-weight: 600;
+        color: root.enabled ? Theme.text : Theme.disabled-text;
+    }
+
+    Rectangle {
+        height: Theme.control-md;
+        border-radius: Shape.control-radius;
+        border-width: root.focused || root.has-error || root.hovered ? 2px : 1px;
+        border-color: !root.enabled ? transparent
+            : root.has-error ? Theme.danger
+            : root.focused || root.hovered ? Theme.focus
+            : root.read-only ? Theme.border
+            : Theme.border-strong;
+        background: !root.enabled ? Theme.disabled-bg
+            : root.read-only ? Theme.surface-alt
+            : Theme.surface;
+
+        scope := FocusScope {
+            enabled: root.active;
+            key-pressed(event) => {
+                if (event.text == Key.Return || event.text == " " || event.text == Key.DownArrow || event.text == Key.F4) {
+                    root.pick();
+                    return accept;
+                }
+                if ((event.text == Key.Delete || event.text == Key.Backspace) && root.text != "") {
+                    root.cleared();
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        touch := TouchArea {
+            enabled: root.active;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => {
+                scope.focus();
+                root.pick();
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: Theme.space-12;
+            padding-right: Theme.space-8;
+            spacing: Theme.space-4;
+
+            if root.has-error : VerticalLayout {
+                alignment: center;
+                padding-right: Theme.space-4;
+                Image {
+                    source: @image-url("../../assets/icons/error.svg");
+                    colorize: Theme.danger;
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+            Text {
+                text: root.text != "" ? root.text : root.active ? root.placeholder : "";
+                font-size: Theme.font-body;
+                color: !root.enabled ? Theme.disabled-text : root.text != "" ? Theme.text : Theme.text-muted;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            if root.active && root.text != "" : VerticalLayout {
+                alignment: center;
+                IconButton {
+                    icon: "close";
+                    control-size: 24px;
+                    clicked => {
+                        scope.focus();
+                        root.cleared();
+                    }
+                }
+            }
+            if root.active : VerticalLayout {
+                alignment: center;
+                Icon { name: "chevron-down"; tint: Theme.text-muted; width: 16px; height: 16px; }
+            }
+        }
+    }
+}

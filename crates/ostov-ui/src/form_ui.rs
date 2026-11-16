@@ -5,7 +5,10 @@
 //! Правки идут в `FormState` текстом, в модель полей не пишутся на каждую букву (курсор).
 //!
 //! Входы для списка: `FormUi::open_form` (открыть записанный объект) и `FormUi::open_new`
-//! (новый). Табличные части форма пока не показывает.
+//! (новый). Выбор ссылки из справочника — в `picker`, табличные части и окно строки — в `parts`.
+
+mod parts;
+mod picker;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -21,11 +24,14 @@ use crate::engine::{
     call_in_background,
 };
 use crate::form_state::{FormField, FormState, Status};
+use crate::form_table::{RowDraft, TablePart};
+use crate::ref_choice;
 use crate::shell::{DocKey, FORM_VIEW, Shell};
 use crate::values::date_text;
 use crate::windows::Windows;
 use crate::workspace::{DocTabs, WindowRef};
-use crate::{AppWindow, EditorKind, FormData, FormFieldItem};
+use crate::{AppWindow, EditorKind, FormData, FormFieldItem, LineColumn, LineRow, TablePartItem};
+use picker::{Adding, PickTarget, Picker};
 
 /// Подпись кнопки в полосе ошибки: взять объект из ядра заново.
 const RELOAD: &str = "Перечитать";
@@ -136,6 +142,10 @@ struct Form {
     request: u64,
     /// Название формы: у объекта в ядре его представление, пока оно не прочитано, имя типа.
     title: String,
+    /// Открытое окно выбора ссылки.
+    picker: Option<Picker>,
+    /// Куда вернуть фокус при следующем показе: в поле, куда подставили элемент из другой вкладки.
+    refocus: Option<PickTarget>,
 }
 
 impl Form {
@@ -146,6 +156,8 @@ impl Form {
             busy: false,
             request,
             title: title.to_owned(),
+            picker: None,
+            refocus: None,
         }
     }
 
@@ -156,6 +168,8 @@ impl Form {
             notice: None,
             busy: false,
             request: 0,
+            picker: None,
+            refocus: None,
         }
     }
 
@@ -182,6 +196,8 @@ struct Base {
     /// открытии формы (`FormUi::sweep`); открытие же всегда читает объект заново, если вкладки
     /// у него нет, поэтому лишняя запись правок не воскресит.
     forms: HashMap<DocKey, Form>,
+    /// Формы новых элементов, открытые из выбора ссылки, по их ключу: куда подставить элемент.
+    adding: HashMap<DocKey, Adding>,
 }
 
 impl Base {
@@ -240,6 +256,7 @@ impl FormUi {
             engine: Some(engine),
             objects: objects.to_vec(),
             forms: HashMap::new(),
+            adding: HashMap::new(),
         };
     }
 
@@ -283,6 +300,11 @@ impl FormUi {
     /// # Errors
     /// База не открыта, объекта нет в метаданных или в меню, создавать его нельзя.
     pub fn open_new(&self, object: &str) -> Result<(), OpenError> {
+        self.open_new_key(object).map(|_| ())
+    }
+
+    /// Как `open_new`, но отдаёт временный ключ новой формы.
+    fn open_new_key(&self, object: &str) -> Result<DocKey, OpenError> {
         self.sweep();
         let key = DocKey::new(object, self.next_temporary());
         let title = {
@@ -301,7 +323,7 @@ impl FormUi {
             self.base.borrow_mut().forms.remove(&key);
             return Err(error);
         }
-        Ok(())
+        Ok(key)
     }
 
     /// Подключает данные и события формы к окну `window` (главному или дополнительному).
@@ -387,6 +409,8 @@ impl FormUi {
             let ui = self.clone();
             move || *ui.closing.borrow_mut() = None
         });
+        self.attach_picker(window);
+        self.attach_parts(window);
     }
 
     fn next_request(&self) -> u64 {
@@ -403,10 +427,10 @@ impl FormUi {
     /// Забывает формы, чьих вкладок уже нет ни в одном окне.
     fn sweep(&self) {
         if let Some(open) = self.windows.open_documents() {
-            self.base
-                .borrow_mut()
-                .forms
-                .retain(|key, _| open.contains(key));
+            let mut base = self.base.borrow_mut();
+            let Base { forms, adding, .. } = &mut *base;
+            forms.retain(|key, _| open.contains(key));
+            adding.retain(|key, _| forms.contains_key(key));
         }
     }
 
@@ -432,7 +456,35 @@ impl FormUi {
         let Some(form) = base.forms.get(key) else {
             return;
         };
-        self.each_showing(key, |window| render(window, key, form, draw));
+        self.each_showing(key, |window| render(window, key, form, &base.objects, draw));
+    }
+
+    /// Меняет состояние формы, показанной в окне `window`, и перерисовывает её так, как скажет
+    /// `change` (`None`: ничего не поменялось). Пока идёт запись, форма закрыта для правок.
+    fn change(&self, window: &AppWindow, change: impl FnOnce(&mut FormState) -> Option<Draw>) {
+        let Some(key) = shown_key(window) else {
+            return;
+        };
+        let (was, now, draw) = {
+            let mut base = self.base.borrow_mut();
+            let Some(state) = base
+                .forms
+                .get_mut(&key)
+                .filter(|form| !form.busy)
+                .and_then(Form::state_mut)
+            else {
+                return;
+            };
+            let was = state.is_modified();
+            let draw = change(state);
+            (was, state.is_modified(), draw)
+        };
+        if let Some(draw) = draw {
+            self.show_everywhere(&key, draw);
+        }
+        if was != now {
+            self.mark_tab(&key, now);
+        }
     }
 
     /// Вкладки окна, в котором открыт документ `key`.
@@ -498,9 +550,16 @@ impl FormUi {
 
     /// Окно показывает форму: из состояния, которое лежит у `FormUi`.
     fn show(&self, window: &AppWindow, key: &DocKey) {
+        let refocus = self
+            .base
+            .borrow_mut()
+            .forms
+            .get_mut(key)
+            .and_then(|form| form.refocus.take());
+        let draw = refocus.map_or(Draw::Rebuild { focus: true }, picker::focus_on);
         let base = self.base.borrow();
         match base.forms.get(key) {
-            Some(form) => render(window, key, form, Draw::Rebuild { focus: true }),
+            Some(form) => render(window, key, form, &base.objects, draw),
             None => show_nothing(
                 window,
                 "Форма не открыта. Закройте вкладку и откройте объект заново.",
@@ -581,7 +640,7 @@ impl FormUi {
             if let Some(state) = base.forms.get(&key).and_then(Form::state) {
                 let data = window.global::<FormData>();
                 show_flags(&data, Some(state));
-                update_row(&data, state, index);
+                update_row(&data, state, index, &base.objects);
             }
         }
         if was != now {
@@ -676,7 +735,12 @@ impl FormUi {
             .map(|outcome| (outcome.fresh.as_ref().ok().cloned(), key.is_temporary()));
         let (new_key, title) = {
             let mut base = self.base.borrow_mut();
-            let Base { objects, forms, .. } = &mut *base;
+            let Base {
+                objects,
+                forms,
+                adding,
+                ..
+            } = &mut *base;
             if forms.get(key).is_none_or(|form| form.request != request) {
                 return;
             }
@@ -697,6 +761,14 @@ impl FormUi {
             };
             let title = form.title.clone();
             forms.insert(new_key.clone(), form);
+            if new_key != *key {
+                // Форма, из которой открыт выбор с «+ Добавить», тоже могла получить свой `id`.
+                for adding in adding.values_mut() {
+                    if adding.origin == *key {
+                        adding.origin = new_key.clone();
+                    }
+                }
+            }
             (new_key, title)
         };
         if new_key != *key {
@@ -732,6 +804,9 @@ impl FormUi {
             if let Some(listener) = listener {
                 listener(&key.object, fresh.as_ref(), created);
             }
+        }
+        if saved_ok && new_key != *key {
+            self.deliver_added(key, &new_key);
         }
     }
 
@@ -813,20 +888,24 @@ impl FormUi {
     /// «Закрыть»: форма забывается, вкладка закрывается. Спрашивать о несохранённом успела
     /// сама форма.
     fn close(&self, window: &AppWindow) {
-        let Some(key) = shown_key(window) else {
-            return;
-        };
+        if let Some(key) = shown_key(window) {
+            self.close_key(&key);
+        }
+    }
+
+    /// Закрывает форму `key` и её вкладку, где бы она ни стояла.
+    fn close_key(&self, key: &DocKey) {
         if self
             .base
             .borrow()
             .forms
-            .get(&key)
+            .get(key)
             .is_some_and(|form| form.busy)
         {
             return;
         }
-        let place = self.windows.window_of_doc(&key);
-        self.base.borrow_mut().forms.remove(&key);
+        let place = self.windows.window_of_doc(key);
+        self.base.borrow_mut().forms.remove(key);
         *self.closing.borrow_mut() = None;
         match place {
             Some(WindowRef::Main) => {
@@ -834,12 +913,18 @@ impl FormUi {
                     return;
                 };
                 let mut shell = self.shell.borrow_mut();
-                if let Some(index) = shell.doc_tab(&key) {
+                if let Some(index) = shell.doc_tab(key) {
                     shell.close_tab(index);
                 }
                 crate::app::refresh(&main, &shell);
             }
             Some(WindowRef::Extra(id)) => {
+                // Закрывается активная вкладка окна: сначала выбираем вкладку этой формы.
+                self.windows.with_list(id, |list| {
+                    if let Some(index) = list.tab_of_doc(key) {
+                        list.select(index);
+                    }
+                });
                 if let Some(main) = self.main.upgrade() {
                     self.windows.close_active_tab(&main, &self.shell, id);
                 }
@@ -927,16 +1012,24 @@ fn date_args(index: i32, day: i32, month: i32, year: i32) -> Option<(usize, (u16
 /// Как перерисовать форму в окне.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Draw {
-    /// Поля строятся заново и берут значения из состояния; `focus`: первое поле для ввода
-    /// берёт фокус. Так форма открывается, читается из ядра и показывает записанное.
+    /// Поля шапки и окна строки строятся заново и берут значения из состояния; `focus`: первое
+    /// поле для ввода берёт фокус. Так форма открывается, читается из ядра и показывает
+    /// записанное.
     Rebuild { focus: bool },
     /// Подписи, кнопки, ошибки и значения полей меняются на месте: редакторы остаются, фокус
     /// и положение курсора тоже. Так форма закрывается на время записи и показывает отказ ядра.
     Refresh,
+    /// Поля шапки строятся заново, фокус берёт поле с этим номером: так форма возвращается из
+    /// выбора ссылки.
+    FocusField(usize),
+    /// Окно строки строится заново, фокус у ячейки с этим номером (`None`: первая для ввода):
+    /// так окно строки открывается и возвращается из выбора ссылки.
+    FocusCell(Option<usize>),
 }
 
-/// Показывает форму в окне: заголовок, кнопки, ошибку и поля.
-fn render(window: &AppWindow, key: &DocKey, form: &Form, draw: Draw) {
+/// Показывает форму в окне: заголовок, кнопки, ошибку, поля, табличные части, окно строки и
+/// выбор ссылки.
+fn render(window: &AppWindow, key: &DocKey, form: &Form, objects: &[ObjectMeta], draw: Draw) {
     let data = window.global::<FormData>();
     data.set_object(key.object.as_str().into());
     data.set_doc_id(key.id.to_string().into());
@@ -944,34 +1037,41 @@ fn render(window: &AppWindow, key: &DocKey, form: &Form, draw: Draw) {
     data.set_loading(matches!(form.content, Content::Loading));
     data.set_busy(form.busy);
     let state = form.state();
-    match draw {
-        Draw::Rebuild { focus } => {
+    // Пока открыто окно поверх формы, поле шапки фокус не берёт: он нужен окну.
+    let covered = form.picker.is_some() || state.is_some_and(|s| s.parts().draft().is_some());
+    let head_focus = match draw {
+        Draw::Rebuild { focus } => Some(focus.then(|| first_input(state)).flatten()),
+        Draw::FocusField(index) => Some(Some(index)),
+        Draw::Refresh | Draw::FocusCell(_) => None,
+    };
+    match head_focus {
+        Some(focus) => {
             let items: Vec<FormFieldItem> = state.map_or_else(Vec::new, |state| {
                 (0..state.fields().len())
-                    .filter_map(|index| field_item(state, index))
+                    .filter_map(|index| field_item(state, index, objects))
                     .collect()
             });
-            let first =
-                state.and_then(|state| (0..items.len()).find(|index| state.is_editable(*index)));
             // Новая модель пересоздаёт редакторы: набранное в старых не переживёт замену
-            // значений, а первое поле успеет взять фокус.
+            // значений, а нужное поле успеет взять фокус.
             data.set_fields(ModelRc::new(VecModel::from(items)));
             data.set_autofocus_field(
-                first
-                    .filter(|_| focus && !form.busy)
+                focus
+                    .filter(|_| !form.busy && !covered)
                     .and_then(|index| i32::try_from(index).ok())
                     .unwrap_or(-1),
             );
         }
-        Draw::Refresh => {
+        None => {
             if let Some(state) = state {
                 for index in 0..state.fields().len() {
-                    update_row(&data, state, index);
+                    update_row(&data, state, index, objects);
                 }
             }
         }
     }
-    data.set_tables_note(state.map(tables_note).unwrap_or_default().into());
+    show_parts(&data, state);
+    show_row(&data, state, objects, draw, form.picker.is_some());
+    picker::show(&data, form.picker.as_ref());
     data.set_error(form.notice.as_ref().map_or("", |n| n.text.as_str()).into());
     data.set_error_action(
         form.notice
@@ -981,6 +1081,12 @@ fn render(window: &AppWindow, key: &DocKey, form: &Form, draw: Draw) {
             .into(),
     );
     show_flags(&data, state);
+}
+
+/// Первое поле шапки, куда можно ввести или выбрать значение.
+fn first_input(state: Option<&FormState>) -> Option<usize> {
+    let state = state?;
+    (0..state.fields().len()).find(|index| state.is_editable(*index) || state.can_pick(*index))
 }
 
 /// Подписи и кнопки, которые зависят от состояния формы и меняются при правке.
@@ -996,16 +1102,155 @@ fn show_flags(data: &FormData<'_>, state: Option<&FormState>) {
 }
 
 /// Обновляет одно поле на месте: редактор остаётся, набранное в нём не теряется.
-fn update_row(data: &FormData<'_>, state: &FormState, index: usize) {
+fn update_row(data: &FormData<'_>, state: &FormState, index: usize, objects: &[ObjectMeta]) {
     let rows = data.get_fields();
     let Some(model) = rows.as_any().downcast_ref::<VecModel<FormFieldItem>>() else {
         return;
     };
     if index < model.row_count()
-        && let Some(item) = field_item(state, index)
+        && let Some(item) = field_item(state, index, objects)
     {
         model.set_row_data(index, item);
     }
+}
+
+/// Табличные части. Модель с тем же числом частей обновляется на месте: таблицы не
+/// пересоздаются и фокус клавиатуры у таблицы не теряется.
+fn show_parts(data: &FormData<'_>, state: Option<&FormState>) {
+    let items: Vec<TablePartItem> = state.map_or_else(Vec::new, |state| {
+        state
+            .parts()
+            .iter()
+            .map(|part| part_item(part, state.can_write()))
+            .collect()
+    });
+    let current = data.get_parts();
+    match current.as_any().downcast_ref::<VecModel<TablePartItem>>() {
+        Some(model) if model.row_count() == items.len() => {
+            for (index, item) in items.into_iter().enumerate() {
+                model.set_row_data(index, item);
+            }
+        }
+        _ => data.set_parts(ModelRc::new(VecModel::from(items))),
+    }
+}
+
+fn part_item(part: &TablePart, editable: bool) -> TablePartItem {
+    let columns: Vec<LineColumn> = part.columns().iter().map(line_column).collect();
+    let rows: Vec<LineRow> = (0..part.len())
+        .map(|row| {
+            let cells: Vec<slint::SharedString> = (0..part.columns().len())
+                .map(|column| part.cell_text(row, column).into())
+                .collect();
+            LineRow {
+                cells: ModelRc::new(VecModel::from(cells)),
+                error: part.row_error(row).unwrap_or_default().into(),
+            }
+        })
+        .collect();
+    TablePartItem {
+        title: part.title.as_str().into(),
+        columns: ModelRc::new(VecModel::from(columns)),
+        rows: ModelRc::new(VecModel::from(rows)),
+        selected: part
+            .selected()
+            .and_then(|row| i32::try_from(row).ok())
+            .unwrap_or(-1),
+        editable,
+    }
+}
+
+// Ширины колонок табличной части, px: число и дата постоянные, текст и ссылка делят остаток.
+const LINE_TEXT_WIDTH: f32 = 160.0;
+const LINE_NUMBER_WIDTH: f32 = 120.0;
+const LINE_DATE_WIDTH: f32 = 110.0;
+
+fn line_column(def: &ostov_api::FieldDef) -> LineColumn {
+    use ostov_api::FieldKind;
+    let (width, right, flex) = match def.kind {
+        FieldKind::Text | FieldKind::Ref => (LINE_TEXT_WIDTH, false, true),
+        FieldKind::Int | FieldKind::Decimal { .. } => (LINE_NUMBER_WIDTH, true, false),
+        FieldKind::Date => (LINE_DATE_WIDTH, false, false),
+    };
+    LineColumn {
+        title: def.title.as_str().into(),
+        width,
+        right,
+        flex,
+    }
+}
+
+/// Окно строки: открыто, пока в состоянии есть черновик строки.
+fn show_row(
+    data: &FormData<'_>,
+    state: Option<&FormState>,
+    objects: &[ObjectMeta],
+    draw: Draw,
+    covered: bool,
+) {
+    let draft = state.and_then(|state| state.parts().draft().map(|draft| (state, draft)));
+    data.set_row_open(draft.is_some());
+    let Some((state, draft)) = draft else {
+        data.set_row_fields(ModelRc::default());
+        data.set_row_autofocus(-1);
+        return;
+    };
+    data.set_row_title(row_title(state, draft).into());
+    data.set_row_error(draft.error().unwrap_or_default().into());
+    data.set_row_editable(draft.is_editable());
+    let items: Vec<FormFieldItem> = (0..draft.cells().len())
+        .filter_map(|cell| cell_item(draft, cell, objects))
+        .collect();
+    let current = data.get_row_fields();
+    let reusable = current
+        .as_any()
+        .downcast_ref::<VecModel<FormFieldItem>>()
+        .filter(|model| model.row_count() == items.len());
+    let focus = match (draw, reusable) {
+        (Draw::Refresh | Draw::FocusField(_), Some(model)) => {
+            for (index, item) in items.into_iter().enumerate() {
+                model.set_row_data(index, item);
+            }
+            return;
+        }
+        (Draw::FocusCell(cell), _) => cell.or_else(|| first_cell(draft)),
+        (Draw::Rebuild { focus: true }, _) => first_cell(draft),
+        (Draw::Rebuild { focus: false } | Draw::Refresh | Draw::FocusField(_), _) => None,
+    };
+    data.set_row_fields(ModelRc::new(VecModel::from(items)));
+    data.set_row_autofocus(
+        focus
+            .filter(|_| !covered)
+            .and_then(|cell| i32::try_from(cell).ok())
+            .unwrap_or(-1),
+    );
+}
+
+fn first_cell(draft: &RowDraft) -> Option<usize> {
+    (0..draft.cells().len()).find(|cell| draft.accepts_text(*cell) || draft.accepts_choice(*cell))
+}
+
+/// «Товары: новая строка» или «Товары: строка 3».
+fn row_title(state: &FormState, draft: &RowDraft) -> String {
+    let part = state
+        .parts()
+        .get(draft.part())
+        .map_or("", |part| part.title.as_str());
+    match draft.row() {
+        Some(row) => format!("{part}: строка {}", row + 1),
+        None => format!("{part}: новая строка"),
+    }
+}
+
+/// Ячейка окна строки для редактора; `None`, если такой ячейки нет.
+fn cell_item(draft: &RowDraft, cell: usize, objects: &[ObjectMeta]) -> Option<FormFieldItem> {
+    let field = draft.cells().get(cell)?;
+    Some(editor_item(
+        field,
+        draft.accepts_text(cell),
+        draft.accepts_choice(cell),
+        objects,
+    ))
 }
 
 /// Окно без формы: база закрыта или формы нет. Пустое `error`: просто пустой экран.
@@ -1018,7 +1263,11 @@ fn show_nothing(window: &AppWindow, error: &str) {
     data.set_busy(false);
     data.set_fields(ModelRc::default());
     data.set_autofocus_field(-1);
-    data.set_tables_note("".into());
+    data.set_parts(ModelRc::default());
+    data.set_row_open(false);
+    data.set_row_fields(ModelRc::default());
+    data.set_row_autofocus(-1);
+    picker::show(&data, None);
     data.set_error(error.into());
     data.set_error_action("".into());
     data.set_ask_close(false);
@@ -1055,32 +1304,44 @@ fn field_label(field: &FormField) -> String {
     }
 }
 
-/// Поле формы для редактора; `None`, если поля с таким номером нет.
-fn field_item(state: &FormState, index: usize) -> Option<FormFieldItem> {
+/// Поле шапки для редактора; `None`, если поля с таким номером нет.
+fn field_item(state: &FormState, index: usize, objects: &[ObjectMeta]) -> Option<FormFieldItem> {
     let field = state.fields().get(index)?;
+    Some(editor_item(
+        field,
+        state.is_editable(index),
+        state.can_pick(index),
+        objects,
+    ))
+}
+
+/// Поле или ячейка для редактора. `can_type`: правится текстом, `can_pick`: значение выбирают
+/// из справочника. Если выбирать можно, а справочник недоступен, поле закрыто и под ним
+/// сказано почему.
+fn editor_item(
+    field: &FormField,
+    can_type: bool,
+    can_pick: bool,
+    objects: &[ObjectMeta],
+) -> FormFieldItem {
     let kind = editor_kind(field.kind);
     let date = field.date();
     let (year, month, day) = date.unwrap_or_else(calendar_start);
-    Some(FormFieldItem {
+    let refused = can_pick
+        .then(|| ref_choice::target_of(objects, field.target.as_deref(), &field.title).err())
+        .flatten();
+    FormFieldItem {
         label: field_label(field).into(),
         kind,
         text: field.text().into(),
         error: field.error().unwrap_or_default().into(),
-        read_only: !state.is_editable(index),
+        hint: refused.as_deref().unwrap_or_default().into(),
+        read_only: !(can_type || can_pick && refused.is_none()),
         day: i32::from(day),
         month: i32::from(month),
         year: i32::from(year),
         empty_date: kind == EditorKind::Date && date.is_none(),
-    })
-}
-
-/// Одна фраза про табличные части, пока их редактора нет.
-fn tables_note(state: &FormState) -> String {
-    let titles = state.table_part_titles();
-    if titles.is_empty() {
-        return String::new();
     }
-    format!("Табличные части ({}) появятся позже.", titles.join(", "))
 }
 
 /// День, на котором открывается календарь пустого поля даты: сегодня по UTC (часового пояса в
@@ -1201,7 +1462,7 @@ mod tests {
         };
         let state = FormState::new_object(&meta);
         let items: Vec<FormFieldItem> = (0..state.fields().len())
-            .filter_map(|index| field_item(&state, index))
+            .filter_map(|index| field_item(&state, index, &[]))
             .collect();
         let kinds: Vec<EditorKind> = items.iter().map(|item| item.kind).collect();
         assert_eq!(
@@ -1214,9 +1475,12 @@ mod tests {
                 EditorKind::Reference
             ]
         );
-        // Только ссылка закрыта для ввода; у пустой даты календарь открывается на сегодняшнем дне.
+        // Ссылка на объект, которого нет в метаданных, закрыта, и под ней сказано почему; у
+        // пустой даты календарь открывается на сегодняшнем дне.
         let read_only: Vec<bool> = items.iter().map(|item| item.read_only).collect();
         assert_eq!(read_only, [false, false, false, false, true]);
+        assert!(items[4].hint.contains("выбор недоступен"));
+        assert!(items[0].hint.is_empty());
         assert!(items[3].empty_date);
         assert!(items[3].year >= i32::from(YEAR_MIN));
         assert!(!items[0].empty_date);
@@ -1226,7 +1490,7 @@ mod tests {
     fn date_field_item_carries_its_date() {
         let mut state = FormState::new_object(&object_meta("receipt"));
         edit(&mut state, "date", "15.03.2026");
-        let item = field_item(&state, 0).unwrap();
+        let item = field_item(&state, 0, &[]).unwrap();
         assert_eq!((item.day, item.month, item.year), (15, 3, 2026));
         assert!(!item.empty_date);
         assert_eq!(item.text, "15.03.2026");
@@ -1240,17 +1504,91 @@ mod tests {
         assert_eq!(labels, ["Дата *", "Поставщик *", "Склад *", "Сумма"]);
     }
 
+    fn demo_objects() -> Vec<ObjectMeta> {
+        let config = ostov_meta::demo().unwrap_or_else(|errors| unreachable!("{errors:?}"));
+        Meta::new(&config).objects
+    }
+
     #[test]
-    fn tables_note_is_one_phrase_or_nothing() {
-        let receipt = FormState::new_object(&object_meta("receipt"));
+    fn reference_to_a_readable_catalog_is_open_for_choice() {
+        let mut meta = object_meta("issue");
+        meta.rights = Rights::ALL;
+        let state = FormState::new_object(&meta);
+        let warehouse = state
+            .fields()
+            .iter()
+            .position(|field| field.name == "warehouse")
+            .unwrap();
+        let item = field_item(&state, warehouse, &demo_objects()).unwrap();
+        assert_eq!(item.kind, EditorKind::Reference);
+        assert!(!item.read_only);
+        assert!(item.hint.is_empty());
+        // Без права на справочник поле закрыто и объясняет почему.
+        let mut objects = demo_objects();
+        objects.retain(|object| object.name != "warehouses");
+        let item = field_item(&state, warehouse, &objects).unwrap();
+        assert!(item.read_only);
         assert_eq!(
-            tables_note(&receipt),
-            "Табличные части (Товары) появятся позже."
+            item.hint,
+            "Нет доступа к данным для поля «Склад»: выбор недоступен."
         );
+    }
+
+    #[test]
+    fn table_part_item_has_columns_rows_and_errors() {
+        let mut meta = object_meta("issue");
+        meta.rights = Rights::ALL;
+        let mut data = ObjectData::default();
+        data.tables.insert(
+            "lines".to_owned(),
+            vec![
+                [(
+                    "goods".to_owned(),
+                    Value::Ref {
+                        id: 5,
+                        title: Some("Мука".to_owned()),
+                    },
+                )]
+                .into(),
+            ],
+        );
+        let mut state = FormState::from_data(&meta, &data);
+        assert!(state.to_data().is_err());
+        let part = state.parts().get(0).unwrap();
+        let item = part_item(part, true);
+        assert_eq!(item.title, "Товары");
+        let columns: Vec<(String, bool, bool)> = item
+            .columns
+            .iter()
+            .map(|column| (column.title.to_string(), column.right, column.flex))
+            .collect();
         assert_eq!(
-            tables_note(&FormState::new_object(&object_meta("goods"))),
-            ""
+            columns,
+            [
+                ("Товар".to_owned(), false, true),
+                ("Количество".to_owned(), true, false)
+            ]
         );
+        let row = item.rows.row_data(0).unwrap();
+        let cells: Vec<String> = row.cells.iter().map(|cell| cell.to_string()).collect();
+        assert_eq!(cells, ["Мука", ""]);
+        assert_eq!(row.error, "Заполните: Количество.");
+        assert_eq!(item.selected, -1);
+        assert!(item.editable);
+    }
+
+    #[test]
+    fn row_window_title_names_the_part_and_the_row() {
+        let mut meta = object_meta("issue");
+        meta.rights = Rights::ALL;
+        let mut state = FormState::new_object(&meta);
+        state.add_row(0);
+        let draft = state.parts().draft().unwrap();
+        assert_eq!(row_title(&state, draft), "Товары: новая строка");
+        assert_eq!(first_cell(draft), Some(0));
+        let item = cell_item(draft, 0, &demo_objects()).unwrap();
+        assert_eq!(item.kind, EditorKind::Reference);
+        assert!(!item.read_only);
     }
 
     #[test]
@@ -1375,7 +1713,14 @@ mod tests {
         let state = form.state_mut().unwrap();
         edit(state, "date", "11.02.2026");
         let data = state.to_data().unwrap();
-        assert_eq!(data.tables, loaded.tables);
+        // Строки уходят как пришли, ссылки одним `id`.
+        assert_eq!(data.tables["lines"].len(), loaded.tables["lines"].len());
+        assert!(
+            data.tables["lines"]
+                .iter()
+                .flat_map(|line| line.values())
+                .all(|value| !matches!(value, Value::Ref { title: Some(_), .. }))
+        );
 
         let outcome = save_and_read(&*engine, "receipt", &data, PostAction::Post).unwrap();
         apply_outcome(

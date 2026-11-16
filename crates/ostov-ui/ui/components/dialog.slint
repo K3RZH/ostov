@@ -4,6 +4,9 @@ import { Theme } from "../theme.slint";
 // основное действие, Esc отмену. Фокус берёт при появлении: иначе клавиши уходили бы
 // элементу под затемнением. Кнопка в фокусе обрабатывает Enter сама, поле ввода зовёт `submit`.
 export component Dialog inherits FocusScope {
+    // Взять фокус при появлении. Окно, в котором фокус сразу берёт своё поле, ставит false:
+    // иначе окно забрало бы фокус у поля (init окна идёт после init полей внутри).
+    in property <bool> grab-focus: true;
     // Доступно ли основное действие (условие то же, что у основной кнопки).
     in property <bool> enter-enabled: true;
     callback enter-pressed();
@@ -16,7 +19,11 @@ export component Dialog inherits FocusScope {
         }
     }
 
-    init => { self.focus(); }
+    init => {
+        if (root.grab-focus) {
+            self.focus();
+        }
+    }
     key-pressed(event) => {
         if (event.text == Key.Escape) {
             root.escape-pressed();

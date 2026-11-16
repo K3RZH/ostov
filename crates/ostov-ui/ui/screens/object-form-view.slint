@@ -3,7 +3,10 @@ import { Button, ButtonKind } from "../components/button.slint";
 import { Chip, ChipKind } from "../components/chip.slint";
 import { AlertBanner } from "../components/alert-banner.slint";
 import { ConfirmDialog } from "../components/confirm-dialog.slint";
+import { Dialog } from "../components/dialog.slint";
 import { FieldEditor, FormFieldItem } from "../components/field-editor.slint";
+import { LinesTable, TablePartItem } from "../components/lines-table.slint";
+import { RefPicker, PickItem } from "../components/ref-picker.slint";
 
 // Данные и события формы объекта. Состояние ведёт Rust (src/form_ui.rs), здесь только свойства
 // и колбэки. Глобальный объект, а не свойства окна: экран стоит в любом окне с вкладками. В окне
@@ -18,8 +21,8 @@ export global FormData {
     in property <string> status;
     in property <int> status-kind;
     in property <[FormFieldItem]> fields;
-    // Табличные части появятся позже: если они у объекта есть, под шапкой одна фраза про это.
-    in property <string> tables-note;
+    // Табличные части документа: колонки по метаданным, строки и выбранная строка.
+    in property <[TablePartItem]> parts;
     // Ошибка ядра или загрузки над формой; у неё может быть кнопка («Перечитать», «Повторить»):
     // что она делает, решает Rust по своей ошибке (notice-action).
     in property <string> error;
@@ -39,6 +42,24 @@ export global FormData {
     // Спрашивает, закрывать ли без записи: кнопка «Закрыть» или крестик вкладки при правках.
     // Вопрос относится к одной форме: Rust гасит его, когда окно показывает другую.
     in-out property <bool> ask-close;
+    // Окно строки табличной части: поля строки (как поля шапки), ошибка «Готово».
+    in property <bool> row-open;
+    in property <string> row-title;
+    in property <[FormFieldItem]> row-fields;
+    in property <string> row-error;
+    in property <bool> row-editable;
+    in-out property <int> row-autofocus: -1;
+    // Окно выбора ссылки для поля шапки или ячейки окна строки.
+    in property <bool> picker-open;
+    in property <string> picker-title;
+    in property <[PickItem]> picker-items;
+    in property <string> picker-note;
+    in property <string> picker-error;
+    in property <string> picker-error-action;
+    in property <bool> picker-can-add;
+    in property <bool> picker-can-clear;
+    in-out property <string> picker-query;
+    in-out property <int> picker-current: -1;
     // Экран открылся или вкладка сменила документ: имя объекта и id.
     callback show(string, string);
     callback ask-cancelled();
@@ -52,6 +73,28 @@ export global FormData {
     // Кнопка в полосе ошибки: перечитать или повторить то же действие.
     callback notice-action();
     callback close();
+    // Поле-ссылка шапки: открыть выбор, очистить значение.
+    callback pick(int);
+    callback clear-reference(int);
+    // Табличные части: (часть) и (часть, строка).
+    callback row-add(int);
+    callback row-select(int, int);
+    callback open-row(int, int);
+    callback row-remove(int, int);
+    // Окно строки: правки ячеек, выбор ссылки в ячейке, «Готово» и «Отмена».
+    callback row-edited(int, string);
+    callback row-date-edited(int, int, int, int);
+    callback row-pick(int);
+    callback row-clear(int);
+    callback row-done();
+    callback row-cancel();
+    // Окно выбора: поиск, выбор варианта, «Очистить», «+ Добавить», закрытие, повтор поиска.
+    callback picker-query-changed(string);
+    callback picker-choose(int);
+    callback picker-clear();
+    callback picker-add();
+    callback picker-close();
+    callback picker-retry();
 }
 
 // Место поля в колонке. Чужое поле занимает слот нулевой высоты: промежуток между полями входит
@@ -71,6 +114,8 @@ component FieldSlot inherits VerticalLayout {
         focused => { FormData.autofocus-field = -1; }
         edited(text) => { FormData.edited(root.index, text); }
         date-edited(day, month, year) => { FormData.date-edited(root.index, day, month, year); }
+        pick-requested => { FormData.pick(root.index); }
+        cleared => { FormData.clear-reference(root.index); }
     }
 }
 
@@ -91,7 +136,7 @@ component FormColumn inherits VerticalLayout {
     }
 }
 
-// Тело формы: карточка с полями в колонках и фраза про табличные части.
+// Тело формы: карточка с полями в колонках, под ней табличные части.
 component FormBody inherits VerticalLayout {
     in property <int> columns;
     in property <length> slot-width;
@@ -122,11 +167,78 @@ component FormBody inherits VerticalLayout {
         }
     }
 
-    if FormData.tables-note != "" : Text {
-        text: FormData.tables-note;
-        font-size: Theme.font-body;
-        color: Theme.text-muted;
-        wrap: word-wrap;
+    for part[index] in FormData.parts : LinesTable {
+        part: part;
+        enabled: !FormData.busy;
+        added => { FormData.row-add(index); }
+        selected(row) => { FormData.row-select(index, row); }
+        opened(row) => { FormData.open-row(index, row); }
+        removed(row) => { FormData.row-remove(index, row); }
+    }
+}
+
+// Окно строки табличной части: поля строки одной колонкой. «Готово» (и Enter в поле) кладёт
+// строку в таблицу, если обязательные заполнены; «Отмена» и Esc оставляют таблицу как была.
+component RowDialog inherits Dialog {
+    // Фокус берёт первое поле строки; окно забирает его, только если полей для ввода нет.
+    grab-focus: FormData.row-autofocus < 0;
+    enter-pressed => { FormData.row-done(); }
+    escape-pressed => { FormData.row-cancel(); }
+
+    card := Rectangle {
+        width: min(520px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: FormData.row-title;
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                overflow: elide;
+            }
+            VerticalLayout {
+                spacing: Theme.space-4;
+                for field[index] in FormData.row-fields : FieldEditor {
+                    field: field;
+                    autofocus: index == FormData.row-autofocus;
+                    focused => { FormData.row-autofocus = -1; }
+                    edited(text) => { FormData.row-edited(index, text); }
+                    date-edited(day, month, year) => { FormData.row-date-edited(index, day, month, year); }
+                    pick-requested => { FormData.row-pick(index); }
+                    cleared => { FormData.row-clear(index); }
+                    accepted => { root.submit(); }
+                }
+            }
+            if FormData.row-error != "" : Text {
+                text: FormData.row-error;
+                font-size: Theme.font-caption;
+                color: Theme.danger;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                if FormData.row-editable : Button {
+                    text: "Отмена";
+                    clicked => { FormData.row-cancel(); }
+                }
+                Button {
+                    text: FormData.row-editable ? "Готово" : "Закрыть";
+                    kind: ButtonKind.primary;
+                    clicked => { FormData.row-done(); }
+                }
+            }
+        }
     }
 }
 
@@ -225,8 +337,8 @@ export component ObjectFormView inherits Rectangle {
             color: Theme.text-muted;
         }
 
-        // Шапка прокручивается: на узком окне полей в одну колонку может быть больше экрана,
-        // а под ней позже встанут табличные части.
+        // Шапка с табличными частями прокручивается: на узком окне полей в одну колонку и
+        // строк может быть больше экрана.
         Flickable {
             vertical-stretch: 1;
             min-height: 0px;
@@ -240,6 +352,35 @@ export component ObjectFormView inherits Rectangle {
                 slot-width: root.slot-width;
             }
         }
+    }
+
+    if FormData.row-open : RowDialog {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+    }
+
+    if FormData.picker-open : RefPicker {
+        title: FormData.picker-title;
+        items: FormData.picker-items;
+        note: FormData.picker-note;
+        error: FormData.picker-error;
+        error-action: FormData.picker-error-action;
+        can-add: FormData.picker-can-add;
+        can-clear: FormData.picker-can-clear;
+        query <=> FormData.picker-query;
+        current <=> FormData.picker-current;
+        query-edited(text) => { FormData.picker-query-changed(text); }
+        chosen(index) => { FormData.picker-choose(index); }
+        cleared => { FormData.picker-clear(); }
+        add => { FormData.picker-add(); }
+        cancelled => { FormData.picker-close(); }
+        retry => { FormData.picker-retry(); }
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
     }
 
     if FormData.ask-close : ConfirmDialog {

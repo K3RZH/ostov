@@ -2,8 +2,10 @@
 //! настоящей демо-базы. Проверяет открытие формы справочника и документа, набор в первом поле
 //! (фокус при открытии), что Enter не записывает, запись кнопкой, конфликт версий и «Перечитать»,
 //! новый объект с проверкой обязательного поля, проведение и отмену, закрытие без воскрешения
-//! несохранённых правок, ошибку чтения, форму в дополнительном окне. «Повторить» после ответа
-//! ядра «данные заняты» при проведении.
+//! несохранённых правок, ошибку чтения, форму в дополнительном окне. Новый «Расход»: выбор
+//! склада мышью и клавиатурой (поиск, стрелки, Enter, Esc, Delete), строка товара в окне строки
+//! с выбором товара поверх него, проведение; «+ Добавить» из выбора (новый склад подставляется
+//! в поле). «Повторить» после ответа ядра «данные заняты» при проведении.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example form_e2e`.
 // Стенд, а не приложение: падение на unwrap и есть провал сценария.
 #![allow(clippy::unwrap_used)]
@@ -21,13 +23,21 @@ use ostov_ui::app::{refresh, wire_tabs};
 use ostov_ui::form_ui::FormUi;
 use ostov_ui::shell::{DocKey, Shell};
 use ostov_ui::windows::Windows;
-use ostov_ui::{AppWindow, FormData};
-use slint::platform::{PointerEventButton, WindowEvent};
+use ostov_ui::{AppWindow, EditorKind, FormData};
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, Model, SharedString};
 
-// Точки окна 1200×760 (снимки `snapshot -- … form-catalog`).
+// Точки окна 1200×760 (снимки `snapshot -- … form-catalog`, `form-issue`, `form-row`).
 const SAVE_BUTTON: (f32, f32) = (353.0, 174.0);
 const FIRST_FIELD: (f32, f32) = (526.0, 263.0);
+const ISSUE_WAREHOUSE: (f32, f32) = (950.0, 263.0);
+const ADD_LINE: (f32, f32) = (913.0, 356.0);
+const FIRST_LINE: (f32, f32) = (700.0, 428.0);
+// Поле количества в окне строки: внутри поля и с полосой ошибки «Готово», и без неё.
+const ROW_QTY: (f32, f32) = (740.0, 446.0);
+const PICKER_ADD: (f32, f32) = (560.0, 594.0);
+const POST_BUTTON: (f32, f32) = (353.0, 174.0);
+const ISSUE_SAVE_BUTTON: (f32, f32) = (460.0, 174.0);
 
 /// Один такт цикла событий. Безобидное движение мыши заставляет окно создать экраны, которые
 /// только что появились: настоящий цикл делает это сам при отрисовке.
@@ -84,6 +94,23 @@ fn type_text(w: &AppWindow, text: &str) {
     for ch in text.chars() {
         press(w, &ch.to_string());
     }
+}
+
+fn press_key(w: &AppWindow, key: Key) {
+    press(w, &char::from(key).to_string());
+}
+
+/// `id` и название ссылки из ответа ядра.
+fn ref_of(value: &Value) -> (i64, String) {
+    let Value::Ref { id, title } = value else {
+        unreachable!("не ссылка: {value:?}");
+    };
+    (*id, title.clone().unwrap_or_default())
+}
+
+/// Первые буквы названия строчными: поиск в ядре без учёта регистра.
+fn prefix(title: &str) -> String {
+    title.chars().take(3).collect::<String>().to_lowercase()
 }
 
 fn text_of(engine: &dyn Engine, object: &str, id: i64, field: &str) -> String {
@@ -435,12 +462,18 @@ fn main() {
             && !data.get_posted(),
     );
     check(
-        "поля документа: дата, ссылки и вычисляемая сумма только для чтения",
+        "поля документа: дата и ссылки для выбора, вычисляемая сумма только для чтения",
         data.get_fields().row_count() == 4
             && !field(0).read_only
-            && field(1).read_only
-            && field(2).read_only
+            && field(1).kind == EditorKind::Reference
+            && !field(1).read_only
+            && !field(2).read_only
             && field(3).read_only,
+    );
+    check(
+        "табличная часть «Товары» со строками из ядра",
+        data.get_parts().row_count() == 1
+            && data.get_parts().row_data(0).unwrap().rows.row_count() > 0,
     );
     // Фокус в дате, первом редактируемом поле: дата набирается цифрами без щелчка.
     type_text(&window, "05032027");
@@ -486,6 +519,279 @@ fn main() {
         }) && !engine.get("receipt", draft).unwrap().posted,
     );
 
+    data.invoke_close();
+    settle(&window);
+
+    // ---------------------------------------------------------------- расход: выбор и строки
+    // Склад и товар из проведённого поступления: остатка по ним хватит на небольшой расход.
+    let stocked = engine
+        .list(&ListQuery {
+            object: "receipt".to_owned(),
+            posted: Some(true),
+            deleted: Some(false),
+            size: 1,
+            ..ListQuery::default()
+        })
+        .unwrap()
+        .rows[0]
+        .id;
+    let stocked = engine.get("receipt", stocked).unwrap();
+    let (warehouse_id, warehouse_name) = ref_of(&stocked.fields["warehouse"]);
+    let (goods_id, goods_name) = ref_of(&stocked.tables["lines"][0]["goods"]);
+    let part = || data.get_parts().row_data(0).unwrap();
+    let line = |row: usize| -> Vec<String> {
+        part()
+            .rows
+            .row_data(row)
+            .unwrap()
+            .cells
+            .iter()
+            .map(|cell| cell.to_string())
+            .collect()
+    };
+    let row_field = |index: usize| data.get_row_fields().row_data(index).unwrap();
+    // Товаров в ядре: выше стенд добавил свой.
+    let goods_total = engine
+        .list(&ListQuery {
+            object: "goods".to_owned(),
+            deleted: Some(false),
+            size: 1,
+            ..ListQuery::default()
+        })
+        .unwrap()
+        .total
+        .and_then(|total| usize::try_from(total).ok())
+        .unwrap();
+    let picker_titles = || -> Vec<String> {
+        data.get_picker_items()
+            .iter()
+            .map(|item| item.title.to_string())
+            .collect()
+    };
+
+    forms.open_new("issue").unwrap();
+    settle(&window);
+    check(
+        "новый расход: дата, склад для выбора, пустая табличная часть «Товары»",
+        data.get_fields().row_count() == 2
+            && field(1).kind == EditorKind::Reference
+            && !field(1).read_only
+            && data.get_parts().row_count() == 1
+            && part().title == "Товары"
+            && part().rows.row_count() == 0
+            && part().editable,
+    );
+    type_text(&window, "30122026");
+    check("дата набрана в первом поле", field(0).text == "30.12.2026");
+
+    click(&window, ISSUE_WAREHOUSE);
+    check(
+        "щелчок по складу открывает выбор: все склады из ядра, фокус в поиске",
+        wait_for(&window, || {
+            data.get_picker_open() && data.get_picker_items().row_count() == 3
+        }) && data.get_picker_title() == "Выбор: Склады"
+            && !data.get_picker_can_clear()
+            && data.get_picker_can_add(),
+    );
+    type_text(&window, &prefix(&warehouse_name));
+    check(
+        "поиск по первым буквам в ядре оставляет один склад",
+        wait_for(&window, || picker_titles() == [warehouse_name.clone()])
+            && data.get_picker_query() == prefix(&warehouse_name)
+            && data.get_picker_current() == 0,
+    );
+    press(&window, "\n");
+    check(
+        "Enter выбирает выделенный склад, выбор закрыт, форма изменена",
+        !data.get_picker_open() && field(1).text == warehouse_name && data.get_modified(),
+    );
+
+    // Фокус вернулся в поле склада: клавиатура работает без мыши.
+    press(&window, "\n");
+    check(
+        "Enter в поле склада снова открывает выбор, нынешний склад отмечен и выделен",
+        wait_for(&window, || data.get_picker_items().row_count() == 3)
+            && data.get_picker_can_clear()
+            && {
+                let current = usize::try_from(data.get_picker_current()).unwrap();
+                let item = data.get_picker_items().row_data(current).unwrap();
+                item.current && item.title == warehouse_name
+            },
+    );
+    for _ in 0..3 {
+        press_key(&window, Key::UpArrow);
+    }
+    press_key(&window, Key::DownArrow);
+    check(
+        "стрелки двигают выделение и не уходят за край",
+        data.get_picker_current() == 1,
+    );
+    press_key(&window, Key::Escape);
+    check(
+        "Esc закрывает выбор без выбора: склад прежний",
+        !data.get_picker_open() && field(1).text == warehouse_name,
+    );
+    press_key(&window, Key::Delete);
+    check("Delete в поле склада очищает его", field(1).text.is_empty());
+    press(&window, "\n");
+    wait_for(&window, || data.get_picker_items().row_count() == 3);
+    type_text(&window, &prefix(&warehouse_name));
+    wait_for(&window, || picker_titles() == [warehouse_name.clone()]);
+    press(&window, "\n");
+    check("склад выбран снова", field(1).text == warehouse_name);
+
+    click(&window, ADD_LINE);
+    check(
+        "«Добавить» открывает окно новой строки: товар и количество",
+        data.get_row_open()
+            && data.get_row_title() == "Товары: новая строка"
+            && data.get_row_fields().row_count() == 2
+            && row_field(0).kind == EditorKind::Reference,
+    );
+    // Фокус в ячейке товара: Enter открывает выбор поверх окна строки.
+    press(&window, "\n");
+    check(
+        "выбор товара открыт поверх окна строки",
+        wait_for(&window, || {
+            data.get_picker_open() && data.get_picker_items().row_count() == goods_total
+        }) && data.get_picker_title() == "Выбор: Товары"
+            && data.get_row_open(),
+    );
+    type_text(&window, &prefix(&goods_name));
+    wait_for(&window, || picker_titles().first() == Some(&goods_name));
+    press(&window, "\n");
+    check(
+        "товар встал в ячейку, окно строки на месте",
+        !data.get_picker_open() && data.get_row_open() && row_field(0).text == goods_name,
+    );
+    click(&window, ROW_QTY);
+    press(&window, "\n");
+    check(
+        "Enter без количества: строка не готова, ошибка у ячейки",
+        data.get_row_open()
+            && row_field(1).error == "Заполните поле."
+            && data.get_row_error().starts_with("Строка не готова"),
+    );
+    type_text(&window, "0,1");
+    press(&window, "\n");
+    check(
+        "Enter с количеством: строка в таблице, окно закрыто",
+        !data.get_row_open()
+            && part().rows.row_count() == 1
+            && line(0) == [goods_name.clone(), "0,100".to_owned()],
+    );
+
+    click(&window, POST_BUTTON);
+    check(
+        "«Провести»: расход записан и проведён, вкладка с настоящим id",
+        wait_for(&window, || data.get_status() == "Проведён")
+            && data.get_error().is_empty()
+            && !data.get_modified()
+            && active().doc.as_ref().is_some_and(|doc| !doc.is_temporary()),
+    );
+    let issue_id = active().doc.unwrap().id;
+    let stored = engine.get("issue", issue_id).unwrap();
+    let lines = &stored.tables["lines"];
+    check(
+        "в ядре: склад, строка с товаром и количеством, документ проведён",
+        stored.posted
+            && ref_of(&stored.fields["warehouse"]).0 == warehouse_id
+            && lines.len() == 1
+            && ref_of(&lines[0]["goods"]).0 == goods_id
+            && lines[0]["qty"]
+                == Value::Decimal {
+                    units: 100,
+                    scale: 3,
+                },
+    );
+    check(
+        "после проведения строка из ядра на месте",
+        part().rows.row_count() == 1 && line(0)[0] == goods_name,
+    );
+    data.invoke_close();
+    settle(&window);
+
+    // ---------------------------------------------------------------- «+ Добавить» из выбора
+    forms.open_new("issue").unwrap();
+    settle(&window);
+    let draft = active().doc.clone().unwrap();
+    click(&window, ISSUE_WAREHOUSE);
+    wait_for(&window, || data.get_picker_items().row_count() == 3);
+    click(&window, PICKER_ADD);
+    check(
+        "«+ Добавить» открывает форму нового склада, вкладка расхода осталась",
+        wait_for(&window, || {
+            active()
+                .doc
+                .as_ref()
+                .is_some_and(|doc| doc.object == "warehouses" && doc.is_temporary())
+        }) && data.get_title() == "Склады (новый)"
+            && tab_of(&draft).is_some(),
+    );
+    settle(&window);
+    type_text(&window, "Склад стенда");
+    click(&window, SAVE_BUTTON);
+    check(
+        "склад записан: его вкладка закрыта, расход снова на экране, склад в поле",
+        wait_for(&window, || {
+            active().doc.as_ref() == Some(&draft) && field(1).text == "Склад стенда"
+        }) && shell.borrow().tabs().iter().all(|tab| {
+            tab.doc
+                .as_ref()
+                .is_none_or(|doc| doc.object != "warehouses")
+        }) && data.get_modified(),
+    );
+    check(
+        "новый склад есть в ядре",
+        engine
+            .list(&ListQuery {
+                object: "warehouses".to_owned(),
+                search: Some("Склад стенда".to_owned()),
+                size: 5,
+                ..ListQuery::default()
+            })
+            .unwrap()
+            .rows
+            .len()
+            == 1,
+    );
+
+    // Две строки; первая выбирается щелчком и удаляется клавишей Delete.
+    for (goods, qty) in [(0, "1"), (1, "2")] {
+        data.invoke_row_add(0);
+        data.invoke_row_pick(0);
+        wait_for(&window, || {
+            data.get_picker_items().row_count() == goods_total
+        });
+        data.invoke_picker_choose(goods);
+        data.invoke_row_edited(1, qty.into());
+        data.invoke_row_done();
+    }
+    let second = line(1);
+    check("две строки добавлены", part().rows.row_count() == 2);
+    click(&window, FIRST_LINE);
+    check("щелчок выбирает строку", part().selected == 0);
+    press_key(&window, Key::Delete);
+    check(
+        "Delete удаляет выбранную строку, остаётся вторая",
+        part().rows.row_count() == 1 && line(0) == second,
+    );
+
+    data.invoke_edited(0, "30.12.2026".into());
+    click(&window, ISSUE_SAVE_BUTTON);
+    check(
+        "«Записать»: черновик с новым складом и строкой",
+        wait_for(&window, || data.get_status() == "Черновик")
+            && data.get_error().is_empty()
+            && active().doc.as_ref().is_some_and(|doc| !doc.is_temporary()),
+    );
+    let written = engine.get("issue", active().doc.unwrap().id).unwrap();
+    check(
+        "в ядре черновик: новый склад и одна строка",
+        !written.posted
+            && ref_of(&written.fields["warehouse"]).1 == "Склад стенда"
+            && written.tables["lines"].len() == 1,
+    );
     data.invoke_close();
     settle(&window);
 
