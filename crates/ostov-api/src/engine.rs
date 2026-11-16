@@ -181,7 +181,7 @@ pub trait Connector: Send + Sync {
         Err(EngineError::not_implemented("CreateLocal"))
     }
     /// План изменений базы `path` под конфигурацию этого коннектора (СТ-50, К-6): что
-    /// добавится и не откажет ли открытие. Ничего не записывает.
+    /// добавится и не откажет ли открытие. Ничего не записывает; работает и при открытой базе.
     fn plan_local(&self, _path: &str) -> EngineResult<SchemaPlan> {
         Err(EngineError::not_implemented("PlanLocal"))
     }

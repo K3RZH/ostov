@@ -1602,7 +1602,8 @@ impl Connector for LocalConnector {
         if !Path::new(path).exists() {
             return Err(not_found(path));
         }
-        let _lock = lock_base(path)?;
+        // Без замка базы: план только читает (всё в транзакции с откатом), и конфигуратор
+        // строит его, пока база открыта со старой конфигурацией (К-16).
         let mut db = SqliteDriver::open(path).map_err(|e| error(e.into()))?;
         base_config(&mut db, path)?;
         let config = self.config()?;

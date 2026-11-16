@@ -2625,22 +2625,21 @@ fn plan_shows_changes_without_touching_base() {
             },
         ]
     );
-    // План ничего не записал: тот же план второй раз, а открытие делает ровно его.
+    // Открытая база плану не мешает: так конфигуратор проверяет новую конфигурацию, не
+    // закрывая старую (К-16). И план ничего не записал: тот же план второй раз.
+    let open = LocalConnector::new(super::warehouse_model())
+        .open_local(&base.path, None)
+        .unwrap();
     assert_eq!(changed.plan_local(&base.path).unwrap(), plan);
+    assert!(open.hello().is_ok());
+    drop(open);
+    // Открытие с новой конфигурацией делает ровно этот план.
     drop(changed.open_local(&base.path, None).unwrap());
     let after = changed.plan_local(&base.path).unwrap();
     assert!(
         after.changes.is_empty() && after.refused.is_none(),
         "{after:?}"
     );
-
-    // Открытую базу план не трогает.
-    let open = changed.open_local(&base.path, None).unwrap();
-    assert_eq!(
-        changed.plan_local(&base.path).unwrap_err().code,
-        ErrorCode::AlreadyOpen
-    );
-    drop(open);
 }
 
 #[test]
