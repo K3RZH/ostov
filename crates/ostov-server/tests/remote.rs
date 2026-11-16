@@ -47,6 +47,7 @@ fn model() -> ostov_model::Config {
         title: "Кладовщик".into(),
         objects: vec![("goods".into(), read)],
         system: ostov_model::SystemRights::default(),
+        restrictions: Vec::new(),
     });
     model
 }

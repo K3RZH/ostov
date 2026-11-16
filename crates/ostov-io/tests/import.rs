@@ -358,6 +358,7 @@ fn viewer_model() -> ostov_model::Config {
             },
         )],
         system: Default::default(),
+        restrictions: Vec::new(),
     });
     model
 }

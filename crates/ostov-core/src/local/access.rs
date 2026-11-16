@@ -86,7 +86,9 @@ impl LocalEngine {
         let role = self.role();
         move |object: &str| match &role {
             Ok(None) => true,
-            Ok(Some(r)) => ostov_sec::rights(&self.config.roles, r, object).read,
+            Ok(Some(r)) => {
+                ostov_sec::rights(&self.config.roles, r, object).read && !self.restricted(object)
+            }
             Err(_) => false,
         }
     }

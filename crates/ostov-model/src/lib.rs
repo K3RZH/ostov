@@ -140,6 +140,18 @@ pub struct RoleDef {
     /// Объекты, которых нет в списке, роли недоступны.
     pub objects: Vec<(String, Rights)>,
     pub system: SystemRights,
+    /// Ограничения по записям (СТ-52): несколько на один объект действуют вместе.
+    pub restrictions: Vec<Restriction>,
+}
+
+/// Ограничение по записям (ADR-043): роли видно только то, где поле объекта — одно из значений
+/// свойства пользователя (`warehouse` среди `user.warehouses`). Свойство пустое — не видно ничего.
+/// У регистра поле — измерение.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restriction {
+    pub object: String,
+    pub field: String,
+    pub user_field: String,
 }
 
 /// Права не на объект, а на всю базу.

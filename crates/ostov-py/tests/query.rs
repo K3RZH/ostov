@@ -226,6 +226,7 @@ fn query_in_rule_has_rights_of_who_posts() {
             ("issue".into(), work),
         ],
         system: ostov_model::SystemRights::default(),
+        restrictions: Vec::new(),
     });
     let script = "def on_post(doc, ctx):\n    ctx.query(\"SELECT number FROM receipt\")\n";
     let base = Base::new("ctx-query-rights", script);
