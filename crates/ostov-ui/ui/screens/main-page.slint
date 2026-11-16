@@ -7,6 +7,7 @@ import { TabHost, TabItem } from "tab-host.slint";
 import { HomeSection } from "home-view.slint";
 import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 import { NavPanel, NavRow } from "../components/nav-panel.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
 
 component Separator inherits Rectangle {
     width: 1px;
@@ -20,6 +21,8 @@ export component MainPage inherits Rectangle {
     in property <string> base-name;
     // Страница сейчас на виду: окно держит и скрытые страницы, форма объекта в них не строится.
     in property <bool> shown: true;
+    // Предпросмотр из конфигуратора: постоянная метка в шапке (К-24), её нельзя убрать.
+    in property <bool> preview;
     // Название конфигурации и карточки разделов для экрана «Главная».
     in property <string> config-name;
     in property <[HomeSection]> home-sections;
@@ -115,6 +118,10 @@ export component MainPage inherits Rectangle {
                 VerticalLayout {
                     alignment: center;
                     Text { text: root.base-name; font-size: Theme.font-body; color: Theme.text-muted; }
+                }
+                if root.preview : VerticalLayout {
+                    alignment: center;
+                    Chip { text: "Предпросмотр, тестовая база"; kind: ChipKind.draft; }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 // Поиск, «создать», уведомления и справка ждут команд ядра (глобальный поиск,
@@ -240,7 +247,7 @@ export component MainPage inherits Rectangle {
             MenuPanel {
                 actions: [
                     { id: "switch", label: "Сменить пользователя", icon: "user", danger: false, enabled: root.can-switch-user, divider: false },
-                    { id: "close", label: "Закрыть базу", icon: "database", danger: false, enabled: true, divider: true },
+                    { id: "close", label: root.preview ? "Закрыть предпросмотр" : "Закрыть базу", icon: "database", danger: false, enabled: true, divider: true },
                 ];
                 chosen(id) => {
                     user-menu.close();

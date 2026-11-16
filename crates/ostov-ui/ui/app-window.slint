@@ -13,6 +13,7 @@ import { PasswordDialog } from "screens/password-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 import { ConfirmDialog } from "components/confirm-dialog.slint";
+import { PreviewStart } from "screens/preview-start.slint";
 
 // Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
 // дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
@@ -24,6 +25,8 @@ export component AppWindow inherits Window {
     // Версия программы из Cargo.toml: задаёт Rust (src/app.rs), руками не пишем.
     in property <string> app-version;
     in property <string> config-info;
+    // Предпросмотр из конфигуратора (`--preview`): тестовая база, метка на главной, без выбора базы.
+    in property <bool> preview;
 
     // Выбор базы
     in-out property <int> selected-recent <=> start-page.selected-recent;
@@ -214,12 +217,22 @@ export component AppWindow inherits Window {
         y: root.chrome-height;
         width: root.width;
         height: root.height - root.chrome-height;
-        visible: root.page == 0;
+        visible: root.page == 0 && !root.preview;
         config-name: root.config-name;
         config-info: root.config-info;
         create-database => { root.creating = true; }
         add-existing => { root.adding = true; }
         forget => { root.forgetting = true; }
+    }
+
+    if root.page == 0 && root.preview : PreviewStart {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        config-name: root.config-name;
+        error: root.start-error;
+        close-clicked => { root.close(); }
     }
 
     login-page := LoginPage {
@@ -240,6 +253,7 @@ export component AppWindow inherits Window {
         height: root.height - root.chrome-height;
         visible: root.page == 2;
         shown: root.page == 2;
+        preview: root.preview;
         config-name: root.config-name;
         home-sections: root.home-sections;
         maximized: root.maximized;

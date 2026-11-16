@@ -13,7 +13,9 @@ use crate::engine::{
     call_in_background,
 };
 use crate::form_ui::FormUi;
+use crate::launch::Launch;
 use crate::list_ui::ListUi;
+use crate::local_base::Config;
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
@@ -242,7 +244,9 @@ fn open_main(window: &AppWindow, session: &Session) -> Shell {
     window.set_base_name(base.trim_end_matches(".sqlite").into());
     window.set_database_name(base.into());
     window.set_mode_text(
-        if session.server {
+        if window.get_preview() {
+            "Предпросмотр, тестовая база"
+        } else if session.server {
             "Режим: сервер"
         } else {
             "Режим: локально"
@@ -306,8 +310,12 @@ pub fn existing_database(server: bool, file: &str, address: &str, name: &str) ->
     }
 }
 
-/// Ставит базу первой в списке недавних и сохраняет список.
+/// Ставит базу первой в списке недавних и сохраняет список. Тестовая база предпросмотра
+/// в список не попадает: она живёт в папке конфигурации, а не среди баз пользователя.
 fn add_recent(app: &AppWindow, db: RecentDb) {
+    if app.get_preview() {
+        return;
+    }
     let rows = crate::recent::push_front(app.get_recent().iter(), db);
     if let Err(message) = crate::recent::save(&rows) {
         app.set_start_error(message.into());
@@ -564,14 +572,20 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
 }
 
 /// Открывает локальную базу в фоне и спрашивает ядро, нужен ли вход (`hello`).
-fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, screens: &Screens) {
+fn open_local(
+    app: &AppWindow,
+    db: RecentDb,
+    session: &Rc<RefCell<Session>>,
+    screens: &Screens,
+    config: &Arc<Config>,
+) {
     app.set_start_busy(true);
     let path = db.path.to_string();
     let weak = app.as_weak();
-    let (session, screens) = (session.clone(), screens.clone());
+    let (session, screens, config) = (session.clone(), screens.clone(), config.clone());
     call_in_background(
         move || {
-            let engine = crate::local_base::open(&path)?;
+            let engine = config.open(&path)?;
             let hello = engine.hello()?;
             // Без входа метаданные можно взять сразу; со входом их даст ядро после login.
             let meta = if hello.login_required {
@@ -755,7 +769,7 @@ fn submit_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Scree
 }
 
 /// Создаёт файл базы в фоне; в список база попадает, только если ядро её создало.
-fn create_local(app: &AppWindow, db: RecentDb) {
+fn create_local(app: &AppWindow, db: RecentDb, config: Arc<Config>) {
     let file_password = app
         .get_new_protect_password()
         .then(|| app.get_new_password().to_string());
@@ -770,7 +784,9 @@ fn create_local(app: &AppWindow, db: RecentDb) {
     call_in_background(
         // Базу сразу закрываем: открывать её будет «Открыть», как любую другую.
         move || {
-            crate::local_base::create(&path, file_password.as_deref(), admin.as_ref()).map(|_| ())
+            config
+                .create(&path, file_password.as_deref(), admin.as_ref())
+                .map(|_| ())
         },
         move |result| {
             let Some(app) = weak.upgrade() else { return };
@@ -803,13 +819,13 @@ fn reset_create(app: &AppWindow) {
 }
 
 /// Проверяет добавляемый файл ядром (`check_local`: база Ostov нужной конфигурации) без записи в него.
-fn add_local(app: &AppWindow, db: RecentDb) {
+fn add_local(app: &AppWindow, db: RecentDb, config: Arc<Config>) {
     let path = db.path.to_string();
     app.set_add_error("".into());
     app.set_add_busy(true);
     let weak = app.as_weak();
     call_in_background(
-        move || crate::local_base::check(&path).map(|_| ()),
+        move || config.check(&path).map(|_| ()),
         move |result| {
             let Some(app) = weak.upgrade() else { return };
             app.set_add_busy(false);
@@ -1048,23 +1064,67 @@ pub fn wire_tabs(
     });
 }
 
-pub fn run() -> Result<(), slint::PlatformError> {
+/// Запускает клиент с аргументами командной строки и ждёт, пока его закроют.
+///
+/// # Errors
+/// Текст для человека: окно не открылось или конфигурация из `--config` не прочиталась.
+pub fn run_with(launch: Launch) -> Result<(), String> {
+    let text = |error: slint::PlatformError| format!("не удалось открыть окно: {error}");
+    // Идентификатор приложения: по нему оболочка связывает окно с ярлыком ostov.desktop.
+    slint::BackendSelector::new().select().map_err(text)?;
+    slint::set_xdg_app_id("ostov").map_err(text)?;
+    let app = start(&launch)?;
+    if launch.preview {
+        crate::launch::quit_when_stdin_closes();
+    }
+    app.show().map_err(text)?;
+    slint::run_event_loop_until_quit().map_err(text)
+}
+
+/// Конфигурация клиента: из папки `--config` или встроенная.
+fn load_config(dir: Option<&std::path::Path>) -> Result<Config, String> {
+    let loaded = match dir {
+        Some(dir) => Config::load(dir),
+        None => Config::embedded(),
+    };
+    loaded.map_err(|errors| {
+        let first = errors.first().map(ToString::to_string).unwrap_or_default();
+        format!(
+            "Конфигурация не прочиталась, ошибок: {}. Первая: {first}. Проверьте её в конфигураторе.",
+            errors.len()
+        )
+    })
+}
+
+/// Окно клиента со всеми обработчиками; без цикла событий, поэтому подходит и стендам.
+/// С `--base` база открывается сразу, в предпросмотре вместо выбора базы ожидание или ошибка.
+///
+/// # Errors
+/// Окно не создалось или конфигурация не прочиталась (в предпросмотре ошибка видна в окне).
+pub fn start(launch: &Launch) -> Result<AppWindow, String> {
     use slint::Model;
 
-    // Идентификатор приложения: по нему оболочка связывает окно с ярлыком ostov.desktop.
-    slint::BackendSelector::new().select()?;
-    slint::set_xdg_app_id("ostov")?;
-
-    let app = AppWindow::new()?;
+    let app = AppWindow::new().map_err(|error| format!("не удалось открыть окно: {error}"))?;
     crate::shortcuts::install(app.window());
     apply_settings(&app, Settings::load());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
-    app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
-    wire_forget(&app);
-    if let Some((title, version)) = crate::local_base::config_title() {
-        app.set_config_name(title.into());
-        app.set_config_info(format!("Конфигурация · версия {version}").into());
+    app.set_preview(launch.preview);
+    // Закрытие окна пользователем завершает приложение.
+    app.window().on_close_requested(quit_on_close);
+    let config = match load_config(launch.config.as_deref()) {
+        Ok(config) => Arc::new(config),
+        Err(message) if launch.preview => {
+            app.set_start_error(message.into());
+            return Ok(app);
+        }
+        Err(message) => return Err(message),
+    };
+    if !launch.preview {
+        app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
     }
+    wire_forget(&app);
+    app.set_config_name(config.title.as_str().into());
+    app.set_config_info(format!("Конфигурация · версия {}", config.version).into());
     let shell = Rc::new(RefCell::new(Shell::empty()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
     let windows = crate::windows::Windows::new(&receipts);
@@ -1088,12 +1148,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
         forms,
     };
 
-    // Закрытие окна пользователем завершает приложение.
-    app.window().on_close_requested(quit_on_close);
-
     app.on_open({
         let app = app.as_weak();
-        let (session, screens) = (session.clone(), screens.clone());
+        let (session, screens, config) = (session.clone(), screens.clone(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
@@ -1102,7 +1159,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             app.set_start_error("".into());
             if !db.server {
-                open_local(&app, db, &session, &screens);
+                open_local(&app, db, &session, &screens, &config);
                 return;
             }
             open_remote(&app, db, &session);
@@ -1145,6 +1202,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
             app.set_password("".into());
             app.set_repeat("".into());
             app.set_error("".into());
+            // Предпросмотру выбирать другую базу нельзя: закрыть базу значит закрыть окно.
+            if app.get_preview() {
+                let _ = slint::quit_event_loop();
+                return;
+            }
             show_page(&app, PAGE_START);
         }
     };
@@ -1212,7 +1274,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_create_confirmed({
-        let app = app.as_weak();
+        let (app, config) = (app.as_weak(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let db = new_database(
@@ -1225,7 +1287,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 create_remote_base(&app, db);
                 return;
             }
-            create_local(&app, db);
+            create_local(&app, db, config.clone());
         }
     });
 
@@ -1335,7 +1397,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_add_confirmed({
-        let app = app.as_weak();
+        let (app, config) = (app.as_weak(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let db = existing_database(
@@ -1348,7 +1410,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 add_remote(&app, db);
                 return;
             }
-            add_local(&app, db);
+            add_local(&app, db, config.clone());
         }
     });
 
@@ -1373,8 +1435,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     wire_tabs(&app, &shell, &receipts, &windows);
 
-    app.show()?;
-    slint::run_event_loop_until_quit()
+    if let Some(base) = &launch.base {
+        let path = base.to_string_lossy();
+        // В предпросмотре база называется по конфигурации: имя файла у неё всегда одно.
+        let name = match base.file_name() {
+            Some(file) if !launch.preview => file.to_string_lossy().into_owned(),
+            _ => config.title.clone(),
+        };
+        let db = RecentDb {
+            name: name.into(),
+            path: path.as_ref().into(),
+            when: "".into(),
+            server: false,
+            protection: 0,
+        };
+        open_local(&app, db, &session, &screens, &config);
+    }
+    Ok(app)
 }
 
 /// «Пользователи и роли» через ядро: список, добавление, включение и отключение. Справочник

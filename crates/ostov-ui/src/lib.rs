@@ -22,6 +22,7 @@ pub mod form_state;
 pub mod form_table;
 pub mod form_ui;
 pub mod grid;
+pub mod launch;
 pub mod list_ui;
 pub mod list_window;
 pub mod local_base;
