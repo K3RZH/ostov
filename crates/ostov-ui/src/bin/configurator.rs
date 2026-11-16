@@ -1,4 +1,6 @@
 //! «Ostov Конфигуратор»: `cargo run -p ostov-ui --bin configurator`. Только просмотр.
+// В выпускной сборке на Windows окно открывается без консоли; в отладочной консоль остаётся для логов.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::process::ExitCode;
 
