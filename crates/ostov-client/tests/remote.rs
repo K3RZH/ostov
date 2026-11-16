@@ -47,7 +47,7 @@ fn start(name: &str, connect: Option<Connect>) -> Server {
         })
     });
     let tls = Tls::load_or_create(&dir.join("tls"), &["localhost".to_owned()]).unwrap();
-    let cert = tls.cert_pem.clone();
+    let cert = tls.ca_pem.clone();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let (ready, port) = mpsc::channel();
     let thread = std::thread::spawn(move || {
@@ -368,7 +368,7 @@ fn connection_problems_are_explained() {
 
     let stranger = std::env::temp_dir().join(format!("ostov-client-{}-other", std::process::id()));
     let other = Tls::load_or_create(&stranger, &["localhost".to_owned()]).unwrap();
-    let untrusted = RemoteConnector::new(other.cert_pem)
+    let untrusted = RemoteConnector::new(other.ca_pem)
         .connect_remote(&format!("localhost:{}", server.port))
         .err()
         .unwrap();

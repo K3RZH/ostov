@@ -14,7 +14,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 pub use hub::{Base, CONNECTIONS, Connect, Hub};
-pub use tls::{CERT_FILE, KEY_FILE, Tls};
+pub use tls::{CA_FILE, CERT_FILE, KEY_FILE, Tls};
 
 /// Принимает клиентов на `listener` до сигнала `shutdown`. Без TLS не работает (СТ-33).
 /// `Hub::start` зовите в рабочем потоке (`spawn_blocking`): он ходит в базу синхронно.

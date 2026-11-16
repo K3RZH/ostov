@@ -107,7 +107,7 @@ async fn start_in(dir: PathBuf, connect: Option<Connect>) -> Running {
         .await
         .unwrap();
     });
-    let client = EngineClient::new(connect_tls(port, &tls.cert_pem).await.unwrap());
+    let client = EngineClient::new(connect_tls(port, &tls.ca_pem).await.unwrap());
     Running {
         client,
         port,
@@ -410,7 +410,7 @@ async fn client_must_trust_the_server_certificate() {
     let stranger = temp("tls-stranger");
     let other = Tls::load_or_create(&stranger, &["localhost".to_owned()]).unwrap();
     // Чужой сертификат: соединение не устанавливается.
-    let channel = connect_tls(s.port, &other.cert_pem).await;
+    let channel = connect_tls(s.port, &other.ca_pem).await;
     let failed = match channel {
         Err(_) => true,
         Ok(ch) => EngineClient::new(ch).hello(pb::Empty {}).await.is_err(),
@@ -557,4 +557,77 @@ async fn console_reset_does_not_create_empty_base() {
     };
     assert!(tables.is_empty(), "{tables:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn connect_as(
+    port: u16,
+    ca_pem: &str,
+    name: &str,
+) -> Result<Channel, tonic::transport::Error> {
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(ca_pem))
+        .domain_name(name);
+    Endpoint::from_shared(format!("https://127.0.0.1:{port}"))?
+        .tls_config(tls)?
+        .connect()
+        .await
+}
+
+/// ADR-021: новое имя сервера — новый сертификат сервера от того же корневого центра,
+/// клиентам ничего менять не нужно.
+#[tokio::test]
+async fn new_server_name_keeps_the_root_certificate() {
+    let dir = temp("rename");
+    let tls_dir = dir.join("tls");
+    let first = Tls::load_or_create(&tls_dir, &["localhost".to_owned()]).unwrap();
+    assert_ne!(first.ca_pem, first.cert_pem);
+    let hosts = ["localhost".to_owned(), "server.local".to_owned()];
+    let renamed = Tls::load_or_create(&tls_dir, &hosts).unwrap();
+    assert_eq!(renamed.ca_pem, first.ca_pem);
+    assert_ne!(renamed.cert_pem, first.cert_pem);
+    // Старые имена остаются в сертификате, запуск с ними его не меняет.
+    let same = Tls::load_or_create(&tls_dir, &["localhost".to_owned()]).unwrap();
+    assert_eq!(same.cert_pem, renamed.cert_pem);
+
+    let s = start_in(dir, None).await;
+    for name in ["localhost", "server.local"] {
+        let channel = connect_as(s.port, &first.ca_pem, name).await.unwrap();
+        EngineClient::new(channel)
+            .hello(pb::Empty {})
+            .await
+            .unwrap();
+    }
+    // Кому по старой памяти дали server.crt, тоже подключится: в нём цепочка с центром.
+    let chain = std::fs::read_to_string(s.dir.join("tls").join(ostov_server::CERT_FILE)).unwrap();
+    let channel = connect_as(s.port, &chain, "localhost").await.unwrap();
+    EngineClient::new(channel)
+        .hello(pb::Empty {})
+        .await
+        .unwrap();
+    let wrong = connect_as(s.port, &first.ca_pem, "other.local").await;
+    let failed = match wrong {
+        Err(_) => true,
+        Ok(ch) => EngineClient::new(ch).hello(pb::Empty {}).await.is_err(),
+    };
+    assert!(failed, "сертификат принят на чужое имя");
+}
+
+/// Установка до корневого центра: клиентам роздан `server.crt`, он и остаётся.
+#[tokio::test]
+async fn installation_before_root_keeps_its_certificate() {
+    let dir = temp("legacy");
+    let tls_dir = dir.join("tls");
+    std::fs::create_dir_all(&tls_dir).unwrap();
+    let old = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    std::fs::write(tls_dir.join(ostov_server::CERT_FILE), old.cert.pem()).unwrap();
+    let key = old.signing_key.serialize_pem();
+    std::fs::write(tls_dir.join(ostov_server::KEY_FILE), key).unwrap();
+
+    let s = start_in(dir, None).await;
+    assert!(!s.dir.join("tls").join(ostov_server::CA_FILE).exists());
+    let channel = connect_tls(s.port, &old.cert.pem()).await.unwrap();
+    EngineClient::new(channel)
+        .hello(pb::Empty {})
+        .await
+        .unwrap();
 }
