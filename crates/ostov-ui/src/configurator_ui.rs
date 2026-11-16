@@ -8,12 +8,16 @@ use std::rc::Rc;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::configurator::{Browser, CheckReport, Configuration, Table, TreeRow};
+use crate::engine::{ErrorCode, call_in_background};
 use crate::receipts_ui::{resized_columns, snapshot_of, write_columns};
 use crate::settings::Settings;
+use crate::test_run::{Prepared, Preview, RunError};
 use crate::{ConfiguratorWindow, GridColumn, GridRow, InfoRow, NavRow, Shape, Theme};
 
 /// Открытая папка конфигурации; `None`, пока её не выбрали.
 type Folder = Rc<RefCell<Option<PathBuf>>>;
+/// Запущенный клиент предпросмотра; новый запуск сначала останавливает прошлый.
+type Running = Rc<RefCell<Option<Preview>>>;
 
 /// Создаёт окно конфигуратора и открывает папку `folder`, если она задана.
 ///
@@ -26,6 +30,7 @@ pub fn create_window(folder: Option<PathBuf>) -> Result<ConfiguratorWindow, slin
     connect_browser(&window, &browser);
     connect_check(&window, &browser, &opened);
     connect_folder(&window, &browser, &opened);
+    connect_run(&window, &browser, &opened);
     match folder {
         Some(dir) => open_folder(&window, &browser, &opened, dir),
         None => {
@@ -86,16 +91,157 @@ fn open_folder(
     window.set_config_title(config.title.as_str().into());
     window.set_config_version(config.version.as_str().into());
     window.set_config_folder(crate::app::short_home(&dir.to_string_lossy()).into());
+    window.set_run_error("".into());
+    show_python_warning(window, &dir);
     *browser.borrow_mut() = Browser::new(config);
     show_browser(window, &browser.borrow());
     show_check(window, &CheckReport::run(&dir));
     *opened.borrow_mut() = Some(dir);
 }
 
+/// Правила на Python эта сборка не читает (`ostov-py` не подключён): говорим сразу, а не
+/// когда проведение в предпросмотре поведёт себя не так, как написано в `.py`.
+fn show_python_warning(window: &ConfiguratorWindow, dir: &Path) {
+    let warning = if crate::test_run::has_python(dir) {
+        crate::test_run::NO_PYTHON
+    } else {
+        ""
+    };
+    window.set_python_warning(warning.into());
+}
+
+/// «Запустить» и «План миграции»: проверка, план в окне, по «Запустить» клиент предпросмотра.
+fn connect_run(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, opened: &Folder) {
+    let running: Running = Rc::default();
+    window.on_run_requested({
+        let (weak, browser, opened) = (window.as_weak(), browser.clone(), opened.clone());
+        let running = running.clone();
+        move || {
+            let Some(window) = weak.upgrade() else { return };
+            let Some(dir) = opened.borrow().clone() else {
+                return;
+            };
+            // Запускается то, что сейчас в файлах: папка перечитывается и проверяется заново.
+            recheck(&window, &browser, &dir);
+            if window.get_check_failed() {
+                show_run_error(
+                    &window,
+                    "В конфигурации ошибки: исправьте их (панель «Проверка» внизу) и запустите снова.",
+                    false,
+                );
+                return;
+            }
+            let previous = running.borrow_mut().take();
+            prepare_in_background(&window, dir, previous, false);
+        }
+    });
+    window.on_plan_reset({
+        let (weak, opened, running) = (window.as_weak(), opened.clone(), running.clone());
+        move || {
+            let Some(window) = weak.upgrade() else { return };
+            let Some(dir) = opened.borrow().clone() else {
+                return;
+            };
+            window.set_plan_open(false);
+            let previous = running.borrow_mut().take();
+            prepare_in_background(&window, dir, previous, true);
+        }
+    });
+    window.on_plan_launch({
+        let (weak, opened) = (window.as_weak(), opened.clone());
+        move || {
+            let Some(window) = weak.upgrade() else { return };
+            let Some(dir) = opened.borrow().clone() else {
+                return;
+            };
+            window.set_plan_open(false);
+            let base = crate::test_run::base_path(&dir);
+            match Preview::spawn(&dir, &base) {
+                Ok(preview) => *running.borrow_mut() = Some(preview),
+                Err(error) => show_run_error(
+                    &window,
+                    &format!("Клиент предпросмотра не запустился: {error}."),
+                    false,
+                ),
+            }
+        }
+    });
+}
+
+/// Останавливает прошлый предпросмотр (до 3 с), готовит тестовую базу и считает план; всё
+/// в фоне, окно в это время отвечает. `reset`: базу сначала удалить и создать заново.
+fn prepare_in_background(
+    window: &ConfiguratorWindow,
+    dir: PathBuf,
+    previous: Option<Preview>,
+    reset: bool,
+) {
+    window.set_run_busy(true);
+    window.set_run_error("".into());
+    let weak = window.as_weak();
+    let folder = dir.clone();
+    call_in_background(
+        move || {
+            if let Some(previous) = previous {
+                previous.stop();
+            }
+            Ok(if reset {
+                crate::test_run::reset(&dir)
+            } else {
+                crate::test_run::prepare(&dir)
+            })
+        },
+        move |result| {
+            let Some(window) = weak.upgrade() else { return };
+            window.set_run_busy(false);
+            match result {
+                Ok(Ok(prepared)) => show_plan(&window, &prepared),
+                Ok(Err(RunError::Config(errors))) => {
+                    let errors = crate::configurator::relative_to(&folder, errors);
+                    show_check(&window, &CheckReport::from_errors(&errors));
+                    show_run_error(
+                        &window,
+                        "В конфигурации ошибки: исправьте их (панель «Проверка» внизу) и запустите снова.",
+                        false,
+                    );
+                }
+                Ok(Err(RunError::Engine(error))) | Err(error) => {
+                    // Занятую базу сбросом не лечат: её держит другая программа.
+                    let resettable = error.code != ErrorCode::AlreadyOpen;
+                    show_run_error(&window, &error.message, resettable);
+                }
+            }
+        },
+    );
+}
+
+fn show_run_error(window: &ConfiguratorWindow, message: &str, resettable: bool) {
+    window.set_run_error(message.into());
+    window.set_run_error_resettable(resettable);
+}
+
+fn show_plan(window: &ConfiguratorWindow, prepared: &Prepared) {
+    let base = crate::app::short_home(&prepared.base.to_string_lossy());
+    let note = if prepared.created {
+        format!("Тестовая база {base} создана сейчас.")
+    } else {
+        format!("Тестовая база {base}.")
+    };
+    window.set_plan_note(note.into());
+    window.set_plan_lines(model(
+        crate::test_run::plan_lines(&prepared.plan)
+            .into_iter()
+            .map(SharedString::from),
+    ));
+    window.set_plan_refused(prepared.plan.refused.clone().unwrap_or_default().into());
+    window.set_plan_open(true);
+}
+
 /// «Проверить»: файлы могли поменяться в редакторе, поэтому папка читается заново; открытый
 /// элемент остаётся, если он ещё есть.
 fn recheck(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, dir: &Path) {
     let report = CheckReport::run(dir);
+    show_python_warning(window, dir);
     if let Ok(config) = Configuration::load(dir) {
         window.set_editor_empty_text("В конфигурации нет объектов.".into());
         window.set_config_title(config.title.as_str().into());

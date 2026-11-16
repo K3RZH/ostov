@@ -1,5 +1,5 @@
 import { Theme } from "../theme.slint";
-import { Button } from "../components/button.slint";
+import { Button, ButtonKind } from "../components/button.slint";
 import { Chip } from "../components/chip.slint";
 
 // Панель инструментов первой очереди (документ «Состав конфигурации», §11.1, К-1…К-8).
@@ -9,6 +9,9 @@ export component Toolbar inherits Rectangle {
     in property <string> config-folder;
     callback check-requested();
     callback open-folder();
+    // План (К-6) и «Запустить» (К-16) ведут к одному окну плана: запуск идёт только через него.
+    in property <bool> run-busy;
+    callback run-requested();
 
     height: Theme.control-md + 2 * Theme.space-8;
     background: Theme.surface;
@@ -69,11 +72,22 @@ export component Toolbar inherits Rectangle {
         }
         VerticalLayout {
             alignment: center;
-            Button { text: "План миграции"; control-height: Theme.control-sm; enabled: false; }
+            Button {
+                text: "План миграции";
+                control-height: Theme.control-sm;
+                enabled: root.config-folder != "" && !root.run-busy;
+                clicked => { root.run-requested(); }
+            }
         }
         VerticalLayout {
             alignment: center;
-            Button { text: "Режим тестирования"; control-height: Theme.control-sm; enabled: false; }
+            Button {
+                text: root.run-busy ? "Готовим…" : "Запустить";
+                kind: ButtonKind.primary;
+                control-height: Theme.control-sm;
+                enabled: root.config-folder != "" && !root.run-busy;
+                clicked => { root.run-requested(); }
+            }
         }
         Rectangle { horizontal-stretch: 1; }
         VerticalLayout {

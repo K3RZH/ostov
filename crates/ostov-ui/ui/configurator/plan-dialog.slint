@@ -1,0 +1,112 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+
+// План перед запуском предпросмотра: что открытие сделает с тестовой базой (СТ-50, К-6).
+// Ядро отказало (изменение потеряло бы данные): причина и «Сбросить тестовую базу» вместо
+// «Запустить». Показывает и скрывает окно src/configurator_ui.rs.
+export component PlanDialog inherits Dialog {
+    in property <[string]> lines;
+    // Где база и создана ли она сейчас.
+    in property <string> note;
+    // Почему открыть нельзя; пусто, если можно.
+    in property <string> refused;
+    in property <string> python-warning;
+    callback launch();
+    callback reset();
+    callback cancelled();
+
+    enter-enabled: root.refused == "";
+    enter-pressed => { root.launch(); }
+    escape-pressed => { root.cancelled(); }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.space-24);
+        height: min(content.preferred-height, root.height - 2 * Theme.space-24);
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        // Щелчки по самому окну не уходят под него.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-12;
+            Text {
+                text: "План изменений тестовой базы";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Text {
+                text: root.note;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            if root.refused != "" : Rectangle {
+                border-radius: Shape.control-radius;
+                background: Theme.danger-soft;
+                height: refusal.preferred-height;
+                refusal := VerticalLayout {
+                    padding: Theme.space-12;
+                    spacing: Theme.space-4;
+                    Text {
+                        text: "Запустить нельзя: " + root.refused;
+                        font-size: Theme.font-body;
+                        color: Theme.danger;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Сброс удалит тестовую базу и создаст её заново по текущей конфигурации; данные в ней пропадут. Рабочие базы не затрагиваются.";
+                        font-size: Theme.font-caption;
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            if root.lines.length == 0 && root.refused == "" : Text {
+                text: "Изменений нет: таблицы базы уже совпадают с конфигурацией.";
+                font-size: Theme.font-body;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            for line in root.lines : HorizontalLayout {
+                spacing: Theme.space-8;
+                Text { text: "•"; font-size: Theme.font-body; color: Theme.accent-text; }
+                Text {
+                    text: line;
+                    font-size: Theme.font-body;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+            if root.python-warning != "" : Text {
+                text: root.python-warning;
+                font-size: Theme.font-caption;
+                color: Theme.accent-text;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                alignment: end;
+                Button { text: "Отмена"; clicked => { root.cancelled(); } }
+                if root.refused != "" : Button {
+                    text: "Сбросить тестовую базу";
+                    kind: ButtonKind.primary;
+                    clicked => { root.reset(); }
+                }
+                if root.refused == "" : Button {
+                    text: "Запустить";
+                    kind: ButtonKind.primary;
+                    clicked => { root.launch(); }
+                }
+            }
+        }
+    }
+}

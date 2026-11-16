@@ -1064,7 +1064,29 @@ pub fn wire_tabs(
     });
 }
 
-/// Запускает клиент с аргументами командной строки и ждёт, пока его закроют.
+/// Клиент из командной строки: разбор аргументов (без имени программы), запуск, код возврата.
+/// Им пользуются и `ostov-ui`, и конфигуратор, когда запускает предпросмотр собой.
+pub fn run_client(args: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    crate::launch::prefer_x11();
+    let launch = match crate::launch::parse(args) {
+        Ok(launch) => launch,
+        Err(error) => {
+            eprintln!("{error}\n{}", crate::launch::USAGE);
+            return ExitCode::FAILURE;
+        }
+    };
+    match run_with(launch) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Запускает клиент с разобранными аргументами и ждёт, пока его закроют.
 ///
 /// # Errors
 /// Текст для человека: окно не открылось или конфигурация из `--config` не прочиталась.

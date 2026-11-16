@@ -1,0 +1,35 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button } from "../components/button.slint";
+
+// Полоса под панелью инструментов: предупреждение (сборка без Python) или ошибка запуска
+// с действием («Сбросить тестовую базу»).
+export component Notice inherits Rectangle {
+    in property <string> text;
+    in property <bool> error;
+    in property <string> action-text;
+    callback action();
+
+    height: row.preferred-height;
+    background: root.error ? Theme.danger-soft : Theme.accent-soft;
+
+    row := HorizontalLayout {
+        padding-left: Theme.space-16;
+        padding-right: Theme.space-16;
+        padding-top: Theme.space-8;
+        padding-bottom: Theme.space-8;
+        spacing: Theme.space-12;
+        Text {
+            text: root.text;
+            font-size: Theme.font-body;
+            color: root.error ? Theme.danger : Theme.accent-text;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.action-text != "" : Button {
+            text: root.action-text;
+            control-height: Theme.control-sm;
+            clicked => { root.action(); }
+        }
+    }
+}

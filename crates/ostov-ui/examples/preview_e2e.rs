@@ -3,8 +3,9 @@
 //! заголовком справочника «Товары»: если новый заголовок виден в дереве навигации, значит
 //! встроенная «Склад» (`ostov_meta::demo`) не используется. Ещё проверяется метка
 //! «Предпросмотр, тестовая база», что список недавних баз не тронут и что битая папка даёт
-//! ошибку в окне. Файлы настроек стенд пишет в свою временную папку (`XDG_CONFIG_HOME`), как
-//! `start_e2e`.
+//! ошибку в окне. В конце цепочка конфигуратора: «Запустить», план, клиент отдельным процессом
+//! и мягкая остановка его повторным «Запустить». Файлы настроек стенд пишет в свою временную
+//! папку (`XDG_CONFIG_HOME`), как `start_e2e`.
 //! Запуск: `env -u WAYLAND_DISPLAY SLINT_BACKEND=winit-software cargo run -p ostov-ui --example preview_e2e [снимок.ppm]`.
 // Стенд, а не приложение: падение на unwrap и есть провал сценария.
 #![allow(clippy::unwrap_used)]
@@ -16,6 +17,10 @@ use std::time::{Duration, Instant};
 
 use ostov_ui::AppWindow;
 use slint::{ComponentHandle, Model};
+use support::{config_copy, replace_in};
+
+#[path = "support/config_copy.rs"]
+mod support;
 
 const CHILD_MARK: &str = "OSTOV_PREVIEW_E2E_CHILD";
 const NEW_TITLE: &str = "Товары предпросмотра";
@@ -35,36 +40,11 @@ fn run_in_temp_config() -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap().flatten() {
-        let target = to.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 /// Копия `config/` с новым заголовком справочника «Товары»; в пути кириллица и пробел.
 fn changed_config(work: &Path) -> PathBuf {
-    let dir = work.join("Конфигурация проба");
-    copy_dir(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config"),
-        &dir,
-    );
+    let dir = config_copy(&work.join("Конфигурация проба")).unwrap();
     let goods = dir.join("catalogs").join("goods.yaml");
-    let text = std::fs::read_to_string(&goods).unwrap();
-    assert!(
-        text.contains("title: Товары\n"),
-        "в goods.yaml нет заголовка"
-    );
-    std::fs::write(
-        &goods,
-        text.replacen("title: Товары\n", &format!("title: {NEW_TITLE}\n"), 1),
-    )
-    .unwrap();
+    replace_in(&goods, "title: Товары\n", &format!("title: {NEW_TITLE}\n")).unwrap();
     dir
 }
 
@@ -104,7 +84,55 @@ fn save_snapshot(w: &AppWindow, path: &str) {
     println!("снимок: {path}");
 }
 
+/// Цепочка конфигуратора на второй копии: «Запустить», план, клиент отдельным процессом (это
+/// же исполняемый файл в режиме клиента, как у конфигуратора), повторный «Запустить» мягко
+/// останавливает прошлый клиент. Возвращает (клиент открыл базу, остановлен без kill).
+fn configurator_chain(work: &Path) -> (bool, bool) {
+    let dir = config_copy(&work.join("Цепочка")).unwrap();
+    let configurator = ostov_ui::configurator_ui::create_window(Some(dir.clone())).unwrap();
+    configurator.show().unwrap();
+    let run = |w: &ostov_ui::ConfiguratorWindow| {
+        w.invoke_run_requested();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while w.get_run_busy() && Instant::now() < deadline {
+            slint::platform::update_timers_and_animations();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    run(&configurator);
+    assert!(
+        configurator.get_plan_open(),
+        "{}",
+        configurator.get_run_error()
+    );
+    configurator.invoke_plan_launch();
+    // Клиент открыл базу, когда план упирается в замок (ADR-024).
+    let held = |dir: &Path| {
+        matches!(ostov_ui::test_run::prepare(dir),
+            Err(ostov_ui::test_run::RunError::Engine(ref e)) if e.code == ostov_api::ErrorCode::AlreadyOpen)
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut opened = false;
+    while !opened && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        opened = held(&dir);
+    }
+    let started = Instant::now();
+    run(&configurator);
+    let soft = started.elapsed() < Duration::from_millis(2900)
+        && configurator.get_plan_open()
+        && configurator.get_run_error().is_empty();
+    (opened, soft)
+}
+
 fn main() {
+    // Сюда приходит и клиент, запущенный цепочкой конфигуратора: `--preview …`.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if ostov_ui::launch::is_client(&args) {
+        std::process::exit(i32::from(
+            ostov_ui::app::run_client(args) != std::process::ExitCode::SUCCESS,
+        ));
+    }
     let Some(work) = std::env::var_os(CHILD_MARK).map(PathBuf::from) else {
         run_in_temp_config();
     };
@@ -181,6 +209,16 @@ fn main() {
     check(
         "битая конфигурация: причина с файлом в окне",
         broken.get_start_error().contains("goods.yaml"),
+    );
+
+    let (opened, soft) = configurator_chain(&work);
+    check(
+        "«Запустить» → план → клиент предпросмотра открыл тестовую базу",
+        opened,
+    );
+    check(
+        "повторный «Запустить» закрыл прошлый клиент через stdin, без kill",
+        soft,
     );
 
     if failed > 0 {

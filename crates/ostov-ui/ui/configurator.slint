@@ -4,6 +4,8 @@ import { GridColumn, GridRow } from "components/erp-grid.slint";
 import { Toolbar } from "configurator/toolbar.slint";
 import { Editor, EditorSection, InfoRow } from "configurator/editor.slint";
 import { CheckPanel } from "configurator/check-panel.slint";
+import { Notice } from "configurator/notice.slint";
+import { PlanDialog } from "configurator/plan-dialog.slint";
 
 // Окно «Ostov Конфигуратор»: панель инструментов, дерево конфигурации, редактор элемента и
 // панель проверки. Только просмотр. Данные и обработчики задаёт src/configurator_ui.rs.
@@ -14,6 +16,20 @@ export component ConfiguratorWindow inherits Window {
     in property <string> config-folder;
 
     callback open-folder();
+
+    // «Запустить»: предупреждение о Python, ошибка запуска и окно плана (src/configurator_ui.rs).
+    in property <string> python-warning;
+    in property <string> run-error;
+    // Ошибку запуска можно исправить сбросом тестовой базы (база испорчена или не та).
+    in property <bool> run-error-resettable;
+    in property <bool> run-busy;
+    in-out property <bool> plan-open;
+    in property <[string]> plan-lines;
+    in property <string> plan-note;
+    in property <string> plan-refused;
+    callback run-requested();
+    callback plan-launch();
+    callback plan-reset();
 
     // Дерево конфигурации.
     in property <[NavRow]> tree-rows;
@@ -67,6 +83,15 @@ export component ConfiguratorWindow inherits Window {
             config-folder: root.config-folder;
             check-requested => { root.check-requested(); }
             open-folder => { root.open-folder(); }
+            run-busy: root.run-busy;
+            run-requested => { root.run-requested(); }
+        }
+        if root.python-warning != "" : Notice { text: root.python-warning; }
+        if root.run-error != "" : Notice {
+            text: root.run-error;
+            error: true;
+            action-text: root.run-error-resettable ? "Сбросить тестовую базу" : "";
+            action => { root.plan-reset(); }
         }
         HorizontalLayout {
             vertical-stretch: 1;
@@ -80,5 +105,19 @@ export component ConfiguratorWindow inherits Window {
             }
         }
         check-panel := CheckPanel { }
+    }
+
+    if root.plan-open : PlanDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        lines: root.plan-lines;
+        note: root.plan-note;
+        refused: root.plan-refused;
+        python-warning: root.python-warning;
+        launch => { root.plan-launch(); }
+        reset => { root.plan-reset(); }
+        cancelled => { root.plan-open = false; }
     }
 }

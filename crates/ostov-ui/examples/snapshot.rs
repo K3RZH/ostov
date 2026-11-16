@@ -7,9 +7,13 @@
 //! form-date-empty, form-error, form-issue, form-issue-narrow, form-picker, form-row,
 //! form-row-picker, form-busy, configurator, configurator-fields,
 //! configurator-parts, configurator-role, configurator-later, configurator-check,
-//! configurator-no-folder.
+//! configurator-no-folder, configurator-plan, configurator-plan-refused, configurator-run-error.
 
 use std::io::Write;
+
+#[path = "support/config_copy.rs"]
+mod support;
+use support::{config_copy, replace_in};
 
 use ostov_ui::app::{LoginKind, configure_login};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -336,6 +340,55 @@ fn issue_screen(
         _ => data.invoke_row_cancel(),
     }
     Ok(())
+}
+
+/// «Запустить» на копии `config/`: план с новым полем, отказ из-за смены типа поля или занятая
+/// база. Поток тот же, что у кнопки: проверка, тестовая база, план в фоне.
+fn configurator_run(
+    screen: &str,
+    dark: bool,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let work = std::env::temp_dir().join(format!("ostov-snapshot-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    let dir = config_copy(&work.join("config"))?;
+    let goods = dir.join("catalogs").join("goods.yaml");
+    // Первый запуск создаёт базу, правка после него даёт план.
+    ostov_ui::test_run::prepare(&dir).map_err(|error| format!("{error:?}"))?;
+    let mut held = None;
+    match screen {
+        "configurator-plan" => replace_in(
+            &goods,
+            "fields:\n",
+            "fields:\n  - name: brand\n    title: Марка\n    type: text\n",
+        )?,
+        "configurator-plan-refused" => replace_in(
+            &goods,
+            "title: Единица измерения\n    type: text",
+            "title: Единица измерения\n    type: int",
+        )?,
+        _ => {
+            let base = ostov_ui::test_run::base_path(&dir);
+            let config = ostov_ui::local_base::Config::load(&dir).map_err(|e| format!("{e:?}"))?;
+            held = Some(config.open(&base.to_string_lossy())?);
+        }
+    }
+    let window = ostov_ui::configurator_ui::create_window(Some(dir))?;
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1200.0, 780.0));
+    // Окно на экране до нажатия, как у человека: размер не должен меняться от окна плана.
+    window.show()?;
+    window.invoke_run_requested();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while window.get_run_busy() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+    }
+    let saved = save(&window, dark, path);
+    drop(held);
+    let _ = std::fs::remove_dir_all(&work);
+    saved
 }
 
 /// Папка `config/` репозитория: «Склад» в файлах.
@@ -708,6 +761,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save(&configurator_window(&[5], section, false)?, dark, &path)
         }
         "configurator-check" => save(&configurator_window(&[], None, true)?, dark, &path),
+        "configurator-plan" | "configurator-plan-refused" | "configurator-run-error" => {
+            configurator_run(&screen, dark, &path)
+        }
         "configurator-no-folder" => {
             let window = ostov_ui::configurator_ui::create_window(None)?;
             window

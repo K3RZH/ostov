@@ -191,9 +191,7 @@ impl Preview {
     /// Свой исполняемый файл не найден или процесс не запустился.
     pub fn spawn(config_dir: &Path, base: &Path) -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;
-        Self::start(
-            Command::new(exe).args(crate::launch::preview_args(config_dir, base)),
-        )
+        Self::start(Command::new(exe).args(crate::launch::preview_args(config_dir, base)))
     }
 
     fn start(command: &mut Command) -> std::io::Result<Self> {
@@ -212,8 +210,9 @@ impl Preview {
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => return,
+                Ok(Some(_)) => return,
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
             }
         }
         let _ = self.child.kill();
@@ -294,7 +293,9 @@ mod tests {
         let dir = config_copy("run-held");
         let base = prepare(&dir).expect("база готова").base;
         let config = Config::load(&dir).expect("папка читается");
-        let held = config.open(&base.to_string_lossy()).expect("база открывается");
+        let held = config
+            .open(&base.to_string_lossy())
+            .expect("база открывается");
 
         let Err(RunError::Engine(error)) = prepare(&dir) else {
             panic!("занятая база должна дать ошибку");
@@ -302,7 +303,9 @@ mod tests {
         assert_eq!(error.code, ErrorCode::AlreadyOpen);
         assert!(error.message.contains("Закройте"), "{}", error.message);
         // Сброс занятую базу не трогает.
-        assert!(matches!(reset(&dir), Err(RunError::Engine(ref e)) if e.code == ErrorCode::AlreadyOpen));
+        assert!(
+            matches!(reset(&dir), Err(RunError::Engine(ref e)) if e.code == ErrorCode::AlreadyOpen)
+        );
         assert!(base.is_file());
 
         drop(held);
@@ -313,7 +316,11 @@ mod tests {
     #[test]
     fn broken_config_is_reported_before_touching_the_base() {
         let dir = config_copy("run-broken");
-        replace_in(&dir.join("catalogs").join("goods.yaml"), "title: Товары", "title: [");
+        replace_in(
+            &dir.join("catalogs").join("goods.yaml"),
+            "title: Товары",
+            "title: [",
+        );
         assert!(matches!(prepare(&dir), Err(RunError::Config(ref errors)) if !errors.is_empty()));
         assert!(!base_path(&dir).exists());
         cleanup(&dir);
