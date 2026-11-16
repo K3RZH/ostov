@@ -3,5 +3,5 @@
 mod accumulation;
 mod report;
 
-pub use accumulation::{AccumulationRegister, Movement, MovementKind};
+pub use accumulation::{AccumulationRegister, Cost, Movement, MovementKind};
 pub use report::{Balance, MAX_REPORT_ROWS, Turnover};

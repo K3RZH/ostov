@@ -88,6 +88,26 @@ impl Decimal {
         Self::from_i128(units, scale)
     }
 
+    /// `self × mul ÷ div` в масштабе `self`, округление один раз в конце, половина от нуля.
+    /// Так считается себестоимость расхода: сумма остатка × количество ÷ остаток (СТ-К10).
+    pub fn checked_mul_div(self, mul: Self, div: Self) -> Result<Self, DecimalError> {
+        if div.is_zero() {
+            return Err(DecimalError::Overflow);
+        }
+        let num = i128::from(self.units)
+            .checked_mul(i128::from(mul.units))
+            .and_then(|n| n.checked_mul(pow10(div.scale)))
+            .ok_or(DecimalError::Overflow)?;
+        let den = i128::from(div.units) * pow10(mul.scale);
+        let (q, r) = (num / den, num % den);
+        let units = if r.abs() * 2 >= den.abs() {
+            q + num.signum() * den.signum()
+        } else {
+            q
+        };
+        Self::from_i128(units, self.scale)
+    }
+
     // В i128 не переполняется: |i64| * 10^18 < 2^127.
     fn at(self, scale: u8) -> i128 {
         i128::from(self.units) * pow10(scale - self.scale)
@@ -298,5 +318,28 @@ mod tests {
 
         let max = Decimal::new(i64::MAX, 0).unwrap();
         assert_eq!(max.checked_mul(dec("2"), 0), Err(DecimalError::Overflow));
+    }
+
+    #[test]
+    fn mul_div() {
+        let cost = |sum: &str, qty: &str, left: &str| {
+            dec(sum)
+                .checked_mul_div(dec(qty), dec(left))
+                .unwrap()
+                .to_string()
+        };
+        // Эталон СТ-К10: 1 200,00 ₽ за 20 кг, расход 5 кг.
+        assert_eq!(cost("1200.00", "5.000", "20.000"), "300.00");
+        // 100 ₽ за 3 шт: 33,333… и 66,666… — округление один раз, на сумме.
+        assert_eq!(cost("100.00", "1.000", "3.000"), "33.33");
+        assert_eq!(cost("100.00", "2.000", "3.000"), "66.67");
+        assert_eq!(cost("-100.00", "2.000", "3.000"), "-66.67");
+        assert_eq!(cost("0.05", "1", "2"), "0.03");
+        // Масштабы разные: количество в целых, остаток с дробью.
+        assert_eq!(cost("10.00", "1", "4.000"), "2.50");
+        assert_eq!(
+            dec("1.00").checked_mul_div(dec("1"), dec("0")),
+            Err(DecimalError::Overflow)
+        );
     }
 }

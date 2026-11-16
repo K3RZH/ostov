@@ -27,5 +27,5 @@ pub use posting::{
     unpost, unpost_from,
 };
 pub use query::{DbReader, QueryRows, Reader, Trace, TraceEvent};
-pub use register::{AccumulationRegister, Movement, MovementKind};
+pub use register::{AccumulationRegister, Cost, Movement, MovementKind};
 pub use tx::in_transaction;
