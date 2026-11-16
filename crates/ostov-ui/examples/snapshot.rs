@@ -6,7 +6,8 @@
 //! form-catalog, form-document, form-catalog-narrow, form-document-narrow, form-new-errors,
 //! form-date-empty, form-error, form-issue, form-issue-narrow, form-picker, form-row,
 //! form-row-picker, form-busy, configurator, configurator-fields,
-//! configurator-parts, configurator-role, configurator-later, configurator-check.
+//! configurator-parts, configurator-role, configurator-later, configurator-check,
+//! configurator-no-folder.
 
 use std::io::Write;
 
@@ -707,6 +708,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save(&configurator_window(&[5], section, false)?, dark, &path)
         }
         "configurator-check" => save(&configurator_window(&[], None, true)?, dark, &path),
+        "configurator-no-folder" => {
+            let window = ostov_ui::configurator_ui::create_window(None)?;
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(1200.0, 780.0));
+            save(&window, dark, &path)
+        }
         _ => save(&ostov_ui::ShowcaseWindow::new()?, dark, &path),
     }
 }

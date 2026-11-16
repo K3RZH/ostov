@@ -13,12 +13,15 @@ export component ConfiguratorWindow inherits Window {
     // Открытая папка конфигурации; пусто, пока папку не выбрали.
     in property <string> config-folder;
 
+    callback open-folder();
+
     // Дерево конфигурации.
     in property <[NavRow]> tree-rows;
     callback tree-clicked(int);
 
     // Редактор выбранного элемента.
     in property <bool> has-element <=> editor.has-element;
+    in property <string> editor-empty-text <=> editor.empty-text;
     in property <string> element-title <=> editor.element-title;
     in property <string> element-name <=> editor.element-name;
     in property <string> element-kind <=> editor.element-kind;
@@ -63,6 +66,7 @@ export component ConfiguratorWindow inherits Window {
             config-version: root.config-version;
             config-folder: root.config-folder;
             check-requested => { root.check-requested(); }
+            open-folder => { root.open-folder(); }
         }
         HorizontalLayout {
             vertical-stretch: 1;

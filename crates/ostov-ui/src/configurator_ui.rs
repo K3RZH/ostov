@@ -25,14 +25,46 @@ pub fn create_window(folder: Option<PathBuf>) -> Result<ConfiguratorWindow, slin
     let opened: Folder = Rc::default();
     connect_browser(&window, &browser);
     connect_check(&window, &browser, &opened);
+    connect_folder(&window, &browser, &opened);
     match folder {
         Some(dir) => open_folder(&window, &browser, &opened, dir),
         None => {
+            window.set_editor_empty_text(NO_FOLDER_TEXT.into());
             show_browser(&window, &browser.borrow());
             show_check(&window, &CheckReport::NotRun);
+            window.set_check_empty_text("Папка не открыта: проверять пока нечего.".into());
         }
     }
     Ok(window)
+}
+
+const NO_FOLDER_TEXT: &str = "Откройте папку конфигурации кнопкой «Открыть папку» на панели сверху. \
+                              Конфигурацию правят в редакторе кода, здесь её смотрят, проверяют \
+                              и запускают.";
+
+/// «Открыть папку»: системное окно выбора; выбранная папка открывается и запоминается.
+fn connect_folder(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, opened: &Folder) {
+    window.on_open_folder({
+        let (weak, browser, opened) = (window.as_weak(), browser.clone(), opened.clone());
+        move || {
+            let (weak, browser, opened) = (weak.clone(), browser.clone(), opened.clone());
+            let start = opened.borrow().clone();
+            // Ждём ответ окна выбора, не блокируя интерфейс.
+            let _ = slint::spawn_local(async move {
+                let mut dialog = rfd::AsyncFileDialog::new().set_title("Папка конфигурации");
+                if let Some(start) = start {
+                    dialog = dialog.set_directory(start);
+                }
+                let Some(folder) = dialog.pick_folder().await else {
+                    return;
+                };
+                let Some(window) = weak.upgrade() else { return };
+                let dir = folder.path().to_path_buf();
+                crate::settings::remember_config_folder(&dir);
+                open_folder(&window, &browser, &opened, dir);
+            });
+        }
+    });
 }
 
 /// Читает папку: дерево, название и версия из манифеста и сразу проверка. Если конфигурация
@@ -43,10 +75,17 @@ fn open_folder(
     opened: &Folder,
     dir: PathBuf,
 ) {
-    let config = Configuration::load(&dir).unwrap_or_else(|_| Configuration::empty());
+    let (config, empty_text) = match Configuration::load(&dir) {
+        Ok(config) => (config, "В конфигурации нет объектов."),
+        Err(_) => (
+            Configuration::empty(),
+            "Конфигурация не прочиталась: ошибки с файлом и строкой в панели «Проверка» внизу.",
+        ),
+    };
+    window.set_editor_empty_text(empty_text.into());
     window.set_config_title(config.title.as_str().into());
     window.set_config_version(config.version.as_str().into());
-    window.set_config_folder(dir.display().to_string().into());
+    window.set_config_folder(crate::app::short_home(&dir.to_string_lossy()).into());
     *browser.borrow_mut() = Browser::new(config);
     show_browser(window, &browser.borrow());
     show_check(window, &CheckReport::run(&dir));
@@ -58,6 +97,7 @@ fn open_folder(
 fn recheck(window: &ConfiguratorWindow, browser: &Rc<RefCell<Browser>>, dir: &Path) {
     let report = CheckReport::run(dir);
     if let Ok(config) = Configuration::load(dir) {
+        window.set_editor_empty_text("В конфигурации нет объектов.".into());
         window.set_config_title(config.title.as_str().into());
         window.set_config_version(config.version.as_str().into());
         browser.borrow_mut().reload(config);

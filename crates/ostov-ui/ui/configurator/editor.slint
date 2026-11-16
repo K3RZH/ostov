@@ -38,6 +38,8 @@ component SectionItem inherits Rectangle {
 // Только просмотр: «Применить» и «Отменить» из макета появятся вместе с записью (вопрос В-1).
 export component Editor inherits Rectangle {
     in property <bool> has-element;
+    // Что сказать, когда показывать нечего: папка не открыта, не прочиталась или пуста.
+    in property <string> empty-text: "Выберите объект в дереве слева.";
     in property <string> element-title;
     in property <string> element-name;
     in property <string> element-kind;
@@ -63,7 +65,7 @@ export component Editor inherits Rectangle {
         spacing: Theme.space-12;
 
         if !root.has-element : EmptyState {
-            text: "Выберите объект в дереве слева.";
+            text: root.empty-text;
         }
         if root.has-element : HorizontalLayout {
             spacing: Theme.space-12;
