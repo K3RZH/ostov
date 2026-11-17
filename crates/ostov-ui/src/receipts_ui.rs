@@ -1513,12 +1513,15 @@ fn forget_closed(state: &mut State) {
     docs.retain(|key, _| tab_docs.values().any(|open| open.contains(key)));
 }
 
-/// Вкладка показывает, изменён ли её документ: вкладка могла приехать из другого окна.
+/// Вкладка показывает, изменён ли её документ: вкладка могла приехать из другого окна. Чужие
+/// документы (формы объектов, `form_ui.rs`) здесь неизвестны: точку на их вкладках ставит их экран.
 fn mark_modified(state: &State, tabs: &mut dyn DocTabs) {
     for key in tabs.documents() {
-        let modified = state.docs.get(&key).is_some_and(DocState::is_modified);
+        let Some(doc) = state.docs.get(&key) else {
+            continue;
+        };
         if let Some(tab) = tabs.tab_of_doc(&key) {
-            tabs.set_tab_modified(tab, modified);
+            tabs.set_tab_modified(tab, doc.is_modified());
         }
     }
 }

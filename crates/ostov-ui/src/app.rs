@@ -12,12 +12,19 @@ use crate::engine::{
     Engine, EngineResult, Meta, NewAdmin, NewUser, RoleInfo, SessionInfo, SystemRights,
     call_in_background,
 };
+use crate::form_ui::FormUi;
+use crate::launch::Launch;
 use crate::list_ui::ListUi;
+use crate::local_base::Config;
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
+use crate::user_fields::UserFieldsUi;
 use crate::users::Directory;
-use crate::{AppWindow, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
+use crate::{
+    AppWindow, HomeItem, HomeSection, NavRow, RecentDb, Shape, TabItem, Theme, UserFieldsData,
+    UserRow,
+};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
@@ -122,6 +129,11 @@ pub fn tab_items(tabs: &[crate::shell::Tab]) -> Vec<TabItem> {
             modified: tab.modified,
             view: tab.view.into(),
             object: tab.object.as_str().into(),
+            doc_id: tab
+                .doc
+                .as_ref()
+                .map_or_else(String::new, |doc| doc.id.to_string())
+                .into(),
             preview: tab.preview,
         })
         .collect()
@@ -165,9 +177,34 @@ pub fn nav_items(rows: Vec<crate::shell::NavRowData>) -> Vec<NavRow> {
         .collect()
 }
 
+/// Карточки разделов для экрана «Главная».
+pub fn set_home(window: &AppWindow, shell: &Shell) {
+    let sections: Vec<HomeSection> = shell
+        .home_sections()
+        .into_iter()
+        .map(|section| HomeSection {
+            title: section.title.into(),
+            icon: section.icon.into(),
+            items: ModelRc::new(VecModel::from(
+                section
+                    .items
+                    .into_iter()
+                    .map(|item| HomeItem {
+                        id: i32::try_from(item.id).unwrap_or_default(),
+                        title: item.title.into(),
+                        icon: item.icon.into(),
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    window.set_home_sections(ModelRc::new(VecModel::from(sections)));
+}
+
 pub fn refresh(window: &AppWindow, shell: &Shell) {
     let tabs = tab_items(shell.tabs());
     window.set_nav(ModelRc::new(VecModel::from(nav_items(shell.nav_rows()))));
+    set_home(window, shell);
     set_tabs(window, tabs);
     window.set_active_tab(i32::try_from(shell.active_tab()).unwrap_or_default());
 }
@@ -211,7 +248,9 @@ fn open_main(window: &AppWindow, session: &Session) -> Shell {
     window.set_base_name(base.trim_end_matches(".sqlite").into());
     window.set_database_name(base.into());
     window.set_mode_text(
-        if session.server {
+        if window.get_preview() {
+            "Предпросмотр, тестовая база"
+        } else if session.server {
             "Режим: сервер"
         } else {
             "Режим: локально"
@@ -245,7 +284,7 @@ pub fn new_database(server: bool, name: &str, folder: &str, address: &str) -> Re
 }
 
 /// Заменяет домашнюю папку на `~`: так путь короче и привычнее.
-fn short_home(path: &str) -> String {
+pub(crate) fn short_home(path: &str) -> String {
     // Сравниваем с разделителем: иначе при HOME=/home/ann путь /home/ann2/… стал бы «~2/…».
     let home = std::env::var("HOME").unwrap_or_default();
     let home = home.trim_end_matches('/');
@@ -275,8 +314,12 @@ pub fn existing_database(server: bool, file: &str, address: &str, name: &str) ->
     }
 }
 
-/// Ставит базу первой в списке недавних и сохраняет список.
+/// Ставит базу первой в списке недавних и сохраняет список. Тестовая база предпросмотра
+/// в список не попадает: она живёт в папке конфигурации, а не среди баз пользователя.
 fn add_recent(app: &AppWindow, db: RecentDb) {
+    if app.get_preview() {
+        return;
+    }
     let rows = crate::recent::push_front(app.get_recent().iter(), db);
     if let Err(message) = crate::recent::save(&rows) {
         app.set_start_error(message.into());
@@ -426,6 +469,8 @@ fn apply_settings(window: &AppWindow, settings: Settings) {
         .global::<Theme>()
         .set_font_scale(settings.font_scale());
     window.global::<Theme>().set_row_height(settings.row_px());
+    // Фон X11-окна при растягивании: цвет темы, иначе новая полоса мелькает чёрной.
+    crate::x11_background::set_theme_color(window.window(), window.global::<Theme>().get_bg());
     window.set_dark_theme(settings.dark);
     window.set_radius_mode(settings.radius);
     window.set_density_mode(settings.density);
@@ -480,6 +525,7 @@ struct Screens {
     users: UsersUi,
     admin: AdminUi,
     lists: ListUi,
+    forms: FormUi,
 }
 
 /// Открывает главную страницу выбранной базы и подключает к ней экраны.
@@ -491,10 +537,12 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
             screens.receipts.attach(engine.clone());
             let objects = session.meta.as_ref().map_or(&[][..], |meta| &meta.objects);
             screens.lists.start(engine.clone(), objects);
+            screens.forms.start(engine.clone(), objects);
         }
         None => {
             screens.receipts.show_error("База не открыта.");
             screens.lists.clear();
+            screens.forms.clear();
         }
     }
     let roles = session
@@ -506,6 +554,13 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
         .map(|role| role.title.as_str().into())
         .collect();
     app.set_roles(ModelRc::new(VecModel::from(titles)));
+    // «Свойства» у пользователя есть, только если конфигурация объявила свойства (ADR-043).
+    app.global::<UserFieldsData>().set_available(
+        session
+            .meta
+            .as_ref()
+            .is_some_and(|meta| !meta.user_fields.is_empty()),
+    );
     // В базе без пользователей первым нужен администратор: предлагаем его роль сразу.
     let default_role = if session.logged_in {
         None
@@ -528,14 +583,20 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
 }
 
 /// Открывает локальную базу в фоне и спрашивает ядро, нужен ли вход (`hello`).
-fn open_local(app: &AppWindow, db: RecentDb, session: &Rc<RefCell<Session>>, screens: &Screens) {
+fn open_local(
+    app: &AppWindow,
+    db: RecentDb,
+    session: &Rc<RefCell<Session>>,
+    screens: &Screens,
+    config: &Arc<Config>,
+) {
     app.set_start_busy(true);
     let path = db.path.to_string();
     let weak = app.as_weak();
-    let (session, screens) = (session.clone(), screens.clone());
+    let (session, screens, config) = (session.clone(), screens.clone(), config.clone());
     call_in_background(
         move || {
-            let engine = crate::local_base::open(&path)?;
+            let engine = config.open(&path)?;
             let hello = engine.hello()?;
             // Без входа метаданные можно взять сразу; со входом их даст ядро после login.
             let meta = if hello.login_required {
@@ -719,7 +780,7 @@ fn submit_login(app: &AppWindow, session: &Rc<RefCell<Session>>, screens: &Scree
 }
 
 /// Создаёт файл базы в фоне; в список база попадает, только если ядро её создало.
-fn create_local(app: &AppWindow, db: RecentDb) {
+fn create_local(app: &AppWindow, db: RecentDb, config: Arc<Config>) {
     let file_password = app
         .get_new_protect_password()
         .then(|| app.get_new_password().to_string());
@@ -734,7 +795,9 @@ fn create_local(app: &AppWindow, db: RecentDb) {
     call_in_background(
         // Базу сразу закрываем: открывать её будет «Открыть», как любую другую.
         move || {
-            crate::local_base::create(&path, file_password.as_deref(), admin.as_ref()).map(|_| ())
+            config
+                .create(&path, file_password.as_deref(), admin.as_ref())
+                .map(|_| ())
         },
         move |result| {
             let Some(app) = weak.upgrade() else { return };
@@ -767,13 +830,13 @@ fn reset_create(app: &AppWindow) {
 }
 
 /// Проверяет добавляемый файл ядром (`check_local`: база Ostov нужной конфигурации) без записи в него.
-fn add_local(app: &AppWindow, db: RecentDb) {
+fn add_local(app: &AppWindow, db: RecentDb, config: Arc<Config>) {
     let path = db.path.to_string();
     app.set_add_error("".into());
     app.set_add_busy(true);
     let weak = app.as_weak();
     call_in_background(
-        move || crate::local_base::check(&path).map(|_| ()),
+        move || config.check(&path).map(|_| ()),
         move |result| {
             let Some(app) = weak.upgrade() else { return };
             app.set_add_busy(false);
@@ -992,8 +1055,15 @@ pub fn wire_tabs(
     });
     app.on_tab_closed({
         let (app, shell, receipts) = (app.as_weak(), shell.clone(), receipts.clone());
+        let windows = windows.clone();
         move |tab| {
             let Some(app) = app.upgrade() else { return };
+            // Форма с несохранёнными правками сама спросит, закрывать ли.
+            if index(tab)
+                .is_some_and(|tab| windows.close_vetoed(crate::workspace::WindowRef::Main, tab))
+            {
+                return;
+            }
             let mut shell = shell.borrow_mut();
             receipts.before(&app, &mut shell);
             if let Some(tab) = index(tab) {
@@ -1005,27 +1075,95 @@ pub fn wire_tabs(
     });
 }
 
-pub fn run() -> Result<(), slint::PlatformError> {
+/// Клиент из командной строки: разбор аргументов (без имени программы), запуск, код возврата.
+/// Им пользуются и `ostov-ui`, и конфигуратор, когда запускает предпросмотр собой.
+pub fn run_client(args: impl IntoIterator<Item = std::ffi::OsString>) -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    crate::launch::prefer_x11();
+    let launch = match crate::launch::parse(args) {
+        Ok(launch) => launch,
+        Err(error) => {
+            eprintln!("{error}\n{}", crate::launch::USAGE);
+            return ExitCode::FAILURE;
+        }
+    };
+    match run_with(launch) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Запускает клиент с разобранными аргументами и ждёт, пока его закроют.
+///
+/// # Errors
+/// Текст для человека: окно не открылось или конфигурация из `--config` не прочиталась.
+pub fn run_with(launch: Launch) -> Result<(), String> {
+    let text = |error: slint::PlatformError| format!("не удалось открыть окно: {error}");
+    // Идентификатор приложения: по нему оболочка связывает окно с ярлыком ostov.desktop.
+    slint::BackendSelector::new().select().map_err(text)?;
+    slint::set_xdg_app_id("ostov").map_err(text)?;
+    let app = start(&launch)?;
+    if launch.preview {
+        crate::launch::quit_when_stdin_closes();
+    }
+    app.show().map_err(text)?;
+    slint::run_event_loop_until_quit().map_err(text)
+}
+
+/// Конфигурация клиента: из папки `--config` или встроенная.
+fn load_config(dir: Option<&std::path::Path>) -> Result<Config, String> {
+    let loaded = match dir {
+        Some(dir) => Config::load(dir),
+        None => Config::embedded(),
+    };
+    loaded.map_err(|errors| {
+        let first = errors.first().map(ToString::to_string).unwrap_or_default();
+        format!(
+            "Конфигурация не прочиталась, ошибок: {}. Первая: {first}. Проверьте её в конфигураторе.",
+            errors.len()
+        )
+    })
+}
+
+/// Окно клиента со всеми обработчиками; без цикла событий, поэтому подходит и стендам.
+/// С `--base` база открывается сразу, в предпросмотре вместо выбора базы ожидание или ошибка.
+///
+/// # Errors
+/// Окно не создалось или конфигурация не прочиталась (в предпросмотре ошибка видна в окне).
+pub fn start(launch: &Launch) -> Result<AppWindow, String> {
     use slint::Model;
 
-    // Идентификатор приложения: по нему оболочка связывает окно с ярлыком ostov.desktop.
-    slint::BackendSelector::new().select()?;
-    slint::set_xdg_app_id("ostov")?;
-
-    let app = AppWindow::new()?;
+    let app = AppWindow::new().map_err(|error| format!("не удалось открыть окно: {error}"))?;
+    crate::shortcuts::install(app.window());
     apply_settings(&app, Settings::load());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
-    app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
-    wire_forget(&app);
-    if let Some((title, version)) = crate::local_base::config_title() {
-        app.set_config_name(title.into());
-        app.set_config_info(format!("Конфигурация · версия {version}").into());
+    app.set_preview(launch.preview);
+    // Закрытие окна пользователем завершает приложение.
+    app.window().on_close_requested(quit_on_close);
+    let config = match load_config(launch.config.as_deref()) {
+        Ok(config) => Arc::new(config),
+        Err(message) if launch.preview => {
+            app.set_start_error(message.into());
+            return Ok(app);
+        }
+        Err(message) => return Err(message),
+    };
+    if !launch.preview {
+        app.set_recent(ModelRc::new(VecModel::from(crate::recent::load())));
     }
+    wire_forget(&app);
+    app.set_config_name(config.title.as_str().into());
+    app.set_config_info(format!("Конфигурация · версия {}", config.version).into());
     let shell = Rc::new(RefCell::new(Shell::empty()));
     let receipts = crate::receipts_ui::setup(&app, shell.clone());
     let windows = crate::windows::Windows::new(&receipts);
     let session = Rc::new(RefCell::new(Session::default()));
     let directory = Rc::new(RefCell::new(Directory::default()));
+    let forms = FormUi::new(app.as_weak(), windows.clone(), shell.clone());
     let screens = Screens {
         shell: shell.clone(),
         receipts: receipts.clone(),
@@ -1034,20 +1172,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
             windows: windows.clone(),
             directory: directory.clone(),
             session: session.clone(),
+            fields: UserFieldsUi::new({
+                let main = app.as_weak();
+                move |login| {
+                    if let Some(main) = main.upgrade() {
+                        show_status(
+                            &main,
+                            &format!("Свойства пользователя «{login}» сохранены."),
+                        );
+                    }
+                }
+            }),
         },
         admin: AdminUi::new(app.as_weak(), windows.clone(), {
             let session = session.clone();
             move || session.borrow().engine.clone()
         }),
-        lists: ListUi::new(app.as_weak(), windows.clone()),
+        lists: ListUi::new(app.as_weak(), windows.clone(), forms.clone()),
+        forms,
     };
-
-    // Закрытие окна пользователем завершает приложение.
-    app.window().on_close_requested(quit_on_close);
 
     app.on_open({
         let app = app.as_weak();
-        let (session, screens) = (session.clone(), screens.clone());
+        let (session, screens, config) = (session.clone(), screens.clone(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let recent = app.get_recent();
@@ -1056,7 +1203,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             };
             app.set_start_error("".into());
             if !db.server {
-                open_local(&app, db, &session, &screens);
+                open_local(&app, db, &session, &screens, &config);
                 return;
             }
             open_remote(&app, db, &session);
@@ -1085,11 +1232,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let to_start = {
         let app = app.as_weak();
         let (session, receipts, admin) = (session.clone(), receipts.clone(), screens.admin.clone());
-        let lists = screens.lists.clone();
+        let (lists, forms) = (screens.lists.clone(), screens.forms.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
-            // Списки держат движок: забываем их до закрытия базы, иначе файл остался бы занят.
+            // Списки и формы держат движок: забываем их до закрытия базы, иначе файл остался бы
+            // занят.
             lists.clear();
+            forms.clear();
             // Закрываем базу: иначе файл остаётся занят и его не открыть снова.
             release(std::mem::take(&mut *session.borrow_mut()));
             receipts.detach();
@@ -1097,6 +1246,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
             app.set_password("".into());
             app.set_repeat("".into());
             app.set_error("".into());
+            // Предпросмотру выбирать другую базу нельзя: закрыть базу значит закрыть окно.
+            if app.get_preview() {
+                let _ = slint::quit_event_loop();
+                return;
+            }
             show_page(&app, PAGE_START);
         }
     };
@@ -1154,6 +1308,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     screens.users.clear();
                     screens.admin.clear();
                     screens.lists.clear();
+                    screens.forms.clear();
                     configure_login(&app, kind, &name, &key);
                     prefill_login(&app, &key);
                     show_page(&app, PAGE_LOGIN);
@@ -1163,7 +1318,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_create_confirmed({
-        let app = app.as_weak();
+        let (app, config) = (app.as_weak(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let db = new_database(
@@ -1176,7 +1331,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 create_remote_base(&app, db);
                 return;
             }
-            create_local(&app, db);
+            create_local(&app, db, config.clone());
         }
     });
 
@@ -1286,7 +1441,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     });
 
     app.on_add_confirmed({
-        let app = app.as_weak();
+        let (app, config) = (app.as_weak(), config.clone());
         move || {
             let Some(app) = app.upgrade() else { return };
             let db = existing_database(
@@ -1299,21 +1454,26 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 add_remote(&app, db);
                 return;
             }
-            add_local(&app, db);
+            add_local(&app, db, config.clone());
         }
     });
 
     wire_users(&app, &screens.users);
     screens.admin.attach_window(&app);
     screens.lists.attach_window(&app);
+    screens.forms.attach_window(&app);
     windows.on_host_created({
         let (main, users, admin) = (app.as_weak(), screens.users.clone(), screens.admin.clone());
-        let lists = screens.lists.clone();
+        let (lists, forms) = (screens.lists.clone(), screens.forms.clone());
         move |window| {
             lists.attach_window(window);
+            forms.attach_window(window);
             if let Some(main) = main.upgrade() {
                 refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
+                window
+                    .global::<UserFieldsData>()
+                    .set_available(main.global::<UserFieldsData>().get_available());
                 wire_users(window, &users);
                 admin.attach_window(window);
             }
@@ -1322,8 +1482,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     wire_tabs(&app, &shell, &receipts, &windows);
 
-    app.show()?;
-    slint::run_event_loop_until_quit()
+    if let Some(base) = &launch.base {
+        let path = base.to_string_lossy();
+        // В предпросмотре база называется по конфигурации: имя файла у неё всегда одно.
+        let name = match base.file_name() {
+            Some(file) if !launch.preview => file.to_string_lossy().into_owned(),
+            _ => config.title.clone(),
+        };
+        let db = RecentDb {
+            name: name.into(),
+            path: path.as_ref().into(),
+            when: "".into(),
+            server: false,
+            protection: 0,
+        };
+        open_local(&app, db, &session, &screens, &config);
+    }
+    Ok(app)
 }
 
 /// «Пользователи и роли» через ядро: список, добавление, включение и отключение. Справочник
@@ -1334,6 +1509,8 @@ struct UsersUi {
     windows: crate::windows::Windows,
     directory: Rc<RefCell<Directory>>,
     session: Rc<RefCell<Session>>,
+    /// Окно «Свойства пользователя» (ADR-043).
+    fields: UserFieldsUi,
 }
 
 impl UsersUi {
@@ -1347,6 +1524,7 @@ impl UsersUi {
 
     /// Забывает пользователей прошлой базы.
     fn clear(&self) {
+        self.fields.close();
         *self.directory.borrow_mut() = Directory::default();
         self.show_all();
     }
@@ -1415,6 +1593,24 @@ impl UsersUi {
 
 /// Подключает «Пользователи и роли» к окну `window`.
 fn wire_users(window: &AppWindow, users: &UsersUi) {
+    users.fields.attach(window);
+    window.global::<UserFieldsData>().on_open({
+        let (window, users) = (window.as_weak(), users.clone());
+        move |row| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some(login) =
+                index(row).and_then(|i| users.directory.borrow().get(i).map(|u| u.login.clone()))
+            else {
+                return;
+            };
+            let session = users.session.borrow();
+            if let (Some(engine), Some(meta)) = (session.engine.clone(), session.meta.as_ref()) {
+                users.fields.open(&window, engine, &login, meta);
+            }
+        }
+    });
     window.on_user_toggle({
         let (window, users) = (window.as_weak(), users.clone());
         move |row| {

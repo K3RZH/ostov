@@ -1,6 +1,6 @@
-//! Локальная база (режим 1) через ядро: создать файл и открыть файл. Конфигурация пока одна,
-//! встроенная «Склад» (`ostov_meta::demo`, та же папка `config/`, которую проверяет
-//! `ostov check`); выбор папки конфигурации появится вместе с конфигуратором.
+//! Локальная база (режим 1) через ядро: создать файл и открыть файл с выбранной конфигурацией.
+//! Конфигурацию передаёт клиент: папка из `--config` (предпросмотр из конфигуратора) или
+//! встроенная «Склад», пока в клиенте нет выбора папки конфигурации.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,45 +8,100 @@ use std::sync::Arc;
 use ostov_api::{BaseInfo, Connector, Engine, EngineError, EngineResult, ErrorCode, NewAdmin};
 use ostov_core::{LocalConnector, PasswordPolicy};
 
-/// Название и версия встроенной конфигурации для стартовой страницы.
-pub fn config_title() -> Option<(String, String)> {
-    ostov_meta::demo()
-        .ok()
-        .map(|config| (config.title, config.version))
+/// Конфигурация, с которой клиент открывает и создаёт локальные базы.
+#[derive(Clone)]
+pub struct Config {
+    connector: LocalConnector,
+    /// Имя из манифеста: по нему база помнит свою конфигурацию.
+    name: String,
+    pub title: String,
+    pub version: String,
 }
 
-fn connector() -> EngineResult<LocalConnector> {
-    let config = ostov_meta::demo().map_err(|errors| {
-        let first = errors.first().map(ToString::to_string).unwrap_or_default();
-        EngineError::new(
-            ErrorCode::Incompatible,
-            format!("Встроенная конфигурация не прошла проверку: {first}"),
-        )
-    })?;
-    // Один компьютер: любой пароль, в том числе пустой (ADR-033).
-    Ok(LocalConnector::new(config).with_password_policy(PasswordPolicy::LOCAL))
+impl Config {
+    /// Конфигурация из папки.
+    ///
+    /// # Errors
+    /// Ошибки разбора и проверки файлов с файлом и строкой.
+    pub fn load(dir: &Path) -> Result<Self, Vec<ostov_meta::Error>> {
+        let model = ostov_meta::load(dir)?;
+        Ok(Self {
+            name: model.name.clone(),
+            title: model.title.clone(),
+            version: model.version.clone(),
+            // Один компьютер: любой пароль, в том числе пустой (ADR-033).
+            connector: LocalConnector::new(model).with_password_policy(PasswordPolicy::LOCAL),
+        })
+    }
+
+    /// Встроенная «Склад» для клиента без `--config`.
+    ///
+    /// # Errors
+    /// Только если встроенные файлы испорчены (их проверяет тест `ostov-meta`).
+    pub fn embedded() -> Result<Self, Vec<ostov_meta::Error>> {
+        let model = ostov_meta::demo()?;
+        Ok(Self {
+            name: model.name.clone(),
+            title: model.title.clone(),
+            version: model.version.clone(),
+            connector: LocalConnector::new(model).with_password_policy(PasswordPolicy::LOCAL),
+        })
+    }
+
+    /// Что за база в этом файле, не открывая и не записывая в него (для «Добавить существующую»).
+    /// База другой конфигурации не подходит.
+    ///
+    /// # Errors
+    /// Ошибки ядра как есть: файла нет (`NotFound`), это не база Ostov (`Incompatible`), база другой
+    /// конфигурации (`Incompatible` с её названием).
+    pub fn check(&self, path: &str) -> EngineResult<BaseInfo> {
+        let info = self.connector.check_local(&expand_home(path))?;
+        ensure_same_config(&info, &self.name, &self.title)?;
+        Ok(info)
+    }
+
+    /// Открывает файл базы. Если конфигурация изменилась, ядро достраивает таблицы (СТ-50).
+    ///
+    /// # Errors
+    /// Ошибки ядра как есть: файла нет, это не база Ostov, база уже открыта другой программой,
+    /// изменение конфигурации потеряло бы данные.
+    pub fn open(&self, path: &str) -> EngineResult<Arc<dyn Engine>> {
+        self.connector.open_local(&expand_home(path), None)
+    }
+
+    /// Что изменится в базе при открытии с этой конфигурацией; база не меняется.
+    ///
+    /// # Errors
+    /// Ошибки ядра как есть; база открыта другой программой: `AlreadyOpen`.
+    pub fn plan(&self, path: &str) -> EngineResult<ostov_api::SchemaPlan> {
+        self.connector.plan_local(&expand_home(path))
+    }
+
+    /// Создаёт файл базы; папку создаёт, если её нет. С `admin` в базе сразу появляется
+    /// администратор, и дальше она спрашивает вход.
+    ///
+    /// # Errors
+    /// Файл уже есть, папку не создать, пароль на файл (ядро его пока не поддерживает, вопрос В-2).
+    pub fn create(
+        &self,
+        path: &str,
+        file_password: Option<&str>,
+        admin: Option<&NewAdmin>,
+    ) -> EngineResult<Arc<dyn Engine>> {
+        let path = expand_home(path);
+        if let Some(dir) = Path::new(&path).parent() {
+            std::fs::create_dir_all(dir).map_err(|error| {
+                EngineError::new(
+                    ErrorCode::Unavailable,
+                    format!("Не удалось создать папку базы: {error}."),
+                )
+            })?;
+        }
+        self.connector.create_local(&path, file_password, admin)
+    }
 }
 
-/// Что за база в этом файле, не открывая и не записывая в него (для «Добавить существующую»).
-/// База другой конфигурации не подходит: программа сейчас работает только со встроенной «Склад».
-///
-/// # Errors
-/// Ошибки ядра как есть: файла нет (`NotFound`), это не база Ostov (`Incompatible`), база другой
-/// конфигурации (`Incompatible` с её названием).
-pub fn check(path: &str) -> EngineResult<BaseInfo> {
-    let info = connector()?.check_local(&expand_home(path))?;
-    let (title, _) = config_title().unwrap_or_default();
-    ensure_embedded_config(&info, &config_name(), &title)?;
-    Ok(info)
-}
-
-fn config_name() -> String {
-    ostov_meta::demo()
-        .map(|config| config.name)
-        .unwrap_or_default()
-}
-
-fn ensure_embedded_config(info: &BaseInfo, name: &str, title: &str) -> EngineResult<()> {
+fn ensure_same_config(info: &BaseInfo, name: &str, title: &str) -> EngineResult<()> {
     if info.config_name == name {
         return Ok(());
     }
@@ -57,36 +112,6 @@ fn ensure_embedded_config(info: &BaseInfo, name: &str, title: &str) -> EngineRes
             info.config_title
         ),
     ))
-}
-
-/// Открывает файл базы.
-///
-/// # Errors
-/// Ошибки ядра как есть: файла нет, это не база Ostov, база уже открыта другой программой.
-pub fn open(path: &str) -> EngineResult<Arc<dyn Engine>> {
-    connector()?.open_local(&expand_home(path), None)
-}
-
-/// Создаёт файл базы; папку создаёт, если её нет. С `admin` в базе сразу появляется
-/// администратор, и дальше она спрашивает вход.
-///
-/// # Errors
-/// Файл уже есть, папку не создать, пароль на файл (ядро его пока не поддерживает, вопрос В-2).
-pub fn create(
-    path: &str,
-    file_password: Option<&str>,
-    admin: Option<&NewAdmin>,
-) -> EngineResult<Arc<dyn Engine>> {
-    let path = expand_home(path);
-    if let Some(dir) = Path::new(&path).parent() {
-        std::fs::create_dir_all(dir).map_err(|error| {
-            EngineError::new(
-                ErrorCode::Unavailable,
-                format!("Не удалось создать папку базы: {error}."),
-            )
-        })?;
-    }
-    connector()?.create_local(&path, file_password, admin)
 }
 
 /// `~/…` превращает в путь от домашней папки: так путь показывают окна выбора.
@@ -102,6 +127,26 @@ pub fn expand_home(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn demo() -> Config {
+        Config::embedded().expect("встроенная конфигурация читается")
+    }
+
+    fn create(
+        path: &str,
+        file_password: Option<&str>,
+        admin: Option<&NewAdmin>,
+    ) -> EngineResult<Arc<dyn Engine>> {
+        demo().create(path, file_password, admin)
+    }
+
+    fn open(path: &str) -> EngineResult<Arc<dyn Engine>> {
+        demo().open(path)
+    }
+
+    fn check(path: &str) -> EngineResult<BaseInfo> {
+        demo().check(path)
+    }
 
     fn temp_base(name: &str) -> (std::path::PathBuf, String) {
         let dir = std::env::temp_dir().join(format!("ostov-ui-{name}-{}", std::process::id()));
@@ -134,8 +179,8 @@ mod tests {
 
     #[test]
     fn other_configuration_is_refused_with_its_title() {
-        assert!(ensure_embedded_config(&info("warehouse", "Склад"), "warehouse", "Склад").is_ok());
-        let error = ensure_embedded_config(&info("cafe", "Кафе"), "warehouse", "Склад").err();
+        assert!(ensure_same_config(&info("warehouse", "Склад"), "warehouse", "Склад").is_ok());
+        let error = ensure_same_config(&info("cafe", "Кафе"), "warehouse", "Склад").err();
         assert!(
             matches!(error, Some(ref e) if e.code == ErrorCode::Incompatible
             && e.message.contains("«Кафе»") && e.message.contains("«Склад»")),
@@ -349,6 +394,28 @@ mod tests {
             assert_eq!(paged, expected);
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Предпросмотр: база создаётся и открывается с конфигурацией из папки, а не со встроенной.
+    #[test]
+    fn config_from_folder_creates_and_opens_its_own_base() {
+        let dir = crate::test_support::config_copy("local-folder");
+        crate::test_support::replace_in(
+            &dir.join("ostov.yaml"),
+            "title: Склад",
+            "title: Склад-проба",
+        );
+        let config = Config::load(&dir).expect("копия config/ читается");
+        assert_eq!(config.title, "Склад-проба");
+        let path = dir.join("test.sqlite").to_string_lossy().into_owned();
+        assert!(config.create(&path, None, None).is_ok());
+        let checked = config.check(&path);
+        assert!(
+            matches!(checked, Ok(ref info) if info.config_title == "Склад-проба"),
+            "{checked:?}"
+        );
+        assert!(config.open(&path).is_ok());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(&dir));
     }
 
     #[test]

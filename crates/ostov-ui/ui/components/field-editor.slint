@@ -1,0 +1,106 @@
+import { Theme } from "../theme.slint";
+import { TextField } from "text-field.slint";
+import { DateField } from "date-field.slint";
+import { RefField } from "ref-field.slint";
+
+// Как редактировать поле формы. Берётся по виду поля в метаданных; видов, которых там нет
+// (перечисление, булево), здесь нет. Ссылку выбирают из справочника в окне выбора.
+export enum EditorKind { text, number, date, reference }
+
+// Поле формы, как его видит редактор. Строит Rust (src/form_ui.rs) по состоянию формы: подпись,
+// текст и ошибка приходят готовыми, значения назад идут колбэками редактора.
+export struct FormFieldItem {
+    label: string,
+    kind: EditorKind,
+    text: string,
+    error: string,
+    // Пояснение под полем, когда ошибки нет: например, почему выбор из справочника недоступен.
+    hint: string,
+    // Только чтение: вычисляемое поле, нет права на запись или справочник недоступен.
+    read-only: bool,
+    // Дата для календаря. Пока даты нет (empty-date), здесь сегодняшняя: календарь откроется на ней.
+    day: int,
+    month: int,
+    year: int,
+    empty-date: bool,
+}
+
+// Редактор одного поля формы: подпись над полем, поле по виду, под ним текст ошибки. Строка
+// ошибки занимает место всегда, иначе форма прыгала бы, когда ошибка появляется.
+export component FieldEditor inherits VerticalLayout {
+    in property <FormFieldItem> field;
+    in property <bool> enabled: true;
+    // Форма только что открылась, это её первое поле для ввода: взять фокус при создании.
+    in property <bool> autofocus;
+    // Текст поля изменили. Модель формы при этом не трогается: поле хранит набранное само,
+    // иначе при каждой букве пришлось бы писать текст в модель и курсор бы терялся.
+    callback edited(string);
+    // День, месяц и год из календаря или набранные в поле даты.
+    callback date-edited(int, int, int);
+    // Редактор взял фокус по просьбе `autofocus`.
+    callback focused();
+    // Ссылка: открыть выбор из справочника и очистить значение.
+    callback pick-requested();
+    callback cleared();
+    // Enter в текстовом поле. В шапке формы его никто не слушает (Enter не записывает форму),
+    // окно строки по нему закрывается с «Готово».
+    callback accepted();
+
+    spacing: Theme.space-4;
+
+    if root.field.kind == EditorKind.date : DateField {
+        label: root.field.label;
+        enabled: root.enabled && !root.field.read-only;
+        day: root.field.day;
+        month: root.field.month;
+        year: root.field.year;
+        empty: root.field.empty-date;
+        invalid: root.field.error != "";
+        init => {
+            if (root.autofocus) {
+                self.take-focus();
+                root.focused();
+            }
+        }
+        edited => { root.date-edited(self.day, self.month, self.year); }
+    }
+    if root.field.kind == EditorKind.reference : RefField {
+        label: root.field.label;
+        text: root.field.text;
+        read-only: root.field.read-only;
+        enabled: root.enabled;
+        error: root.field.error;
+        init => {
+            if (root.autofocus) {
+                self.take-focus();
+                root.focused();
+            }
+        }
+        pick => { root.pick-requested(); }
+        cleared => { root.cleared(); }
+    }
+    if root.field.kind == EditorKind.text || root.field.kind == EditorKind.number : TextField {
+        label: root.field.label;
+        text: root.field.text;
+        numeric: root.field.kind == EditorKind.number;
+        read-only: root.field.read-only;
+        enabled: root.enabled;
+        error: root.field.error;
+        init => {
+            if (root.autofocus) {
+                self.take-focus();
+                root.focused();
+            }
+        }
+        edited(text) => { root.edited(text); }
+        accepted => { root.accepted(); }
+    }
+    Text {
+        min-height: Theme.font-caption * 1.5;
+        text: root.field.error != "" ? root.field.error : root.field.hint;
+        font-size: Theme.font-caption;
+        color: root.field.error != "" ? Theme.danger : Theme.text-muted;
+        wrap: word-wrap;
+        vertical-alignment: top;
+    }
+}

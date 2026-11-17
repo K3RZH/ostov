@@ -1,0 +1,108 @@
+import { Theme } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Chip } from "../components/chip.slint";
+import { IconButton } from "../components/icon-button.slint";
+
+// Панель инструментов первой очереди (документ «Состав конфигурации», §11.1, К-1…К-8).
+export component Toolbar inherits Rectangle {
+    in property <string> config-title;
+    in property <string> config-version;
+    in property <string> config-folder;
+    callback check-requested();
+    callback open-folder();
+    // План (К-6) и «Запустить» (К-16) ведут к одному окну плана: запуск идёт только через него.
+    in property <bool> run-busy;
+    callback run-requested();
+    callback about-clicked();
+
+    height: Theme.control-md + 2 * Theme.space-8;
+    background: Theme.surface;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-16;
+        padding-right: Theme.space-16;
+        spacing: Theme.space-8;
+
+        // Название и версия уступают место кнопкам, когда окно узкое.
+        VerticalLayout {
+            alignment: center;
+            min-width: 0px;
+            Text {
+                text: root.config-title != "" ? root.config-title
+                    : root.config-folder != "" ? "Конфигурация не прочиталась"
+                    : "Папка не открыта";
+                font-size: Theme.font-body;
+                font-weight: 700;
+                color: Theme.text;
+                overflow: elide;
+            }
+            Text {
+                text: root.config-folder == "" ? "Откройте папку конфигурации"
+                    : root.config-version == "" ? root.config-folder
+                    : "v" + root.config-version + " · " + root.config-folder;
+                font-size: Theme.font-caption;
+                color: Theme.text-muted;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "Открыть папку";
+                control-height: Theme.control-sm;
+                clicked => { root.open-folder(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "Проверить";
+                control-height: Theme.control-sm;
+                enabled: root.config-folder != "";
+                clicked => { root.check-requested(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button { text: "Заглушки .pyi"; control-height: Theme.control-sm; enabled: false; }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "План миграции";
+                control-height: Theme.control-sm;
+                enabled: root.config-folder != "" && !root.run-busy;
+                clicked => { root.run-requested(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: root.run-busy ? "Готовим…" : "Запустить";
+                kind: ButtonKind.primary;
+                control-height: Theme.control-sm;
+                enabled: root.config-folder != "" && !root.run-busy;
+                clicked => { root.run-requested(); }
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        VerticalLayout {
+            alignment: center;
+            Chip { text: "Git: нет данных"; }
+        }
+        VerticalLayout {
+            alignment: center;
+            IconButton {
+                icon: "help";
+                control-size: Theme.control-sm;
+                clicked => { root.about-clicked(); }
+            }
+        }
+    }
+}

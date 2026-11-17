@@ -1,0 +1,78 @@
+import { AboutSlint, Palette } from "std-widgets.slint";
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "button.slint";
+import { Dialog } from "dialog.slint";
+
+// «О программе»: название, версия и `AboutSlint`. Виджет Slint обязателен по лицензии Slint
+// Royalty-free 2.0 (раздел 2) в окне «О программе», доступном из меню. Общий для клиента и
+// конфигуратора.
+export component AboutDialog inherits Dialog {
+    in property <string> app-name;
+    in property <string> version;
+    callback closed();
+
+    enter-pressed => { root.closed(); }
+    escape-pressed => { root.closed(); }
+    scrim-clicked => { root.closed(); }
+
+    card := Rectangle {
+        width: min(440px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        // Щелчки по самому окну не закрывают его.
+        TouchArea { }
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-12;
+            Text {
+                text: "О программе";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            VerticalLayout {
+                spacing: Theme.space-4;
+                Text {
+                    text: root.app-name;
+                    font-size: Theme.font-subtitle;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Text {
+                    text: "Версия " + root.version;
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                }
+            }
+            Text {
+                text: "Платформа учёта Ostov. Интерфейс сделан на Slint:";
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            // Логотип и подпись виджета берут цвета из палитры Slint (светлая или тёмная по
+            // системе), поэтому и подложка из неё: иначе в одной из тем подпись потерялась бы.
+            Rectangle {
+                border-radius: Shape.control-radius;
+                background: Palette.background;
+                height: about.min-height;
+                about := AboutSlint { }
+            }
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Закрыть";
+                    kind: ButtonKind.primary;
+                    clicked => { root.closed(); }
+                }
+            }
+        }
+    }
+}

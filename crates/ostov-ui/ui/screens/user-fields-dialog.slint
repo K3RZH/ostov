@@ -1,0 +1,242 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
+import { ErrorBanner } from "../components/error-banner.slint";
+import { FieldEditor, FormFieldItem } from "../components/field-editor.slint";
+import { RefPicker, PickItem } from "../components/ref-picker.slint";
+
+// Свойство пользователя в окне (ADR-043): подпись и значения в виде полей формы. У свойства
+// без `many` значение одно. `list`: ссылка с несколькими значениями, показывается списком
+// названий с «Убрать» у каждого.
+export struct UserFieldGroup {
+    label: string,
+    many: bool,
+    list: bool,
+    values: [FormFieldItem],
+    // Почему из справочника не выбрать (нет права читать); пусто, если можно.
+    hint: string,
+    can-add: bool,
+}
+
+// Данные и события окна «Свойства пользователя». Состояние ведёт Rust (src/user_fields.rs).
+// Глобальный объект, как AdminData: кнопка «Свойства» стоит на вкладке в любом окне.
+export global UserFieldsData {
+    // В конфигурации есть свойства пользователя: без них кнопки «Свойства» нет.
+    in property <bool> available;
+    in property <bool> shown;
+    in property <string> login;
+    in property <[UserFieldGroup]> groups;
+    // Значения ещё читаются из ядра.
+    in property <bool> loading;
+    // Значения прочитаны: только тогда есть что записывать.
+    in property <bool> loaded;
+    // Идёт запись.
+    in property <bool> busy;
+    in property <string> error;
+    // Окно выбора ссылки поверх свойств.
+    in property <bool> picker-open;
+    in property <string> picker-title;
+    in property <[PickItem]> picker-items;
+    in property <string> picker-note;
+    in property <string> picker-error;
+    in property <string> picker-error-action;
+    in property <bool> picker-can-clear;
+    in-out property <string> picker-query;
+    in-out property <int> picker-current: -1;
+    // Номер строки в списке пользователей: открыть её свойства.
+    callback open(int);
+    // Аргументы (свойство, значение): правка текстом, дата, выбор ссылки, очистка, «Убрать».
+    callback edited(int, int, string);
+    callback date-edited(int, int, int, int, int);
+    callback pick(int, int);
+    callback clear(int, int);
+    callback remove(int, int);
+    // «+ Добавить» у свойства с несколькими значениями.
+    callback add(int);
+    callback save();
+    callback cancel();
+    callback picker-query-changed(string);
+    callback picker-choose(int);
+    callback picker-clear();
+    callback picker-close();
+    callback picker-retry();
+}
+
+// Окно «Свойства пользователя». Какие поля в нём, решает только конфигурация (`Meta.user_fields`).
+export component UserFieldsDialog inherits Dialog {
+    private property <bool> ready: UserFieldsData.loaded && !UserFieldsData.busy;
+    private property <bool> picking: UserFieldsData.picker-open;
+
+    enter-enabled: root.ready && !root.picking;
+    enter-pressed => { UserFieldsData.save(); }
+    escape-pressed => { UserFieldsData.cancel(); }
+
+    // Выбор закрылся: Enter и Esc снова у этого окна.
+    changed picking => {
+        if (!root.picking) {
+            root.focus();
+        }
+    }
+
+    card := Rectangle {
+        width: min(560px, root.width - 2 * Theme.space-24);
+        height: min(root.height - 2 * Theme.space-24, content.preferred-height);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+
+            Text {
+                text: "Свойства пользователя";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+            }
+            Text {
+                text: "Пользователь «" + UserFieldsData.login + "»." + (UserFieldsData.loading ? " Загрузка…" : "");
+                font-size: Theme.font-body;
+                color: Theme.text-muted;
+                wrap: word-wrap;
+            }
+            // Свойств и значений может быть много: прокручиваются они, кнопки остаются на виду.
+            Flickable {
+                preferred-height: fields.preferred-height;
+                fields := VerticalLayout {
+                    alignment: start;
+                    spacing: Theme.space-8;
+                    for group[g] in UserFieldsData.groups : VerticalLayout {
+                        spacing: Theme.space-4;
+                        if !group.many : FieldEditor {
+                            field: group.values[0];
+                            enabled: root.ready;
+                            edited(text) => { UserFieldsData.edited(g, 0, text); }
+                            date-edited(day, month, year) => { UserFieldsData.date-edited(g, 0, day, month, year); }
+                            pick-requested => { UserFieldsData.pick(g, 0); }
+                            cleared => { UserFieldsData.clear(g, 0); }
+                            accepted => { root.submit(); }
+                        }
+                        if group.many : Text {
+                            text: group.label;
+                            font-size: Theme.font-caption;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        if group.list : Rectangle {
+                            height: chosen.preferred-height;
+                            border-radius: Shape.control-radius;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            chosen := VerticalLayout {
+                                padding: Theme.space-4;
+                                for value[v] in group.values : HorizontalLayout {
+                                    padding-left: Theme.space-8;
+                                    spacing: Theme.space-8;
+                                    Text {
+                                        text: value.text;
+                                        horizontal-stretch: 1;
+                                        font-size: Theme.font-body;
+                                        color: Theme.text;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Button {
+                                        text: "Убрать";
+                                        kind: ButtonKind.text;
+                                        enabled: root.ready;
+                                        clicked => { UserFieldsData.remove(g, v); }
+                                    }
+                                }
+                                if group.values.length == 0 : HorizontalLayout {
+                                    padding-left: Theme.space-8;
+                                    height: Theme.control-md;
+                                    Text {
+                                        text: "Ничего не выбрано.";
+                                        font-size: Theme.font-body;
+                                        color: Theme.text-muted;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                        if group.many && !group.list : VerticalLayout {
+                            for value[v] in group.values : HorizontalLayout {
+                                spacing: Theme.space-8;
+                                FieldEditor {
+                                    horizontal-stretch: 1;
+                                    field: value;
+                                    enabled: root.ready;
+                                    edited(text) => { UserFieldsData.edited(g, v, text); }
+                                    date-edited(day, month, year) => { UserFieldsData.date-edited(g, v, day, month, year); }
+                                    accepted => { root.submit(); }
+                                }
+                                VerticalLayout {
+                                    alignment: start;
+                                    Button {
+                                        text: "Убрать";
+                                        kind: ButtonKind.text;
+                                        enabled: root.ready;
+                                        clicked => { UserFieldsData.remove(g, v); }
+                                    }
+                                }
+                            }
+                        }
+                        if group.many : HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "+ Добавить";
+                                kind: ButtonKind.text;
+                                enabled: root.ready && group.can-add;
+                                clicked => { UserFieldsData.add(g); }
+                            }
+                        }
+                        if group.many && group.hint != "" : Text {
+                            text: group.hint;
+                            font-size: Theme.font-caption;
+                            color: Theme.text-muted;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+            if UserFieldsData.error != "" : ErrorBanner { text: UserFieldsData.error; }
+            HorizontalLayout {
+                spacing: Theme.space-12;
+                Rectangle { }
+                Button { text: "Отмена"; clicked => { UserFieldsData.cancel(); } }
+                Button {
+                    text: UserFieldsData.busy ? "Сохранение…" : "Сохранить";
+                    kind: ButtonKind.primary;
+                    enabled: root.ready;
+                    clicked => { UserFieldsData.save(); }
+                }
+            }
+        }
+    }
+
+    if UserFieldsData.picker-open : RefPicker {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        title: UserFieldsData.picker-title;
+        items: UserFieldsData.picker-items;
+        note: UserFieldsData.picker-note;
+        error: UserFieldsData.picker-error;
+        error-action: UserFieldsData.picker-error-action;
+        can-add: false;
+        can-clear: UserFieldsData.picker-can-clear;
+        query <=> UserFieldsData.picker-query;
+        current <=> UserFieldsData.picker-current;
+        query-edited(text) => { UserFieldsData.picker-query-changed(text); }
+        chosen(index) => { UserFieldsData.picker-choose(index); }
+        cleared => { UserFieldsData.picker-clear(); }
+        cancelled => { UserFieldsData.picker-close(); }
+        retry => { UserFieldsData.picker-retry(); }
+    }
+}

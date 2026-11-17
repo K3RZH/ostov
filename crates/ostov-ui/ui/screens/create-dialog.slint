@@ -1,5 +1,6 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
 import { TextField } from "../components/text-field.slint";
 import { Checkbox } from "../components/choice.slint";
 import { ScrollView } from "std-widgets.slint";
@@ -57,7 +58,7 @@ export component ModeOption inherits Rectangle {
 // Окно «Создать базу» поверх затемнения: сначала выбор, где будет жить база (файл или сервер).
 // Занимает всю страницу; пока открыто, клики под ним не проходят. Поля прокручиваются,
 // кнопки закреплены внизу: с паролем и администратором окно выше экрана.
-export component CreateDialog inherits Rectangle {
+export component CreateDialog inherits Dialog {
     in-out property <bool> server;
     in-out property <string> db-name;
     in-out property <string> folder;
@@ -89,9 +90,9 @@ export component CreateDialog inherits Rectangle {
         && root.admin-ok
         && (root.server ? root.address != "" && root.cert != "" : root.folder != "" && root.file-ok);
 
-    background: Theme.scrim;
-
-    TouchArea { }
+    enter-enabled: root.valid && !root.busy;
+    enter-pressed => { root.confirmed(); }
+    escape-pressed => { root.cancelled(); }
 
     card := Rectangle {
         width: min(560px, root.width - 2 * Theme.space-24);
@@ -146,6 +147,7 @@ export component CreateDialog inherits Rectangle {
                     }
 
                     if root.server : TextField {
+                        accepted => { root.submit(); }
                         label: "Адрес сервера";
                         placeholder: "server.local:7700";
                         text <=> root.address;
@@ -153,6 +155,7 @@ export component CreateDialog inherits Rectangle {
                     if root.server : HorizontalLayout {
                         spacing: Theme.space-8;
                         TextField {
+                            accepted => { root.submit(); }
                             label: "Сертификат сервера (server.crt)";
                             placeholder: "файл, который сервер создал при первом запуске";
                             text <=> root.cert;
@@ -165,12 +168,14 @@ export component CreateDialog inherits Rectangle {
                         }
                     }
                     TextField {
+                        accepted => { root.submit(); }
                         label: "Название базы";
                         text <=> root.db-name;
                     }
                     if !root.server : HorizontalLayout {
                         spacing: Theme.space-8;
                         TextField {
+                            accepted => { root.submit(); }
                             label: "Папка";
                             text <=> root.folder;
                             horizontal-stretch: 1;
@@ -192,11 +197,13 @@ export component CreateDialog inherits Rectangle {
                         Checkbox { text: "Защитить паролем"; checked <=> root.protect-password; }
                         Checkbox { text: "Включить пользователей"; checked <=> root.protect-users; }
                         if root.protect-password : TextField {
+                            accepted => { root.submit(); }
                             label: "Пароль базы";
                             password: true;
                             text <=> root.password;
                         }
                         if root.protect-password : TextField {
+                            accepted => { root.submit(); }
                             label: "Повторите пароль базы";
                             password: true;
                             text <=> root.password-repeat;
@@ -224,15 +231,18 @@ export component CreateDialog inherits Rectangle {
                             color: Theme.text;
                         }
                         TextField {
+                            accepted => { root.submit(); }
                             label: "Логин администратора";
                             text <=> root.admin-login;
                         }
                         TextField {
+                            accepted => { root.submit(); }
                             label: "Пароль администратора";
                             password: true;
                             text <=> root.admin-password;
                         }
                         TextField {
+                            accepted => { root.submit(); }
                             label: "Повторите пароль администратора";
                             password: true;
                             text <=> root.admin-repeat;

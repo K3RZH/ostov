@@ -1,8 +1,9 @@
 //! Настройки интерфейса: тема, скругление, плотность строк таблицы, размер шрифта.
 //! Хранятся в `~/.config/ostov/ui.conf` строками `ключ=значение`,
-//! чтобы не тянуть библиотеку для разбора.
+//! чтобы не тянуть библиотеку для разбора. Рядом `configurator.conf`: последняя папка
+//! конфигурации, которую открывал конфигуратор.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Скругление контролов по режимам: строгое, обычное, мягкое, капсула (px).
 const RADIUS_PX: [f32; 4] = [4.0, 6.0, 8.0, 22.0];
@@ -128,4 +129,60 @@ pub(crate) fn config_file(name: &str) -> Option<PathBuf> {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("ostov").join(name))
+}
+
+const CONFIGURATOR_FILE: &str = "configurator.conf";
+const FOLDER_KEY: &str = "folder=";
+
+/// Папка из текста `configurator.conf`; нет строки `folder=` или она пустая: `None`.
+pub fn parse_config_folder(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(FOLDER_KEY))
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Текст `configurator.conf` для папки. Путь не в UTF-8 или с переводом строки в строку
+/// `ключ=значение` не записать: тогда `None`, папка просто не запоминается.
+pub fn config_folder_text(dir: &Path) -> Option<String> {
+    let path = dir.to_str()?;
+    (!path.contains(['\n', '\r'])).then(|| format!("{FOLDER_KEY}{path}\n"))
+}
+
+/// Последняя папка конфигурации, если она ещё есть на диске.
+pub fn last_config_folder() -> Option<PathBuf> {
+    config_file(CONFIGURATOR_FILE)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| parse_config_folder(&text))
+        .filter(|dir| dir.is_dir())
+}
+
+/// Запоминает папку конфигурации; ошибку записи не показываем, как и у настроек интерфейса.
+pub fn remember_config_folder(dir: &Path) {
+    let (Some(path), Some(text)) = (config_file(CONFIGURATOR_FILE), config_folder_text(dir)) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_folder_round_trips_with_cyrillic_and_spaces() {
+        let dir = Path::new("/home/ann/Мои конфигурации/Склад ");
+        let text = config_folder_text(dir).expect("путь записывается");
+        assert_eq!(parse_config_folder(&text).as_deref(), Some(dir));
+    }
+
+    #[test]
+    fn config_folder_without_the_key_or_with_a_newline_is_skipped() {
+        assert_eq!(parse_config_folder("theme=dark\nfolder=\n"), None);
+        assert_eq!(parse_config_folder(""), None);
+        assert_eq!(config_folder_text(Path::new("/tmp/a\nb")), None);
+    }
 }

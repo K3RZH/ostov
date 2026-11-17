@@ -14,9 +14,15 @@ pub use generated::*;
 pub mod admin;
 pub mod admin_ui;
 pub mod app;
+pub mod configurator;
+pub mod configurator_ui;
 pub mod date_input;
 pub mod engine;
+pub mod form_state;
+pub mod form_table;
+pub mod form_ui;
 pub mod grid;
+pub mod launch;
 pub mod list_ui;
 pub mod list_window;
 pub mod local_base;
@@ -24,14 +30,22 @@ pub mod object_list;
 pub mod receipts;
 pub mod receipts_ui;
 pub mod recent;
+pub mod ref_choice;
 pub mod remote_base;
+pub mod row_actions;
 pub mod settings;
 pub mod shell;
+pub mod shortcuts;
 pub mod sorting;
+pub mod test_run;
+#[cfg(test)]
+mod test_support;
+pub mod user_fields;
 pub mod users;
 pub mod values;
 pub mod windows;
 pub mod workspace;
+pub mod x11_background;
 
 /// Имя крейта (проверка, что каркас собран).
 pub const NAME: &str = env!("CARGO_PKG_NAME");

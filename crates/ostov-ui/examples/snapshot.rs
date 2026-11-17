@@ -2,9 +2,19 @@
 //! `SLINT_BACKEND=winit-software cargo run -p ostov-ui --example snapshot -- светлая|тёмная файл.ppm [экран]`.
 //! Экраны: showcase, main, settings, start, start-error, start-empty, start-forget, start-forget-server, create-local, create-server, add-file, add-server,
 //! login-server, login-first-run, login-local, password, login-error, journal, period, period-error,
-//! list-goods, list-issue, list-sorted, list-search, list-error.
+//! list-goods, list-issue, list-sorted, list-search, list-error, list-confirm, list-notice,
+//! form-catalog, form-document, form-catalog-narrow, form-document-narrow, form-new-errors,
+//! form-date-empty, form-error, form-issue, form-issue-narrow, form-picker, form-row,
+//! form-row-picker, form-busy, configurator, configurator-fields,
+//! configurator-parts, configurator-role, configurator-later, configurator-check,
+//! configurator-no-folder, configurator-plan, configurator-plan-refused, configurator-run-error,
+//! about, configurator-about.
 
 use std::io::Write;
+
+#[path = "support/config_copy.rs"]
+mod support;
+use support::{config_copy, replace_in};
 
 use ostov_ui::app::{LoginKind, configure_login};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -162,7 +172,7 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
         ostov_api::SystemRights::ALL,
     )));
     let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
-    let object = if screen == "list-goods" || screen == "list-search" {
+    let object = if matches!(screen, "list-goods" | "list-search" | "list-confirm") {
         "goods"
     } else {
         "issue"
@@ -179,7 +189,8 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
     window.set_user_initials("А".into());
 
     let windows = ostov_ui::windows::Windows::new(&receipts);
-    let lists = ostov_ui::list_ui::ListUi::new(window.as_weak(), windows);
+    let forms = ostov_ui::form_ui::FormUi::new(window.as_weak(), windows.clone(), shell.clone());
+    let lists = ostov_ui::list_ui::ListUi::new(window.as_weak(), windows, forms);
     lists.attach_window(&window);
     // Объект, которого нет в базе: ядро отвечает ошибкой, она видна полосой с «Повторить».
     let mut objects = meta.objects.clone();
@@ -205,11 +216,208 @@ fn list_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::
             data.invoke_query_changed("мас".into());
         }
         "list-error" => data.invoke_show("ghost".into()),
+        // Пометка на удаление первого элемента: вопрос перед действием.
+        "list-confirm" => {
+            data.invoke_menu_opening(0);
+            data.invoke_action(0, "delete".into());
+        }
+        // Первый расход проведён: ядро отказывает в пометке, ошибка видна над таблицей.
+        "list-notice" => {
+            data.invoke_menu_opening(0);
+            data.invoke_action(0, "delete".into());
+            data.invoke_confirm_accepted();
+        }
         _ => {}
     }
     pump(800)?;
     println!("{}", data.get_summary());
     save(&window, dark, path)
+}
+
+/// Форма объекта на настоящей демо-базе: `FormUi` читает объект у ядра, как в приложении.
+/// Широкое окно 1200×760, узкое 960×600.
+fn form_screen(screen: &str, dark: bool, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use ostov_ui::shell::DocKey;
+
+    let engine = snapshot_engine()?;
+    let window = app_window(2)?;
+    let narrow = screen.ends_with("-narrow");
+    window.window().set_size(if narrow {
+        slint::LogicalSize::new(960.0, 600.0)
+    } else {
+        slint::LogicalSize::new(1200.0, 760.0)
+    });
+    let meta = ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+    let shell = Rc::new(RefCell::new(ostov_ui::shell::Shell::from_meta(
+        &meta,
+        ostov_api::SystemRights::ALL,
+    )));
+    let receipts = ostov_ui::receipts_ui::setup(&window, shell.clone());
+    window.set_base_name("Склад".into());
+    window.set_mode_text("Режим: локально".into());
+    window.set_user_text("Администратор".into());
+    window.set_user_initials("А".into());
+
+    let windows = ostov_ui::windows::Windows::new(&receipts);
+    let forms = ostov_ui::form_ui::FormUi::new(window.as_weak(), windows, shell.clone());
+    forms.attach_window(&window);
+    forms.start(engine.clone(), &meta.objects);
+    window.show()?;
+    match screen {
+        "form-catalog" | "form-catalog-narrow" => forms.open_form(DocKey::new("goods", 1))?,
+        "form-new-errors" => {
+            forms.open_new("receipt")?;
+            pump(300)?;
+            window.global::<ostov_ui::FormData>().invoke_save();
+        }
+        "form-date-empty" => forms.open_new("issue")?,
+        "form-issue" | "form-issue-narrow" | "form-picker" | "form-row" | "form-row-picker" => {
+            forms.open_new("issue")?;
+            pump(300)?;
+            issue_screen(screen, &window)?;
+        }
+        "form-busy" => {
+            // Данные заняты другим пользователем: ошибка над формой с «Повторить».
+            forms.open_form(DocKey::new("receipt", 1))?;
+            pump(800)?;
+            let data = window.global::<ostov_ui::FormData>();
+            data.set_error(
+                "Эти данные сейчас меняет другой пользователь. Повторите действие.".into(),
+            );
+            data.set_error_action("Повторить".into());
+            return save(&window, dark, path);
+        }
+        "form-error" => {
+            // Закрытый период: ядро не проводит документ, ошибка видна над формой.
+            engine.set_closing_date(Some("2026-12-31"))?;
+            forms.open_form(DocKey::new("receipt", 1))?;
+            pump(800)?;
+            window
+                .global::<ostov_ui::FormData>()
+                .invoke_edited(0, "11.02.2026".into());
+            window.global::<ostov_ui::FormData>().invoke_post();
+        }
+        _ => forms.open_form(DocKey::new("receipt", 1))?,
+    }
+    pump(800)?;
+    save(&window, dark, path)
+}
+
+/// Новый расход по шагам, как его заполняет пользователь: дата, склад из выбора, строки товаров.
+/// Экраны останавливаются на разных шагах: открытый выбор склада, окно строки с ошибками,
+/// выбор товара поверх окна строки, заполненная форма.
+fn issue_screen(
+    screen: &str,
+    window: &ostov_ui::AppWindow,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = window.global::<ostov_ui::FormData>();
+    data.invoke_edited(0, "12.03.2026".into());
+    data.invoke_pick(1);
+    pump(400)?;
+    if screen == "form-picker" {
+        return Ok(());
+    }
+    data.invoke_picker_choose(1);
+    pump(100)?;
+    for (goods, qty) in [(0, "2,5"), (3, "12")] {
+        data.invoke_row_add(0);
+        data.invoke_row_pick(0);
+        pump(400)?;
+        data.invoke_picker_choose(goods);
+        data.invoke_row_edited(1, qty.into());
+        data.invoke_row_done();
+    }
+    data.invoke_row_add(0);
+    match screen {
+        "form-row" => data.invoke_row_done(),
+        "form-row-picker" => {
+            data.invoke_row_edited(1, "1,2345".into());
+            data.invoke_row_pick(0);
+            pump(400)?;
+        }
+        _ => data.invoke_row_cancel(),
+    }
+    Ok(())
+}
+
+/// «Запустить» на копии `config/`: план с новым полем, отказ из-за смены типа поля или занятая
+/// база. Поток тот же, что у кнопки: проверка, тестовая база, план в фоне.
+fn configurator_run(
+    screen: &str,
+    dark: bool,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let work = std::env::temp_dir().join(format!("ostov-snapshot-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    let dir = config_copy(&work.join("config"))?;
+    let goods = dir.join("catalogs").join("goods.yaml");
+    // Первый запуск создаёт базу, правка после него даёт план.
+    ostov_ui::test_run::prepare(&dir).map_err(|error| format!("{error:?}"))?;
+    let mut held = None;
+    match screen {
+        "configurator-plan" => replace_in(
+            &goods,
+            "fields:\n",
+            "fields:\n  - name: brand\n    title: Марка\n    type: text\n",
+        )?,
+        "configurator-plan-refused" => replace_in(
+            &goods,
+            "title: Единица измерения\n    type: text",
+            "title: Единица измерения\n    type: int",
+        )?,
+        _ => {
+            let base = ostov_ui::test_run::base_path(&dir);
+            let config = ostov_ui::local_base::Config::load(&dir).map_err(|e| format!("{e:?}"))?;
+            held = Some(config.open(&base.to_string_lossy())?);
+        }
+    }
+    let window = ostov_ui::configurator_ui::create_window(Some(dir))?;
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1200.0, 780.0));
+    // Окно на экране до нажатия, как у человека: размер не должен меняться от окна плана.
+    window.show()?;
+    window.invoke_run_requested();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while window.get_run_busy() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        slint::platform::update_timers_and_animations();
+    }
+    let saved = save(&window, dark, path);
+    drop(held);
+    let _ = std::fs::remove_dir_all(&work);
+    saved
+}
+
+/// Папка `config/` репозитория: «Склад» в файлах.
+fn config_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
+}
+
+/// Окно конфигуратора на папке `config/`: щелчки по строкам дерева, затем раздел и проверка.
+fn configurator_window(
+    clicks: &[i32],
+    section: Option<ostov_ui::EditorSection>,
+    check: bool,
+) -> Result<ostov_ui::ConfiguratorWindow, Box<dyn std::error::Error>> {
+    let folder = config_dir().canonicalize()?;
+    let window = ostov_ui::configurator_ui::create_window(Some(folder))?;
+    window
+        .window()
+        .set_size(slint::LogicalSize::new(1200.0, 780.0));
+    for row in clicks {
+        window.invoke_tree_clicked(*row);
+    }
+    if let Some(section) = section {
+        window.invoke_section_chosen(section);
+    }
+    if check {
+        window.invoke_check_requested();
+    }
+    Ok(window)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -250,9 +458,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             save(&window, dark, &path)
         }
         "journal" | "period" | "period-error" => admin_screen(&screen, dark, &path),
-        "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error" => {
-            list_screen(&screen, dark, &path)
-        }
+        "list-goods" | "list-issue" | "list-sorted" | "list-search" | "list-error"
+        | "list-confirm" | "list-notice" => list_screen(&screen, dark, &path),
+        "form-catalog"
+        | "form-document"
+        | "form-catalog-narrow"
+        | "form-document-narrow"
+        | "form-new-errors"
+        | "form-date-empty"
+        | "form-error"
+        | "form-issue"
+        | "form-issue-narrow"
+        | "form-picker"
+        | "form-row"
+        | "form-row-picker"
+        | "form-busy" => form_screen(&screen, dark, &path),
         "main-meta" => {
             // Меню из встроенной конфигурации «Склад», как его строит приложение.
             let window = app_window(2)?;
@@ -524,6 +744,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Бар-2025.sqlite",
                 "~/Документы/Бар-2025.sqlite",
             );
+            save(&window, dark, &path)
+        }
+        // Строки дерева «Склада»: 5 первый документ, 10 первая роль; без щелчков открыт первый справочник.
+        "configurator" => save(&configurator_window(&[], None, false)?, dark, &path),
+        "configurator-fields" => {
+            let section = Some(ostov_ui::EditorSection::Fields);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-parts" => {
+            let section = Some(ostov_ui::EditorSection::TableParts);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-role" => save(&configurator_window(&[10], None, false)?, dark, &path),
+        "configurator-later" => {
+            let section = Some(ostov_ui::EditorSection::Forms);
+            save(&configurator_window(&[5], section, false)?, dark, &path)
+        }
+        "configurator-check" => save(&configurator_window(&[], None, true)?, dark, &path),
+        "configurator-plan" | "configurator-plan-refused" | "configurator-run-error" => {
+            configurator_run(&screen, dark, &path)
+        }
+        "about" => {
+            let window = app_window(2)?;
+            let meta =
+                ostov_api::Meta::new(&ostov_meta::demo().map_err(|errors| format!("{errors:?}"))?);
+            let shell = ostov_ui::shell::Shell::from_meta(&meta, ostov_api::SystemRights::ALL);
+            ostov_ui::app::refresh(&window, &shell);
+            window.set_base_name("Склад".into());
+            window.set_about_open(true);
+            save(&window, dark, &path)
+        }
+        "configurator-about" => {
+            let window = configurator_window(&[], None, false)?;
+            window.set_about_open(true);
+            save(&window, dark, &path)
+        }
+        "configurator-no-folder" => {
+            let window = ostov_ui::configurator_ui::create_window(None)?;
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(1200.0, 780.0));
             save(&window, dark, &path)
         }
         _ => save(&ostov_ui::ShowcaseWindow::new()?, dark, &path),

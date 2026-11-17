@@ -2,7 +2,7 @@
 //! `Workspace`, здесь только окна Slint и обработчики их панели вкладок.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -11,11 +11,12 @@ use slint::{ComponentHandle, LogicalSize, Model, PhysicalPosition};
 use crate::AppWindow;
 use crate::TabItem;
 use crate::app::{
-    HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_tabs, tab_items,
+    HOST_SIZE, current_settings, nav_items, prepare_host_window, refresh, set_home, set_tabs,
+    tab_items,
 };
 use crate::receipts_ui::ReceiptsUi;
 use crate::shell::{DocKey, Shell, Tab};
-use crate::workspace::{Change, TabList, WindowId, WindowRef, Workspace};
+use crate::workspace::{Change, DocTabs, TabList, WindowId, WindowRef, Workspace};
 
 /// Перетаскивание вкладки между окнами на общих координатах экрана.
 struct DragState {
@@ -30,12 +31,16 @@ struct DragState {
 /// Что подключить к каждому новому окну.
 type HostSetup = Rc<dyn Fn(&AppWindow)>;
 
+/// Решает, закрывать ли вкладку: окно, номер вкладки; `true`: не закрывать (экран сам спросит).
+type CloseGuard = Rc<dyn Fn(WindowRef, usize) -> bool>;
+
 struct Inner {
     workspace: Workspace,
     hosts: HashMap<WindowId, AppWindow>,
     drag: Option<DragState>,
     /// Что подключить к каждому новому окну, кроме форм (например, пользователей).
     host_setup: Option<HostSetup>,
+    close_guard: Option<CloseGuard>,
 }
 
 /// Журнал перетаскивания для разбора странностей в живых окнах: включается переменной
@@ -147,6 +152,7 @@ impl Windows {
                 hosts: HashMap::new(),
                 drag: None,
                 host_setup: None,
+                close_guard: None,
             })),
             receipts: receipts.clone(),
             shell: receipts.shell(),
@@ -158,6 +164,29 @@ impl Windows {
     /// Что подключить к каждому новому окну, кроме списка и форм документов.
     pub fn on_host_created(&self, setup: impl Fn(&AppWindow) + 'static) {
         self.inner.borrow_mut().host_setup = Some(Rc::new(setup));
+    }
+
+    /// Кто может не дать закрыть вкладку (форма с несохранёнными правками). Один, новый заменяет.
+    pub fn on_close_guard(&self, guard: impl Fn(WindowRef, usize) -> bool + 'static) {
+        self.inner.borrow_mut().close_guard = Some(Rc::new(guard));
+    }
+
+    /// Вкладку `index` окна `window` просят закрыть: `true`, если её закрывать нельзя (кто-то
+    /// спросил пользователя или запись идёт). Звать до любых заимствований оболочки.
+    pub fn close_vetoed(&self, window: WindowRef, index: usize) -> bool {
+        // Заём снимаем до вызова: охранник читает вкладки и сам заимствует окна.
+        let guard = self.inner.borrow().close_guard.clone();
+        guard.is_some_and(|guard| guard(window, index))
+    }
+
+    /// Номер дополнительного окна `window`; `None`: это главное окно или чужое.
+    pub fn id_of(&self, window: &AppWindow) -> Option<WindowId> {
+        self.inner
+            .borrow()
+            .hosts
+            .iter()
+            .find(|(_, host)| std::ptr::eq(host.window(), window.window()))
+            .map(|(id, _)| *id)
     }
 
     /// Доступ к вкладкам дополнительного окна.
@@ -190,6 +219,25 @@ impl Windows {
     /// Активное окно: в нём открываются новые вкладки и документы.
     pub fn active(&self) -> WindowRef {
         self.inner.borrow().workspace.active()
+    }
+
+    /// Окно, в котором открыта вкладка документа. `None`: документ нигде не открыт или оболочка
+    /// сейчас занята (вызов изнутри её обновления).
+    pub fn window_of_doc(&self, doc: &DocKey) -> Option<WindowRef> {
+        let shell = self.shell.try_borrow().ok()?;
+        self.inner.borrow().workspace.window_of_doc(&shell, doc)
+    }
+
+    /// Документы, открытые во вкладках всех окон. `None`: оболочка сейчас занята.
+    pub fn open_documents(&self) -> Option<HashSet<DocKey>> {
+        let mut open = self.shell.try_borrow().ok()?.documents();
+        let inner = self.inner.borrow();
+        for id in inner.workspace.extra_ids() {
+            if let Some(list) = inner.workspace.list(id) {
+                open.extend(list.documents());
+            }
+        }
+        Some(open)
     }
 
     pub fn set_active(&self, window: WindowRef) {
@@ -293,6 +341,10 @@ impl Windows {
         let Some(tab) = self.tab_at(shell, source, index) else {
             return;
         };
+        // «Главная» не уходит из главного окна: ни окна-копии, ни подсветки чужих панелей.
+        if source == WindowRef::Main && tab.is_home() {
+            return;
+        }
         let scale = source_window.window().scale_factor();
         let point = pointer_global(source_window, x, y);
         drag_log(&format!(
@@ -613,6 +665,7 @@ impl Windows {
             window.set_nav(slint::ModelRc::new(slint::VecModel::from(nav_items(
                 shell.nav_rows_for(selected),
             ))));
+            set_home(window, &shell);
         }
         window.set_active_tab(i32::try_from(list.active()).unwrap_or_default());
         let title = list
@@ -632,7 +685,11 @@ impl Windows {
         dragging: bool,
     ) {
         let Ok(window) = AppWindow::new() else { return };
+        crate::shortcuts::install(window.window());
         prepare_host_window(&window, current_settings(main));
+        // «Главная» в этом окне показывает название конфигурации и базы.
+        window.set_config_name(main.get_config_name());
+        window.set_base_name(main.get_base_name());
         if dragging {
             window.set_keep_on_top(true);
             window.window().set_size(DRAG_SIZE);
@@ -676,6 +733,9 @@ impl Windows {
                 let (Ok(tab), Some(main)) = (usize::try_from(tab), main.upgrade()) else {
                     return;
                 };
+                if this.close_vetoed(WindowRef::Extra(id), tab) {
+                    return;
+                }
                 let change = this.inner.borrow_mut().workspace.close_tab(id, tab);
                 this.apply(&main, &shell, change);
             }

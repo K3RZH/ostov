@@ -1,0 +1,138 @@
+import { Theme } from "theme.slint";
+import { NavPanel, NavRow } from "components/nav-panel.slint";
+import { GridColumn, GridRow } from "components/erp-grid.slint";
+import { Toolbar } from "configurator/toolbar.slint";
+import { Editor, EditorSection, InfoRow } from "configurator/editor.slint";
+import { CheckPanel } from "configurator/check-panel.slint";
+import { Notice } from "configurator/notice.slint";
+import { PlanDialog } from "configurator/plan-dialog.slint";
+import { AboutDialog } from "components/about-dialog.slint";
+
+// Окно «Ostov Конфигуратор»: панель инструментов, дерево конфигурации, редактор элемента и
+// панель проверки. Только просмотр. Данные и обработчики задаёт src/configurator_ui.rs.
+export component ConfiguratorWindow inherits Window {
+    in property <string> config-title;
+    in property <string> config-version;
+    // Открытая папка конфигурации; пусто, пока папку не выбрали.
+    in property <string> config-folder;
+    // Версия программы из Cargo.toml для «О программе»: задаёт Rust.
+    in property <string> app-version;
+    in-out property <bool> about-open;
+
+    callback open-folder();
+
+    // «Запустить»: предупреждение о Python, ошибка запуска и окно плана (src/configurator_ui.rs).
+    in property <string> python-warning;
+    in property <string> run-error;
+    // Ошибку запуска можно исправить сбросом тестовой базы (база испорчена или не та).
+    in property <bool> run-error-resettable;
+    in property <bool> run-busy;
+    in-out property <bool> plan-open;
+    in property <[string]> plan-lines;
+    in property <string> plan-note;
+    in property <string> plan-refused;
+    callback run-requested();
+    callback plan-launch();
+    callback plan-reset();
+
+    // Дерево конфигурации.
+    in property <[NavRow]> tree-rows;
+    callback tree-clicked(int);
+
+    // Редактор выбранного элемента.
+    in property <bool> has-element <=> editor.has-element;
+    in property <string> editor-empty-text <=> editor.empty-text;
+    in property <string> element-title <=> editor.element-title;
+    in property <string> element-name <=> editor.element-name;
+    in property <string> element-kind <=> editor.element-kind;
+    in property <[EditorSection]> sections <=> editor.sections;
+    in property <EditorSection> section <=> editor.section;
+    in property <[InfoRow]> general-rows <=> editor.general-rows;
+    in property <[string]> part-titles <=> editor.part-titles;
+    in property <int> part-index <=> editor.part-index;
+    in property <[GridColumn]> field-columns <=> editor.field-columns;
+    in property <[GridRow]> field-rows <=> editor.field-rows;
+    in property <string> field-empty-text <=> editor.field-empty-text;
+    callback section-chosen <=> editor.section-chosen;
+    callback part-chosen <=> editor.part-chosen;
+    callback field-resize-begin <=> editor.resize-begin;
+    callback field-resize-column <=> editor.resize-column;
+    callback field-resize-end <=> editor.resize-end;
+
+    // Панель «Проверка».
+    in property <string> check-summary <=> check-panel.summary;
+    in property <bool> check-passed <=> check-panel.passed;
+    in property <bool> check-failed <=> check-panel.failed;
+    in property <[GridColumn]> check-columns <=> check-panel.columns;
+    in property <[GridRow]> check-rows <=> check-panel.rows;
+    in property <string> check-empty-text <=> check-panel.empty-text;
+    callback check-requested();
+    callback check-resize-begin <=> check-panel.resize-begin;
+    callback check-resize-column <=> check-panel.resize-column;
+    callback check-resize-end <=> check-panel.resize-end;
+
+    title: root.config-title == "" ? "Ostov Конфигуратор"
+        : "Ostov Конфигуратор: " + root.config-title + ", версия " + root.config-version;
+    min-width: 960px;
+    min-height: 600px;
+    preferred-width: 1200px;
+    preferred-height: 780px;
+    default-font-family: "Open Sans";
+    background: Theme.bg;
+
+    VerticalLayout {
+        Toolbar {
+            config-title: root.config-title;
+            config-version: root.config-version;
+            config-folder: root.config-folder;
+            check-requested => { root.check-requested(); }
+            open-folder => { root.open-folder(); }
+            run-busy: root.run-busy;
+            run-requested => { root.run-requested(); }
+            about-clicked => { root.about-open = true; }
+        }
+        if root.python-warning != "" : Notice { text: root.python-warning; }
+        if root.run-error != "" : Notice {
+            text: root.run-error;
+            error: true;
+            action-text: root.run-error-resettable ? "Сбросить тестовую базу" : "";
+            action => { root.plan-reset(); }
+        }
+        HorizontalLayout {
+            vertical-stretch: 1;
+            NavPanel {
+                caption: "ДЕРЕВО КОНФИГУРАЦИИ";
+                rows: root.tree-rows;
+                clicked(id) => { root.tree-clicked(id); }
+            }
+            editor := Editor {
+                horizontal-stretch: 1;
+            }
+        }
+        check-panel := CheckPanel { }
+    }
+
+    if root.about-open : AboutDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        app-name: "Ostov Конфигуратор";
+        version: root.app-version;
+        closed => { root.about-open = false; }
+    }
+
+    if root.plan-open : PlanDialog {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        lines: root.plan-lines;
+        note: root.plan-note;
+        refused: root.plan-refused;
+        python-warning: root.python-warning;
+        launch => { root.plan-launch(); }
+        reset => { root.plan-reset(); }
+        cancelled => { root.plan-open = false; }
+    }
+}

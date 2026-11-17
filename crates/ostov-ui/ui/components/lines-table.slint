@@ -1,0 +1,194 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button } from "button.slint";
+
+// Колонка табличной части: число и дата постоянной ширины, текст и ссылка (flex) делят остаток.
+export struct LineColumn { title: string, width: length, right: bool, flex: bool }
+// Строка: ячейки текстом и ошибка строки (незаполненные обязательные колонки); пусто: ошибки нет.
+export struct LineRow { cells: [string], error: string }
+// Табличная часть целиком. Строит Rust (src/form_ui.rs) по состоянию формы: строки правятся
+// в окне строки, сама таблица только показывает их. editable: можно добавлять и удалять.
+export struct TablePartItem { title: string, columns: [LineColumn], rows: [LineRow], selected: int, editable: bool }
+
+// Ширина колонки с номером строки.
+global LineMetrics {
+    out property <length> number-width: 48px;
+}
+
+component LineCell inherits Rectangle {
+    in property <LineColumn> column;
+    in property <string> text;
+    in property <bool> header;
+
+    horizontal-stretch: root.column.flex ? 1 : 0;
+    min-width: root.column.width;
+    max-width: root.column.flex ? 100000px : root.column.width;
+
+    Text {
+        x: Theme.space-12;
+        width: parent.width - 2 * Theme.space-12;
+        height: parent.height;
+        text: root.text;
+        font-size: root.header ? Theme.font-caption : Theme.font-body;
+        font-weight: root.header ? 600 : 400;
+        color: Theme.text;
+        vertical-alignment: center;
+        horizontal-alignment: root.column.right ? right : left;
+        overflow: elide;
+    }
+}
+
+// Таблица строк табличной части с заголовком и кнопками. Щелчок выбирает строку, двойной
+// щелчок и Enter открывают её в окне строки. С клавиатуры: стрелки двигают выбор, Insert
+// добавляет строку, Delete удаляет выбранную.
+export component LinesTable inherits VerticalLayout {
+    in property <TablePartItem> part;
+    in property <bool> enabled: true;
+    callback added();
+    callback selected(int);
+    callback opened(int);
+    callback removed(int);
+
+    private property <bool> active: root.enabled && root.part.editable;
+    private property <bool> has-row: root.part.selected >= 0 && root.part.selected < root.part.rows.length;
+
+    spacing: Theme.space-8;
+
+    HorizontalLayout {
+        spacing: Theme.space-8;
+        Text {
+            text: root.part.title;
+            font-size: Theme.font-subtitle;
+            font-weight: 600;
+            color: Theme.text;
+            vertical-alignment: center;
+        }
+        Rectangle { }
+        if root.part.editable : Button {
+            text: "Добавить";
+            control-height: Theme.control-sm;
+            enabled: root.enabled;
+            clicked => { root.added(); }
+        }
+        Button {
+            text: root.part.editable ? "Изменить" : "Открыть";
+            control-height: Theme.control-sm;
+            enabled: root.enabled && root.has-row;
+            clicked => { root.opened(root.part.selected); }
+        }
+        if root.part.editable : Button {
+            text: "Удалить";
+            control-height: Theme.control-sm;
+            enabled: root.active && root.has-row;
+            clicked => { root.removed(root.part.selected); }
+        }
+    }
+
+    Rectangle {
+        height: table.preferred-height;
+        border-radius: Shape.surface-radius;
+        border-width: keys.has-focus ? 2px : 1px;
+        border-color: keys.has-focus ? Theme.focus : Theme.border;
+        background: Theme.surface;
+        clip: true;
+
+        keys := FocusScope {
+            enabled: root.enabled;
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow && root.part.rows.length > 0) {
+                    root.selected(min(root.part.rows.length - 1, max(0, root.part.selected + 1)));
+                    return accept;
+                }
+                if (event.text == Key.UpArrow && root.part.rows.length > 0) {
+                    root.selected(max(0, root.part.selected - 1));
+                    return accept;
+                }
+                if (event.text == Key.Return && root.has-row) {
+                    root.opened(root.part.selected);
+                    return accept;
+                }
+                if (event.text == Key.Insert && root.active) {
+                    root.added();
+                    return accept;
+                }
+                if (event.text == Key.Delete && root.active && root.has-row) {
+                    root.removed(root.part.selected);
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        table := VerticalLayout {
+            Rectangle {
+                height: 32px;
+                background: Theme.surface-alt;
+                HorizontalLayout {
+                    LineCell {
+                        column: { title: "№", width: LineMetrics.number-width, right: true, flex: false };
+                        text: "№";
+                        header: true;
+                    }
+                    for column in root.part.columns : LineCell {
+                        column: column;
+                        text: column.title;
+                        header: true;
+                    }
+                }
+            }
+            for row[index] in root.part.rows : Rectangle {
+                background: index == root.part.selected ? Theme.accent-soft
+                    : row.error != "" ? Theme.danger-soft
+                    : row-touch.has-hover ? Theme.surface-alt
+                    : transparent;
+                height: line.preferred-height;
+
+                line := VerticalLayout {
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    HorizontalLayout {
+                        height: Theme.row-height;
+                        LineCell {
+                            column: { title: "", width: LineMetrics.number-width, right: true, flex: false };
+                            text: index + 1;
+                        }
+                        for cell[column] in row.cells : LineCell {
+                            column: root.part.columns[column];
+                            text: cell;
+                        }
+                    }
+                    if row.error != "" : HorizontalLayout {
+                        padding-left: LineMetrics.number-width + Theme.space-12;
+                        padding-right: Theme.space-12;
+                        padding-bottom: Theme.space-8;
+                        Text {
+                            text: row.error;
+                            font-size: Theme.font-caption;
+                            color: Theme.danger;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                row-touch := TouchArea {
+                    enabled: root.enabled;
+                    clicked => {
+                        keys.focus();
+                        root.selected(index);
+                    }
+                    double-clicked => { root.opened(index); }
+                }
+            }
+            if root.part.rows.length == 0 : Rectangle {
+                height: 48px;
+                Text {
+                    text: root.part.editable ? "Строк пока нет: нажмите «Добавить»." : "Строк нет.";
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

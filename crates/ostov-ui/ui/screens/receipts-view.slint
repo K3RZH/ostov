@@ -1,5 +1,6 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
+import { Dialog } from "../components/dialog.slint";
 import { Chip, ChipKind } from "../components/chip.slint";
 import { TextField } from "../components/text-field.slint";
 import { Select } from "../components/select.slint";
@@ -330,10 +331,9 @@ component ReceiptForm inherits VerticalLayout {
 }
 
 // Окно строки табличной части: товар из справочника, количество, цена.
-component LineDialog inherits Rectangle {
-    background: Theme.scrim;
-
-    TouchArea { }
+component LineDialog inherits Dialog {
+    enter-pressed => { ReceiptsData.line-confirm(); }
+    escape-pressed => { ReceiptsData.line-open = false; }
 
     card := Rectangle {
         width: min(480px, root.width - 2 * Theme.space-24);
@@ -364,6 +364,7 @@ component LineDialog inherits Rectangle {
             HorizontalLayout {
                 spacing: Theme.space-12;
                 TextField {
+                    accepted => { root.submit(); }
                     label: "Количество";
                     numeric: true;
                     placeholder: "0,0";
@@ -371,6 +372,7 @@ component LineDialog inherits Rectangle {
                     edited(text) => { ReceiptsData.line-quantity-edited(text); }
                 }
                 TextField {
+                    accepted => { root.submit(); }
                     label: "Цена";
                     numeric: true;
                     placeholder: "0,00";
@@ -399,10 +401,9 @@ component LineDialog inherits Rectangle {
 }
 
 // Окно нового элемента справочника: наименование (для номенклатуры ещё единица).
-component CatalogDialog inherits Rectangle {
-    background: Theme.scrim;
-
-    TouchArea { }
+component CatalogDialog inherits Dialog {
+    enter-pressed => { ReceiptsData.catalog-confirm(); }
+    escape-pressed => { ReceiptsData.catalog-open = false; }
 
     card := Rectangle {
         width: min(400px, root.width - 2 * Theme.space-24);
@@ -424,10 +425,12 @@ component CatalogDialog inherits Rectangle {
                 color: Theme.text;
             }
             TextField {
+                accepted => { root.submit(); }
                 label: "Наименование";
                 text <=> ReceiptsData.catalog-name;
             }
             if ReceiptsData.catalog-has-unit : TextField {
+                accepted => { root.submit(); }
                 label: "Единица измерения";
                 placeholder: "шт, кг, л";
                 text <=> ReceiptsData.catalog-unit;

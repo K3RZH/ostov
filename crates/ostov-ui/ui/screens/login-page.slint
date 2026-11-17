@@ -34,6 +34,18 @@ export component LoginPage inherits Rectangle {
     callback change-source();
     callback back();
 
+    // Курсор в поле пароля: окно зовёт при показе страницы.
+    public function take-focus() {
+        password-field.take-focus();
+    }
+
+    // Enter в любом поле: то же, что основная кнопка.
+    function enter() {
+        if (!root.locked) {
+            root.submit();
+        }
+    }
+
     background: Theme.bg;
 
     HorizontalLayout {
@@ -109,16 +121,19 @@ export component LoginPage inherits Rectangle {
                         wrap: word-wrap;
                     }
                     if root.show-login : TextField {
+                        accepted => { root.enter(); }
                         label: root.login-label;
                         text <=> root.login;
                     }
-                    TextField {
+                    password-field := TextField {
+                        accepted => { root.enter(); }
                         label: root.password-label;
                         password: true;
                         text <=> root.password;
                         error: root.error == "" ? "" : "!";
                     }
                     if root.show-repeat : TextField {
+                        accepted => { root.enter(); }
                         label: "Повторите пароль";
                         password: true;
                         text <=> root.repeat;

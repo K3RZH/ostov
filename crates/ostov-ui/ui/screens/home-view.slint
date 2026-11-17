@@ -1,0 +1,216 @@
+import { Theme, Shape } from "../theme.slint";
+import { Icon } from "../components/icon.slint";
+
+// Пункт карточки: узел навигации. Номер тот же, что у строки дерева (`NavRow.id`), поэтому щелчок
+// проходит тем же путём, что щелчок в навигации.
+export struct HomeItem {
+    id: int,
+    title: string,
+    icon: string,
+}
+
+// Раздел меню конфигурации: карточка с его пунктами. Состав приходит из Rust (src/shell.rs).
+export struct HomeSection {
+    title: string,
+    icon: string,
+    items: [HomeItem],
+}
+
+component ItemRow inherits Rectangle {
+    in property <HomeItem> item;
+    callback clicked();
+
+    height: Theme.control-md;
+    border-radius: Shape.control-radius;
+    background: touch.has-hover ? Theme.surface-alt : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-8;
+        padding-right: Theme.space-8;
+        spacing: Theme.space-8;
+        VerticalLayout {
+            alignment: center;
+            Icon { name: root.item.icon; tint: Theme.accent-text; }
+        }
+        Text {
+            text: root.item.title;
+            font-size: Theme.font-body;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+component SectionCard inherits Rectangle {
+    in property <HomeSection> section;
+    callback opened(int);
+
+    height: content.preferred-height;
+    border-radius: Shape.surface-radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+
+    content := VerticalLayout {
+        padding: Theme.space-16;
+        spacing: Theme.space-4;
+        HorizontalLayout {
+            padding-bottom: Theme.space-8;
+            spacing: Theme.space-8;
+            VerticalLayout {
+                alignment: center;
+                Icon { name: root.section.icon; tint: Theme.text-muted; }
+            }
+            Text {
+                text: root.section.title;
+                font-size: Theme.font-subtitle;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+        for item in root.section.items : ItemRow {
+            item: item;
+            clicked => { root.opened(item.id); }
+        }
+    }
+}
+
+// Место карточки в колонке. Чужая колонка получает слот нулевой высоты: промежутки между
+// карточками входят в высоту слота, поэтому пустые слоты их не копят.
+component CardSlot inherits Rectangle {
+    in property <HomeSection> section;
+    in property <bool> mine;
+    callback opened(int);
+
+    height: root.mine ? card.height + Theme.space-16 : 0px;
+
+    card := SectionCard {
+        y: 0px;
+        width: parent.width;
+        visible: root.mine;
+        section: root.section;
+        opened(id) => { root.opened(id); }
+    }
+}
+
+// Экран «Главная»: название конфигурации и базы, карточки разделов меню и блок «Показатели».
+// Данных у экрана нет своих: всё приходит из окна (меню строится из метаданных базы).
+export component HomeView inherits Rectangle {
+    in property <string> config-name;
+    in property <string> base-name;
+    in property <[HomeSection]> sections;
+    // Номер узла навигации, на пункт которого щёлкнули.
+    callback opened(int);
+
+    // Самая узкая карточка: колонок столько, сколько их влезает в ширину экрана.
+    private property <length> card-min: 280px;
+    private property <int> columns: Math.max(1, Math.floor((root.width - 2 * Theme.space-24 + Theme.space-16) / (root.card-min + Theme.space-16)));
+
+    background: Theme.bg;
+
+    // Пределы ширины заданы явно: число колонок зависит от ширины экрана, и брать их из раскладки
+    // внутри нельзя (петля привязок: ширина, число колонок, пределы ширины, ширина).
+    Flickable {
+        min-width: 0px;
+        preferred-width: 0px;
+        max-width: 100000px;
+        content-width: self.width;
+        VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-16;
+            alignment: start;
+
+            VerticalLayout {
+                spacing: Theme.space-4;
+                Text {
+                    text: root.config-name != "" ? root.config-name : root.base-name;
+                    font-size: Theme.font-title;
+                    font-weight: 700;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+                if root.base-name != "" && root.config-name != "" : Text {
+                    text: "База: " + root.base-name;
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    overflow: elide;
+                }
+            }
+
+            VerticalLayout {
+                spacing: Theme.space-12;
+                Text {
+                    text: "Разделы";
+                    font-size: Theme.font-subtitle;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                if root.sections.length == 0 : Text {
+                    text: "В меню конфигурации нет доступных разделов.";
+                    font-size: Theme.font-body;
+                    color: Theme.text-muted;
+                    wrap: word-wrap;
+                }
+                // Карточки раскладываются по колонкам по очереди. Ширина колонок одинаковая (желаемая
+                // ширина нулевая, лишнее место делится поровну), высота карточки зависит только от
+                // числа её пунктов.
+                HorizontalLayout {
+                    spacing: Theme.space-16;
+                    for column in root.columns : VerticalLayout {
+                        alignment: start;
+                        preferred-width: 0px;
+                        horizontal-stretch: 1;
+                        for section[index] in root.sections : CardSlot {
+                            section: section;
+                            mine: mod(index, root.columns) == column;
+                            opened(id) => { root.opened(id); }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: Theme.space-12;
+                Text {
+                    text: "Показатели";
+                    font-size: Theme.font-subtitle;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+                Rectangle {
+                    height: empty.preferred-height;
+                    border-radius: Shape.surface-radius;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    background: Theme.surface;
+                    empty := HorizontalLayout {
+                        padding: Theme.space-16;
+                        spacing: Theme.space-12;
+                        VerticalLayout {
+                            alignment: center;
+                            Icon { name: "bar-chart"; tint: Theme.text-muted; }
+                        }
+                        Text {
+                            text: "Показатели появятся здесь, когда конфигурация их опишет.";
+                            font-size: Theme.font-body;
+                            color: Theme.text-muted;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -4,8 +4,10 @@ import { IconButton } from "../components/icon-button.slint";
 import { WindowControls } from "../components/window-controls.slint";
 import { UserRow } from "users-view.slint";
 import { TabHost, TabItem } from "tab-host.slint";
+import { HomeSection } from "home-view.slint";
 import { MenuAction, MenuMetrics, MenuPanel } from "../components/context-menu.slint";
 import { NavPanel, NavRow } from "../components/nav-panel.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
 
 component Separator inherits Rectangle {
     width: 1px;
@@ -17,6 +19,13 @@ component Separator inherits Rectangle {
 // База, режим и пользователь приходят из Rust (src/app.rs) после открытия базы.
 export component MainPage inherits Rectangle {
     in property <string> base-name;
+    // Страница сейчас на виду: окно держит и скрытые страницы, форма объекта в них не строится.
+    in property <bool> shown: true;
+    // Предпросмотр из конфигуратора: постоянная метка в шапке (К-24), её нельзя убрать.
+    in property <bool> preview;
+    // Название конфигурации и карточки разделов для экрана «Главная».
+    in property <string> config-name;
+    in property <[HomeSection]> home-sections;
     in property <string> database-name;
     in property <string> mode-text;
     in property <string> user-text;
@@ -53,6 +62,7 @@ export component MainPage inherits Rectangle {
     callback toggle-maximize();
     callback close-window();
     callback settings-clicked();
+    callback about-clicked();
 
     // Вкладка «Пользователи и роли»
     in property <[UserRow]> users;
@@ -110,9 +120,17 @@ export component MainPage inherits Rectangle {
                     alignment: center;
                     Text { text: root.base-name; font-size: Theme.font-body; color: Theme.text-muted; }
                 }
-                // Поиск по системе, «+», уведомления и справка вернутся вместе с командами ядра
-                // (глобальный поиск, фоновые задачи); пока их нет, кнопок без действия нет тоже.
+                if root.preview : VerticalLayout {
+                    alignment: center;
+                    Chip { text: "Предпросмотр, тестовая база"; kind: ChipKind.draft; }
+                }
                 Rectangle { horizontal-stretch: 1; }
+                // Поиск, «создать» и уведомления ждут команд ядра (глобальный поиск, фоновые
+                // задачи), поэтому пока выключены. В справке пока один пункт, «О программе».
+                VerticalLayout { alignment: center; IconButton { icon: "search"; enabled: false; } }
+                VerticalLayout { alignment: center; IconButton { icon: "plus"; enabled: false; } }
+                VerticalLayout { alignment: center; IconButton { icon: "bell"; enabled: false; } }
+                help-button := VerticalLayout { alignment: center; IconButton { icon: "help"; clicked => { help-menu.show(); } } }
                 VerticalLayout { alignment: center; IconButton { icon: "settings"; clicked => { root.settings-clicked(); } } }
                 VerticalLayout {
                     alignment: center;
@@ -142,10 +160,15 @@ export component MainPage inherits Rectangle {
             }
 
             tab-host := TabHost {
+                shown: root.shown;
                 tabs: root.tabs;
                 active-tab: root.active-tab;
                 users: root.users;
                 user-message: root.user-message;
+                config-name: root.config-name;
+                base-name: root.base-name;
+                home-sections: root.home-sections;
+                nav-clicked(id) => { root.nav-clicked(id); }
                 tab-selected(i) => { root.tab-selected(i); }
                 tab-closed(i) => { root.tab-closed(i); }
                 tab-detached(i) => { root.tab-detached(i); }
@@ -166,6 +189,8 @@ export component MainPage inherits Rectangle {
             height: 24px;
             background: Theme.surface-alt;
             Rectangle {
+                // Без y черта вставала по центру строки, а не по её верхнему краю.
+                y: 0px;
                 height: 1px;
                 background: Theme.border;
             }
@@ -187,15 +212,51 @@ export component MainPage inherits Rectangle {
         }
     }
 
-    // Меню пользователя под аватаром: кто вошёл и что можно сделать с сессией.
-    user-menu := PopupWindow {
-        x: root.width - MenuMetrics.width - Theme.space-12;
+    // Меню справки под «?».
+    help-menu := PopupWindow {
+        x: help-button.x + help-button.width - self.width;
         y: 46px;
-        width: MenuMetrics.width;
-        height: 56px + Theme.space-4 + MenuMetrics.height(2);
+        width: MenuMetrics.width + 2 * Theme.space-4;
+        height: MenuMetrics.height(1) + 2 * Theme.space-4;
         close-policy: PopupClosePolicy.close-on-click-outside;
 
+        Rectangle {
+            border-radius: Shape.surface-radius;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            background: Theme.surface-alt;
+        }
         VerticalLayout {
+            padding: Theme.space-4;
+            MenuPanel {
+                actions: [
+                    { id: "about", label: "О программе", icon: "help", danger: false, enabled: true, divider: false },
+                ];
+                chosen(id) => {
+                    help-menu.close();
+                    root.about-clicked();
+                }
+            }
+        }
+    }
+
+    // Меню пользователя под аватаром: кто вошёл и что можно сделать с сессией.
+    user-menu := PopupWindow {
+        x: root.width - self.width - Theme.space-12;
+        y: 46px;
+        width: MenuMetrics.width + 2 * Theme.space-4;
+        height: 56px + Theme.space-4 + MenuMetrics.height(2) + 2 * Theme.space-4;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        // Общая подложка: без неё между карточками просвечивал экран под меню.
+        Rectangle {
+            border-radius: Shape.surface-radius;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            background: Theme.surface-alt;
+        }
+        VerticalLayout {
+            padding: Theme.space-4;
             spacing: Theme.space-4;
             Rectangle {
                 height: 56px;
@@ -215,7 +276,7 @@ export component MainPage inherits Rectangle {
             MenuPanel {
                 actions: [
                     { id: "switch", label: "Сменить пользователя", icon: "user", danger: false, enabled: root.can-switch-user, divider: false },
-                    { id: "close", label: "Закрыть базу", icon: "database", danger: false, enabled: true, divider: true },
+                    { id: "close", label: root.preview ? "Закрыть предпросмотр" : "Закрыть базу", icon: "database", danger: false, enabled: true, divider: true },
                 ];
                 chosen(id) => {
                     user-menu.close();

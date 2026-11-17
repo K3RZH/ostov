@@ -1,0 +1,52 @@
+import { Theme, Shape } from "../theme.slint";
+import { Button, ButtonKind } from "../components/button.slint";
+
+// Предпросмотр из конфигуратора вместо выбора базы: пока база открывается, ожидание; если не
+// открылась, причина и «Закрыть». Другую базу отсюда не выбрать: предпросмотр работает только
+// с тестовой базой своей папки конфигурации.
+export component PreviewStart inherits Rectangle {
+    in property <string> config-name;
+    in property <string> error;
+    callback close-clicked();
+
+    background: Theme.bg;
+
+    card := Rectangle {
+        width: min(520px, root.width - 2 * Theme.space-24);
+        height: content.preferred-height;
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-24, (root.height - self.height) / 2);
+        border-radius: Shape.surface-radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        background: Theme.surface;
+
+        content := VerticalLayout {
+            padding: Theme.space-24;
+            spacing: Theme.space-12;
+            Text {
+                text: root.error == "" ? "Открываем тестовую базу…" : "Тестовая база не открылась";
+                font-size: Theme.font-title;
+                font-weight: 700;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            Text {
+                text: root.error == ""
+                    ? "Предпросмотр конфигурации «" + root.config-name + "»."
+                    : root.error;
+                font-size: Theme.font-body;
+                color: root.error == "" ? Theme.text-muted : Theme.danger;
+                wrap: word-wrap;
+            }
+            if root.error != "" : HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Закрыть";
+                    kind: ButtonKind.primary;
+                    clicked => { root.close-clicked(); }
+                }
+            }
+        }
+    }
+}

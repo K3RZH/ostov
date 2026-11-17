@@ -4,14 +4,18 @@ import { LoginPage } from "screens/login-page.slint";
 import { MainPage } from "screens/main-page.slint";
 import { NavPanel, NavRow } from "components/nav-panel.slint";
 import { TabHost, TabItem } from "screens/tab-host.slint";
+import { HomeSection } from "screens/home-view.slint";
 import { CreateDialog } from "screens/create-dialog.slint";
 import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { PasswordDialog } from "screens/password-dialog.slint";
+import { UserFieldsDialog, UserFieldsData } from "screens/user-fields-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 import { ConfirmDialog } from "components/confirm-dialog.slint";
+import { PreviewStart } from "screens/preview-start.slint";
+import { AboutDialog } from "components/about-dialog.slint";
 
 // Окно приложения: страницы сменяют друг друга (0 выбор базы, 1 вход, 2 главная). Страница 4 это
 // дополнительное окно с вкладками: те же вкладки и содержимое, но без навигации.
@@ -23,6 +27,8 @@ export component AppWindow inherits Window {
     // Версия программы из Cargo.toml: задаёт Rust (src/app.rs), руками не пишем.
     in property <string> app-version;
     in property <string> config-info;
+    // Предпросмотр из конфигуратора (`--preview`): тестовая база, метка на главной, без выбора базы.
+    in property <bool> preview;
 
     // Выбор базы
     in-out property <int> selected-recent <=> start-page.selected-recent;
@@ -81,6 +87,9 @@ export component AppWindow inherits Window {
     in-out property <string> nu-repeat;
     callback user-add-confirmed();
 
+    // «О программе» из меню справки в шапке.
+    in-out property <bool> about-open;
+
     // Настройки интерфейса: выбранные значения хранит Rust (src/settings.rs).
     in-out property <bool> settings-open;
     in-out property <bool> dark-theme;
@@ -127,6 +136,8 @@ export component AppWindow inherits Window {
     callback switch-user <=> main-page.switch-user;
     callback close-base <=> main-page.close-base;
     in property <[NavRow]> nav <=> main-page.nav;
+    // Карточки разделов для экрана «Главная»; те же в дополнительных окнах.
+    in property <[HomeSection]> home-sections;
     in property <[TabItem]> tabs <=> main-page.tabs;
     in property <int> active-tab <=> main-page.active-tab;
     in property <[UserRow]> users <=> main-page.users;
@@ -183,18 +194,51 @@ export component AppWindow inherits Window {
     default-font-family: "Open Sans";
     background: Theme.bg;
 
+    // Клавиатура без мыши: на выборе базы фокус у списка, на входе у поля пароля. Диалог при
+    // закрытии уносит фокус с собой, поэтому после него фокус возвращается странице. На остальных
+    // страницах фокус снимается: иначе Enter достался бы полю пароля уже скрытой страницы входа.
+    function restore-focus() {
+        if (root.creating || root.adding || root.forgetting || root.settings-open || root.about-open) {
+            return;
+        }
+        if (root.page == 0) {
+            start-page.take-focus();
+        } else if (root.page == 1) {
+            login-page.take-focus();
+        } else {
+            start-page.park-focus();
+        }
+    }
+    init => { root.restore-focus(); }
+    changed page => { root.restore-focus(); }
+    changed creating => { root.restore-focus(); }
+    changed adding => { root.restore-focus(); }
+    changed forgetting => { root.restore-focus(); }
+    changed settings-open => { root.restore-focus(); }
+    changed about-open => { root.restore-focus(); }
+
     start-page := StartPage {
         app-version: "Версия " + root.app-version;
         x: 0px;
         y: root.chrome-height;
         width: root.width;
         height: root.height - root.chrome-height;
-        visible: root.page == 0;
+        visible: root.page == 0 && !root.preview;
         config-name: root.config-name;
         config-info: root.config-info;
         create-database => { root.creating = true; }
         add-existing => { root.adding = true; }
         forget => { root.forgetting = true; }
+    }
+
+    if root.page == 0 && root.preview : PreviewStart {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        config-name: root.config-name;
+        error: root.start-error;
+        close-clicked => { root.close(); }
     }
 
     login-page := LoginPage {
@@ -214,6 +258,10 @@ export component AppWindow inherits Window {
         width: root.width;
         height: root.height - root.chrome-height;
         visible: root.page == 2;
+        shown: root.page == 2;
+        preview: root.preview;
+        config-name: root.config-name;
+        home-sections: root.home-sections;
         maximized: root.maximized;
         drop-target: root.drop-target;
         insert-at: root.insert-at;
@@ -224,6 +272,7 @@ export component AppWindow inherits Window {
         toggle-maximize => { root.maximized = !root.maximized; }
         close-window => { root.close(); }
         settings-clicked => { root.settings-open = true; }
+        about-clicked => { root.about-open = true; }
         user-add-clicked => { root.adding-user = true; }
     }
 
@@ -241,6 +290,7 @@ export component AppWindow inherits Window {
     }
     host-tabs := TabHost {
         visible: root.page == 4;
+        shown: root.page == 4;
         x: host-nav.width;
         y: root.chrome-height;
         width: root.width - host-nav.width;
@@ -250,6 +300,10 @@ export component AppWindow inherits Window {
         active-tab: root.active-tab;
         users: root.users;
         user-message: root.user-message;
+        config-name: root.config-name;
+        base-name: root.base-name;
+        home-sections: root.home-sections;
+        nav-clicked(id) => { root.nav-clicked(id); }
         tab-selected(i) => { root.tab-selected(i); }
         tab-closed(i) => { root.tab-closed(i); }
         tab-detached(i) => { root.tab-detached(i); }
@@ -349,6 +403,16 @@ export component AppWindow inherits Window {
         closed => { root.settings-open = false; }
     }
 
+    if root.about-open : AboutDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
+        app-name: "Ostov";
+        version: root.app-version;
+        closed => { root.about-open = false; }
+    }
+
     if root.changing-password : PasswordDialog {
         x: 0px;
         y: root.chrome-height;
@@ -384,6 +448,14 @@ export component AppWindow inherits Window {
             root.nu-password = "";
             root.nu-repeat = "";
         }
+    }
+
+    // «Свойства пользователя»: что в окне и куда идут правки, решает Rust (src/user_fields.rs).
+    if UserFieldsData.shown : UserFieldsDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
     }
 
     if root.page != 2 : WindowBar {

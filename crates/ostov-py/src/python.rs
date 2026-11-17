@@ -130,15 +130,16 @@ fn start_python() -> Result<(), PyLoadError> {
 }
 
 /// Где лежит стандартная библиотека: в Windows `<home>/Lib`, в Linux и macOS
-/// `<home>/lib/python3.<N>`. Версию берём из имени папки, а не зашиваем.
+/// `<home>/lib/python3.<N>`, а в Fedora, RHEL и openSUSE `<home>/lib64/python3.<N>`
+/// (`sys.platlibdir`). Версию берём из имени папки, а не зашиваем.
 fn stdlib_dirs(home: &Path) -> Vec<PathBuf> {
     if cfg!(windows) {
         return vec![home.join("Lib")];
     }
-    let lib = home.join("lib");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&lib)
-        .into_iter()
-        .flatten()
+    const LIBS: [&str; 2] = ["lib", "lib64"];
+    let mut dirs: Vec<PathBuf> = LIBS
+        .iter()
+        .flat_map(|lib| std::fs::read_dir(home.join(lib)).into_iter().flatten())
         .flatten()
         .filter(|entry| {
             entry
@@ -150,8 +151,8 @@ fn stdlib_dirs(home: &Path) -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     if dirs.is_empty() {
-        // Для сообщения: показать, какую папку ждали.
-        dirs.push(lib.join("python3.N"));
+        // Для сообщения: показать, какие папки ждали.
+        dirs.extend(LIBS.iter().map(|lib| home.join(lib).join("python3.N")));
     }
     dirs
 }
@@ -714,12 +715,19 @@ mod tests {
             assert_eq!(stdlib_dirs(&home), vec![home.join("Lib")]);
         } else {
             // Папки ещё нет: в сообщении видно, где искали.
-            assert_eq!(stdlib_dirs(&home), vec![home.join("lib/python3.N")]);
+            assert_eq!(
+                stdlib_dirs(&home),
+                vec![home.join("lib/python3.N"), home.join("lib64/python3.N")]
+            );
             let dir = home.join("lib/python3.13");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("os.py"), "").unwrap();
             std::fs::create_dir_all(home.join("lib/pkgconfig")).unwrap();
-            assert_eq!(stdlib_dirs(&home), vec![dir]);
+            assert_eq!(stdlib_dirs(&home), vec![dir.clone()]);
+            // Fedora: стандартная библиотека в lib64.
+            let dir64 = home.join("lib64/python3.15");
+            std::fs::create_dir_all(&dir64).unwrap();
+            assert_eq!(stdlib_dirs(&home), vec![dir, dir64]);
         }
         let _ = std::fs::remove_dir_all(&home);
     }

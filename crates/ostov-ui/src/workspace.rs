@@ -320,6 +320,16 @@ impl Workspace {
             .map(|(id, _)| WindowRef::Extra(*id))
     }
 
+    /// Вкладка index окна `window` это «Главная». Она не покидает главное окно и не приходит в
+    /// него из других: её можно только переставлять среди вкладок главного окна.
+    fn is_home(&self, shell: &Shell, window: WindowRef, index: usize) -> bool {
+        let tab = match window {
+            WindowRef::Main => shell.tabs().get(index),
+            WindowRef::Extra(id) => self.list(id).and_then(|list| list.tabs().get(index)),
+        };
+        tab.is_some_and(Tab::is_home)
+    }
+
     fn take(&mut self, shell: &mut Shell, from: WindowRef, index: usize) -> Option<Tab> {
         match from {
             WindowRef::Main => shell.take_tab(index),
@@ -345,6 +355,9 @@ impl Workspace {
         if let WindowRef::Extra(id) = from
             && self.list(id).is_some_and(|l| l.tabs().len() == 1)
         {
+            return None;
+        }
+        if from == WindowRef::Main && self.is_home(shell, from, index) {
             return None;
         }
         let tab = self.take(shell, from, index)?;
@@ -373,6 +386,12 @@ impl Workspace {
             return None;
         }
         let same = from == to;
+        if !same
+            && (from == WindowRef::Main || to == WindowRef::Main)
+            && self.is_home(shell, from, index)
+        {
+            return None;
+        }
         let tab = self.take(shell, from, index)?;
         // После изъятия места правее исходного сдвигаются на единицу.
         let at = if same && at > index { at - 1 } else { at };
@@ -408,6 +427,9 @@ impl Workspace {
         index: usize,
         follower: WindowId,
     ) -> Change {
+        if from == WindowRef::Main && self.is_home(shell, from, index) {
+            return self.cancel_detach(follower);
+        }
         self.take(shell, from, index);
         self.active = WindowRef::Extra(follower);
         Change {
@@ -502,6 +524,68 @@ mod tests {
         assert_eq!(extra_titles(&ws, id), ["Поступление № 7"]);
         assert_eq!(ws.active(), WindowRef::Extra(id));
         assert!(change.closed.is_empty());
+    }
+
+    #[test]
+    fn home_tab_cannot_be_detached_into_a_window() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        assert!(ws.detach(&mut shell, WindowRef::Main, 0).is_none());
+        assert_eq!(shell.tabs().len(), 3);
+        assert!(shell.tabs()[0].is_home());
+        assert!(ws.extra_ids().is_empty());
+    }
+
+    #[test]
+    fn home_tab_cannot_be_moved_to_another_window() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let id = ws
+            .detach(&mut shell, WindowRef::Main, 2)
+            .unwrap()
+            .opened
+            .unwrap();
+        assert!(
+            ws.move_tab(&mut shell, WindowRef::Main, 0, WindowRef::Extra(id), 0)
+                .is_none()
+        );
+        assert!(shell.tabs()[0].is_home());
+        assert_eq!(extra_titles(&ws, id), ["Поступление № 7"]);
+    }
+
+    #[test]
+    fn dragged_copy_of_home_tab_is_closed_and_the_tab_stays() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let id = ws.open_extra(shell.tabs()[0].clone());
+        let change = ws.finish_detach(&mut shell, WindowRef::Main, 0, id);
+        assert_eq!(change.closed, [id]);
+        assert!(ws.extra_ids().is_empty());
+        assert!(shell.tabs()[0].is_home());
+        assert_eq!(shell.tabs().len(), 3);
+    }
+
+    #[test]
+    fn home_tab_opened_in_extra_window_does_not_return_to_main() {
+        let mut shell = shell_with_tabs();
+        let mut ws = Workspace::new();
+        let id = ws
+            .detach(&mut shell, WindowRef::Main, 1)
+            .unwrap()
+            .opened
+            .unwrap();
+        let home = shell.node_tab(0).unwrap();
+        let list = ws.list_mut(id).unwrap();
+        list.open_node(home);
+        assert_eq!(list.tabs().len(), 2);
+        // Эта «Главная» живёт в своём окне; в главном окне уже есть своя.
+        let main_tabs = shell.tabs().len();
+        assert!(
+            ws.move_tab(&mut shell, WindowRef::Extra(id), 1, WindowRef::Main, 0)
+                .is_none()
+        );
+        assert_eq!(shell.tabs().len(), main_tabs);
+        assert_eq!(ws.list(id).map(|list| list.tabs().len()), Some(2));
     }
 
     #[test]

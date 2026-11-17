@@ -7,9 +7,12 @@ import { ReceiptsView, ReceiptFormView } from "receipts-view.slint";
 import { JournalView } from "journal-view.slint";
 import { PeriodView } from "period-view.slint";
 import { ObjectListView } from "object-list-view.slint";
+import { ObjectFormView } from "object-form-view.slint";
+import { HomeView, HomeSection } from "home-view.slint";
 
 // object: объект конфигурации вкладки (имя в ядре); по нему экран списка берёт свои данные.
-export struct TabItem { title: string, icon: string, modified: bool, view: string, object: string, preview: bool }
+// doc-id: id документа во вкладке с формой (строкой: i64 в Slint нет), у остальных вкладок пусто.
+export struct TabItem { title: string, icon: string, modified: bool, view: string, object: string, doc-id: string, preview: bool }
 
 component TabView inherits Rectangle {
     in property <TabItem> tab;
@@ -26,6 +29,8 @@ component TabView inherits Rectangle {
     callback drag-ended(length, length);
     // Эту вкладку тащат: она бледнеет, вместо неё по панели идёт «призрак».
     in property <bool> lifted;
+    // У «Главной» главного окна крестика нет: она остаётся всегда.
+    in property <bool> closable: true;
 
     // Ширину вкладки задаёт панель вкладок: вкладки сжимаются, а когда их много, прокручиваются.
     callback scrolled(length);
@@ -120,7 +125,7 @@ component TabView inherits Rectangle {
                 background: Theme.accent-text;
             }
         }
-        VerticalLayout {
+        if root.closable : VerticalLayout {
             alignment: center;
             IconButton {
                 icon: "close";
@@ -138,6 +143,16 @@ export component TabHost inherits VerticalLayout {
     in property <int> active-tab;
     in property <[UserRow]> users;
     in property <string> user-message;
+    // Экран «Главная»: название конфигурации и базы, карточки разделов. Щелчок по пункту карточки
+    // идёт как щелчок в навигации (номер узла дерева).
+    in property <string> config-name;
+    in property <string> base-name;
+    in property <[HomeSection]> home-sections;
+    // Узел сейчас на виду. Окно держит два узла TabHost (главная страница и окно-вкладка), один
+    // из них скрыт. Форма объекта в скрытом не создаётся: её поле взяло бы фокус, а нажатия
+    // клавиш скрытому полю Slint не отдаёт.
+    in property <bool> shown: true;
+    callback nav-clicked(int);
     callback tab-selected(int);
     callback tab-closed(int);
     callback tab-detached(int);
@@ -168,6 +183,7 @@ export component TabHost inherits VerticalLayout {
     // Тоже ушёл вбок за край окна (слева от панели в главном окне стоит навигация, это не выход).
     // Единственная вкладка дополнительного окна остаётся на месте: тащится всё окно.
     private property <bool> drag-out: root.drag-index >= 0 && !(root.extra && root.tabs.length == 1)
+        && !root.pinned(root.drag-index)
         && (root.drag-y < -24px || root.drag-y > bar.height + 24px
             || root.drag-x > bar.width + 24px || root.drag-x < -bar.absolute-position.x - 24px);
     // Где внутри вкладки взялись за неё (чтобы вкладка не прыгала под указателем).
@@ -184,7 +200,18 @@ export component TabHost inherits VerticalLayout {
 
     // Для каких видов вкладок экран уже есть; остальным показывается заглушка.
     pure function has-screen(view: string) -> bool {
-        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period" || view == "list"
+        view == "users" || view == "receipts" || view == "receipt" || view == "journal" || view == "period" || view == "list" || view == "form" || view == "home"
+    }
+
+    pure function is-home(i: int) -> bool {
+        i >= 0 && i < root.tabs.length && root.tabs[i].view == "home"
+    }
+
+    // «Главная» главного окна: её нельзя закрыть и вынести в другое окно (переставлять можно).
+    // Из дополнительного окна она в главное не возвращается. Правило держит Rust (src/shell.rs,
+    // src/workspace.rs), здесь только вид.
+    pure function pinned(i: int) -> bool {
+        !root.extra && root.is-home(i)
     }
 
     pure function slot-x(i: int) -> length {
@@ -269,6 +296,7 @@ export component TabHost inherits VerticalLayout {
                                 tab: tab;
                                 strip-bg: bar.background;
                                 active: i == root.active-tab;
+                                closable: !root.pinned(i);
                                 visible: !(i == root.drag-index && root.drag-out);
                                 selected => { root.tab-selected(i); }
                                 closed => { root.tab-closed(i); }
@@ -357,6 +385,16 @@ export component TabHost inherits VerticalLayout {
                 if root.tabs.length > 0 && root.tabs[root.active-tab].view == "list" : ObjectListView {
                     object: root.tabs[root.active-tab].object;
                 }
+                if root.shown && root.tabs.length > 0 && root.tabs[root.active-tab].view == "form" : ObjectFormView {
+                    object: root.tabs[root.active-tab].object;
+                    doc-id: root.tabs[root.active-tab].doc-id;
+                }
+                if root.tabs.length > 0 && root.tabs[root.active-tab].view == "home" : HomeView {
+                    config-name: root.config-name;
+                    base-name: root.base-name;
+                    sections: root.home-sections;
+                    opened(id) => { root.nav-clicked(id); }
+                }
                 if root.tabs.length == 0 || !root.has-screen(root.tabs[root.active-tab].view) : Rectangle {
                     background: Theme.bg;
                     VerticalLayout {
@@ -389,8 +427,9 @@ export component TabHost inherits VerticalLayout {
         if !root.extra : MenuPanel {
             actions: [
                 { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
-                  enabled: root.tab-menu-index >= 0, divider: false },
-                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },
+                  enabled: root.tab-menu-index >= 0 && !root.pinned(root.tab-menu-index), divider: false },
+                { id: "close", label: "Закрыть вкладку", icon: "close", danger: false,
+                  enabled: root.tab-menu-index >= 0 && !root.pinned(root.tab-menu-index), divider: true },
             ];
             chosen(id) => {
                 if (id == "detach") {
@@ -404,7 +443,7 @@ export component TabHost inherits VerticalLayout {
         if root.extra : MenuPanel {
             actions: [
                 { id: "return", label: "Вернуть в главное окно", icon: "undo", danger: false,
-                  enabled: root.tab-menu-index >= 0, divider: false },
+                  enabled: root.tab-menu-index >= 0 && !root.is-home(root.tab-menu-index), divider: false },
                 { id: "detach", label: "Открыть в отдельном окне", icon: "external", danger: false,
                   enabled: root.tabs.length > 1 && root.tab-menu-index >= 0, divider: false },
                 { id: "close", label: "Закрыть вкладку", icon: "close", danger: false, enabled: root.tab-menu-index >= 0, divider: true },

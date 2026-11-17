@@ -1,0 +1,60 @@
+import { Theme } from "../theme.slint";
+import { Chip, ChipKind } from "../components/chip.slint";
+import { ErpGrid, GridColumn, GridRow } from "../components/erp-grid.slint";
+
+// Панель «Проверка»: то, что печатает `ostov check`, списком «файл, строка, причина».
+export component CheckPanel inherits Rectangle {
+    in property <string> summary;
+    in property <bool> passed;
+    in property <bool> failed;
+    in property <[GridColumn]> columns;
+    in property <[GridRow]> rows;
+    in property <string> empty-text;
+    callback resize-begin();
+    callback resize-column(int, length, length);
+    callback resize-end();
+
+    height: 176px;
+    background: Theme.surface;
+
+    Rectangle {
+        y: 0px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    VerticalLayout {
+        padding: Theme.space-12;
+        padding-left: Theme.space-16;
+        padding-right: Theme.space-16;
+        spacing: Theme.space-8;
+
+        HorizontalLayout {
+            spacing: Theme.space-12;
+            Text {
+                text: "Проверка";
+                font-size: Theme.font-subtitle;
+                font-weight: 700;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                Chip {
+                    text: root.summary;
+                    kind: root.failed ? ChipKind.error : root.passed ? ChipKind.posted : ChipKind.neutral;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        ErpGrid {
+            vertical-stretch: 1;
+            columns: root.columns;
+            rows: root.rows;
+            empty-text: root.empty-text;
+            resize-begin => { root.resize-begin(); }
+            resize-column(i, delta, width) => { root.resize-column(i, delta, width); }
+            resize-end => { root.resize-end(); }
+        }
+    }
+}

@@ -17,6 +17,10 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 
+[profile.dev]
+# Бинарники по 530 МБ с полной отладкой раздували target до 100 ГБ, таблицы строк хватает для трассировок.
+debug = "line-tables-only"
+
 [profile.release]
 # Переполнение в учётной арифметике — ошибка, а не тихое искажение (СТ-56). Цену замерить.
 overflow-checks = true

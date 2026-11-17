@@ -1,6 +1,7 @@
 import { Theme, Shape } from "../theme.slint";
 import { Button, ButtonKind } from "../components/button.slint";
 import { Chip, ChipKind } from "../components/chip.slint";
+import { UserFieldsData } from "user-fields-dialog.slint";
 
 export struct UserRow { login: string, name: string, role: string, active: bool }
 
@@ -19,6 +20,9 @@ export component UsersView inherits Rectangle {
     callback add-clicked();
     callback toggle(int);
     callback password(int);
+
+    // Колонка действий по ширине кнопок: «Свойства» есть, только если конфигурация их объявила.
+    private property <length> actions-width: UserFieldsData.available ? 360px : 260px;
 
     background: Theme.bg;
 
@@ -73,7 +77,7 @@ export component UsersView inherits Rectangle {
                 Header { text: "Имя"; horizontal-stretch: 1; }
                 Header { text: "Роль"; width: 160px; }
                 Header { text: "Статус"; width: 100px; }
-                Rectangle { width: 220px; }
+                Rectangle { width: root.actions-width; }
             }
         }
 
@@ -125,10 +129,15 @@ export component UsersView inherits Rectangle {
                             }
                         }
                         VerticalLayout {
-                            width: 220px;
+                            width: root.actions-width;
                             alignment: center;
                             HorizontalLayout {
                                 alignment: end;
+                                if UserFieldsData.available : Button {
+                                    text: "Свойства";
+                                    kind: ButtonKind.text;
+                                    clicked => { UserFieldsData.open(i); }
+                                }
                                 Button {
                                     text: "Сменить пароль";
                                     kind: ButtonKind.text;
