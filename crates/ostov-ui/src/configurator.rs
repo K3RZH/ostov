@@ -727,7 +727,7 @@ pub(crate) fn relative_to(dir: &Path, errors: Vec<ostov_meta::Error>) -> Vec<ost
     errors
         .into_iter()
         .map(|error| match error.file.strip_prefix(dir) {
-            Ok(file) => ostov_meta::Error::new(file, error.line, error.reason),
+            Ok(file) => ostov_meta::Error::new(file, error.line, error.code, error.reason),
             Err(_) => error,
         })
         .collect()
@@ -1209,8 +1209,18 @@ mod tests {
     #[test]
     fn check_errors_become_rows_with_file_line_and_reason() {
         let errors = [
-            ostov_meta::Error::new("config/goods.yaml", Some(7), "нет поля"),
-            ostov_meta::Error::new("config/ostov.yaml", None, "нет манифеста"),
+            ostov_meta::Error::new(
+                "config/goods.yaml",
+                Some(7),
+                ostov_meta::error::codes::UNKNOWN_KEY,
+                "нет поля",
+            ),
+            ostov_meta::Error::new(
+                "config/ostov.yaml",
+                None,
+                ostov_meta::error::codes::NO_MANIFEST,
+                "нет манифеста",
+            ),
         ];
         let report = CheckReport::from_errors(&errors);
         assert!(report.is_failed());

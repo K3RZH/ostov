@@ -19,8 +19,12 @@ use crate::local_base::Config;
 use crate::receipts_ui::ReceiptsUi;
 use crate::settings::Settings;
 use crate::shell::Shell;
+use crate::user_fields::UserFieldsUi;
 use crate::users::Directory;
-use crate::{AppWindow, HomeItem, HomeSection, NavRow, RecentDb, Shape, TabItem, Theme, UserRow};
+use crate::{
+    AppWindow, HomeItem, HomeSection, NavRow, RecentDb, Shape, TabItem, Theme, UserFieldsData,
+    UserRow,
+};
 
 /// Страницы единственного окна (совпадают со свойством `page` в app-window.slint).
 const PAGE_START: i32 = 0;
@@ -550,6 +554,13 @@ fn enter_main(app: &AppWindow, screens: &Screens, session: &Session) {
         .map(|role| role.title.as_str().into())
         .collect();
     app.set_roles(ModelRc::new(VecModel::from(titles)));
+    // «Свойства» у пользователя есть, только если конфигурация объявила свойства (ADR-043).
+    app.global::<UserFieldsData>().set_available(
+        session
+            .meta
+            .as_ref()
+            .is_some_and(|meta| !meta.user_fields.is_empty()),
+    );
     // В базе без пользователей первым нужен администратор: предлагаем его роль сразу.
     let default_role = if session.logged_in {
         None
@@ -1161,6 +1172,17 @@ pub fn start(launch: &Launch) -> Result<AppWindow, String> {
             windows: windows.clone(),
             directory: directory.clone(),
             session: session.clone(),
+            fields: UserFieldsUi::new({
+                let main = app.as_weak();
+                move |login| {
+                    if let Some(main) = main.upgrade() {
+                        show_status(
+                            &main,
+                            &format!("Свойства пользователя «{login}» сохранены."),
+                        );
+                    }
+                }
+            }),
         },
         admin: AdminUi::new(app.as_weak(), windows.clone(), {
             let session = session.clone();
@@ -1449,6 +1471,9 @@ pub fn start(launch: &Launch) -> Result<AppWindow, String> {
             if let Some(main) = main.upgrade() {
                 refresh_users(window, &users.directory.borrow());
                 window.set_roles(main.get_roles());
+                window
+                    .global::<UserFieldsData>()
+                    .set_available(main.global::<UserFieldsData>().get_available());
                 wire_users(window, &users);
                 admin.attach_window(window);
             }
@@ -1484,6 +1509,8 @@ struct UsersUi {
     windows: crate::windows::Windows,
     directory: Rc<RefCell<Directory>>,
     session: Rc<RefCell<Session>>,
+    /// Окно «Свойства пользователя» (ADR-043).
+    fields: UserFieldsUi,
 }
 
 impl UsersUi {
@@ -1497,6 +1524,7 @@ impl UsersUi {
 
     /// Забывает пользователей прошлой базы.
     fn clear(&self) {
+        self.fields.close();
         *self.directory.borrow_mut() = Directory::default();
         self.show_all();
     }
@@ -1565,6 +1593,24 @@ impl UsersUi {
 
 /// Подключает «Пользователи и роли» к окну `window`.
 fn wire_users(window: &AppWindow, users: &UsersUi) {
+    users.fields.attach(window);
+    window.global::<UserFieldsData>().on_open({
+        let (window, users) = (window.as_weak(), users.clone());
+        move |row| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let Some(login) =
+                index(row).and_then(|i| users.directory.borrow().get(i).map(|u| u.login.clone()))
+            else {
+                return;
+            };
+            let session = users.session.borrow();
+            if let (Some(engine), Some(meta)) = (session.engine.clone(), session.meta.as_ref()) {
+                users.fields.open(&window, engine, &login, meta);
+            }
+        }
+    });
     window.on_user_toggle({
         let (window, users) = (window.as_weak(), users.clone());
         move |row| {

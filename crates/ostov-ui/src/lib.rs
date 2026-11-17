@@ -40,6 +40,7 @@ pub mod sorting;
 pub mod test_run;
 #[cfg(test)]
 mod test_support;
+pub mod user_fields;
 pub mod users;
 pub mod values;
 pub mod windows;

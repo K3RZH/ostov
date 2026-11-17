@@ -1318,7 +1318,7 @@ fn field_item(state: &FormState, index: usize, objects: &[ObjectMeta]) -> Option
 /// Поле или ячейка для редактора. `can_type`: правится текстом, `can_pick`: значение выбирают
 /// из справочника. Если выбирать можно, а справочник недоступен, поле закрыто и под ним
 /// сказано почему.
-fn editor_item(
+pub(crate) fn editor_item(
     field: &FormField,
     can_type: bool,
     can_pick: bool,

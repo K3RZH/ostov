@@ -10,6 +10,7 @@ import { AddDialog } from "screens/add-dialog.slint";
 import { SettingsDialog } from "screens/settings-dialog.slint";
 import { UserDialog } from "screens/user-dialog.slint";
 import { PasswordDialog } from "screens/password-dialog.slint";
+import { UserFieldsDialog, UserFieldsData } from "screens/user-fields-dialog.slint";
 import { UserRow } from "screens/users-view.slint";
 import { WindowBar } from "components/window-bar.slint";
 import { ConfirmDialog } from "components/confirm-dialog.slint";
@@ -447,6 +448,14 @@ export component AppWindow inherits Window {
             root.nu-password = "";
             root.nu-repeat = "";
         }
+    }
+
+    // «Свойства пользователя»: что в окне и куда идут правки, решает Rust (src/user_fields.rs).
+    if UserFieldsData.shown : UserFieldsDialog {
+        x: 0px;
+        y: root.chrome-height;
+        width: root.width;
+        height: root.height - root.chrome-height;
     }
 
     if root.page != 2 : WindowBar {
