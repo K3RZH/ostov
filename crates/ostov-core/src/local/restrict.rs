@@ -1,13 +1,16 @@
 //! Ограничения по записям (СТ-52, ADR-043): роли видно только то, где поле объекта — одно из
 //! значений свойства пользователя. Действуют в списках, карточках, отчётах и на записи:
-//! записать можно только то, что потом увидишь. Запросы `ostov-sql` к ограниченному объекту
-//! пока закрыты: отбора по записям в переводе запроса ещё нет.
+//! записать можно только то, что потом увидишь. В запросах `ostov-sql` отбор добавляет
+//! перевод запроса по `limits`.
+
+use std::collections::BTreeMap;
 
 use ostov_api::{EngineError, EngineResult, ErrorCode, ObjectData};
 use ostov_model::Restriction;
+use ostov_store::Driver;
 
 use super::LocalEngine;
-use super::convert::{error, fields_from_api, value_from_api};
+use super::convert::{error, fields_from_api, param_from_api, value_from_api, value_to_api};
 use super::user_fields;
 use crate::{CoreError, FieldDef, FieldValue, Fields};
 
@@ -71,7 +74,8 @@ pub(super) fn misfit<'a>(within: &'a Within, fields: &Fields) -> Option<&'a str>
 }
 
 impl LocalEngine {
-    fn rules(&self, object: &str) -> (Option<String>, Vec<&Restriction>) {
+    /// Логин того, кто вошёл, и ограничения его роли (на объект или на все, если `None`).
+    fn rules(&self, object: Option<&str>) -> (Option<String>, Vec<&Restriction>) {
         let login = self
             .access()
             .user
@@ -86,25 +90,25 @@ impl LocalEngine {
             .iter()
             .filter(|r| r.name == role)
             .flat_map(|r| &r.restrictions)
-            .filter(|r| r.object == object)
+            .filter(|r| object.is_none_or(|o| r.object == o))
             .collect();
         (Some(login), rules)
     }
 
-    /// Есть ли у роли того, кто вошёл, ограничения на объект.
-    pub(super) fn restricted(&self, object: &str) -> bool {
-        !self.rules(object).1.is_empty()
-    }
-
     /// Ограничения на объект для того, кто вошёл, со значениями его свойств.
     pub(super) fn within(&self, object: &str) -> EngineResult<Within> {
-        let (Some(login), rules) = self.rules(object) else {
-            return Ok(Within::new());
-        };
-        if rules.is_empty() {
+        if self.rules(Some(object)).1.is_empty() {
             return Ok(Within::new());
         }
         let mut db = self.db()?;
+        self.within_on(&mut **db, object).map_err(error)
+    }
+
+    /// То же на уже взятом соединении: внутри команды второе брать нельзя.
+    fn within_on(&self, db: &mut dyn Driver, object: &str) -> Result<Within, CoreError> {
+        let (Some(login), rules) = self.rules(Some(object)) else {
+            return Ok(Within::new());
+        };
         let mut within = Within::with_capacity(rules.len());
         for r in rules {
             let def = self
@@ -114,15 +118,44 @@ impl LocalEngine {
                 .iter()
                 .find(|u| u.field.name == r.user_field)
                 .ok_or_else(|| {
-                    error(CoreError::Invalid(format!(
-                        "нет свойства пользователя {}",
-                        r.user_field
-                    )))
+                    CoreError::Invalid(format!("нет свойства пользователя {}", r.user_field))
                 })?;
-            let values = user_fields::values(&mut **db, &login, &def.field).map_err(error)?;
+            let values = user_fields::values(db, &login, &def.field)?;
             within.push((r.field.clone(), values));
         }
         Ok(within)
+    }
+
+    /// Ограничения роли на все объекты для запроса `ostov-sql` — заранее, до перевода:
+    /// сам перевод в базу не ходит.
+    pub(super) fn limits(
+        &self,
+        db: &mut dyn Driver,
+    ) -> Result<BTreeMap<String, ostov_sql::Limits>, CoreError> {
+        let mut objects: Vec<String> = self
+            .rules(None)
+            .1
+            .iter()
+            .map(|r| r.object.clone())
+            .collect();
+        objects.sort();
+        objects.dedup();
+        let mut limits = BTreeMap::new();
+        for object in objects {
+            let list = self
+                .within_on(db, &object)?
+                .into_iter()
+                .map(|(field, values)| {
+                    let params = values
+                        .iter()
+                        .map(|v| param_from_api(&value_to_api(v)))
+                        .collect();
+                    (field, params)
+                })
+                .collect();
+            limits.insert(object, list);
+        }
+        Ok(limits)
     }
 
     /// Запись, которую пользователь не видит, для него как будто не существует.
@@ -165,27 +198,6 @@ impl LocalEngine {
             Some(id) => self.need_visible(object, id),
             None => Ok(()),
         }
-    }
-
-    /// Регистры `ostov-sql` по правам не проверяет: запрос, где упомянут регистр с ограничением
-    /// для роли, закрыт целиком. Лишний отказ (так же назван столбец) безопаснее утечки.
-    pub(super) fn need_query(&self, sql: &str) -> EngineResult<()> {
-        let words: Vec<String> = sql
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map(str::to_lowercase)
-            .collect();
-        for register in self.config.registers.keys() {
-            if self.restricted(register) && words.iter().any(|w| w == register) {
-                return Err(EngineError::new(
-                    ErrorCode::Forbidden,
-                    format!(
-                        "Запросы к регистру {register} для вашей роли закрыты: у неё ограничения \
-                         по записям. Остатки — в отчёте."
-                    ),
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Строки отчёта по регистру — только по разрешённым измерениям.

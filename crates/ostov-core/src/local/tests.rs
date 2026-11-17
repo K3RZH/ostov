@@ -3120,25 +3120,74 @@ fn storekeeper_sees_and_writes_only_own_warehouse() {
         .collect();
     assert_eq!(places, [Some(main)]);
     engine.post("issue", mine.id).unwrap();
-    // Запросом ограничения не обойти: к ограниченному объекту он закрыт, к остальным открыт.
-    assert!(
+    // Запросом ограничения не обойти: перевод запроса отбирает те же записи.
+    let ids = |engine: &dyn Engine, sql: &str| -> Vec<Value> {
         engine
-            .query("SELECT id FROM issue", &Fields::new())
-            .is_err()
-    );
+            .query(sql, &Fields::new())
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+    assert_eq!(ids(&*engine, "SELECT id FROM issue"), [Value::Int(mine.id)]);
+    let places = ids(&*engine, "SELECT warehouse FROM stock GROUP BY warehouse");
     assert!(
-        engine
-            .query("SELECT warehouse FROM stock", &Fields::new())
-            .is_err()
+        matches!(places.as_slice(), [Value::Ref { id, .. }] if *id == main),
+        "{places:?}"
     );
-    assert!(engine.query("SELECT id FROM goods", &Fields::new()).is_ok());
+    assert_eq!(ids(&*engine, "SELECT id FROM goods").len(), 1);
 
     // Пустое свойство — не видно ничего; администратор видит всё.
     engine.login("boss", ADMIN_PASSWORD).unwrap();
     assert_eq!(list(&*engine).len(), 2);
+    assert_eq!(ids(&*engine, "SELECT id FROM issue").len(), 2);
     set(Vec::new());
     engine.login("keeper", KEEPER_PASSWORD).unwrap();
     assert!(list(&*engine).is_empty());
+    assert!(ids(&*engine, "SELECT id FROM issue").is_empty());
+    assert!(ids(&*engine, "SELECT warehouse FROM stock").is_empty());
+}
+
+/// Права на регистр в роли не задаются: остатки запросом читает любая роль (СТ-52, PR #11).
+#[test]
+fn role_reads_register_without_rights_on_it() {
+    let base = Base::new("register-read");
+    let engine = LocalConnector::new(roles_model())
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let flour = add(&*engine, "goods", "Мука");
+    let receipt = stock_doc(main, Some(mill), flour);
+    engine.save("receipt", &receipt, PostAction::Post).unwrap();
+
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let found = engine
+        .query(
+            "SELECT goods, SUM(qty * kind) AS qty FROM stock GROUP BY goods",
+            &Fields::new(),
+        )
+        .unwrap();
+    assert_eq!(found.rows.len(), 1);
+    // Расход кладовщика проводится: правило читает остатки с его правами.
+    let issue = stock_doc(main, None, flour);
+    engine.save("issue", &issue, PostAction::Post).unwrap();
+    // А на чужой документ права по-прежнему нет.
+    assert!(
+        engine
+            .query("SELECT id FROM receipt", &Fields::new())
+            .is_err()
+    );
 }
 
 #[test]

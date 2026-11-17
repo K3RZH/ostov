@@ -256,10 +256,13 @@ impl LocalEngine {
         doc: &Document,
         can_read: &dyn Fn(&str) -> bool,
     ) -> Result<crate::Moves, crate::CoreError> {
+        let limits = self.limits(db)?;
+        let within = |object: &str| limits.get(object).cloned();
         let mut reader = crate::DbReader {
             db,
             model: &self.config.model,
             can_read,
+            within: &within,
             trace: self.trace.as_ref(),
         };
         let started = std::time::Instant::now();
@@ -1185,18 +1188,19 @@ impl Engine for LocalEngine {
     fn query(&self, sql: &str, params: &ostov_api::Fields) -> EngineResult<ostov_api::QueryResult> {
         self.guarded("Query", || {
             self.need_system(|_| true, "запросы")?;
-            self.need_query(sql)?;
             let params = params
                 .iter()
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
             let mut db = self.db()?;
+            let limits = self.limits(&mut **db).map_err(error)?;
+            let within = |object: &str| limits.get(object).cloned();
             let trace = self.trace.as_ref();
             let found = crate::query::run(
                 &mut **db,
                 &self.config.model,
-                &can_read,
+                (&can_read, &within),
                 sql,
                 &params,
                 trace,
