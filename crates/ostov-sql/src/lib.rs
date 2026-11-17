@@ -43,6 +43,9 @@ pub struct Prepared {
     pub columns: Vec<Column>,
 }
 
+/// Ограничения роли по записям одного объекта: поле и разрешённые значения.
+pub type Limits = Vec<(String, Vec<Param>)>;
+
 /// Значение параметра. Число рядом с денежным полем переводится в единицы этого поля:
 /// `price > :min` с `min = 2,5` даст `250` при двух знаках после запятой.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,13 +69,23 @@ pub struct Column {
 
 /// Проверяет запрос и переводит его под диалект.
 ///
-/// `can_read(имя)` спрашивается для каждого справочника и документа в запросе;
-/// табличная часть — по праву документа, регистры без проверки.
+/// `can_read(имя)` спрашивается для каждого справочника, документа и регистра в запросе;
+/// табличная часть — по праву документа.
+///
+/// `within(имя)` — ограничения роли по записям (СТ-52): `None` — их нет, иначе для каждого
+/// `(поле, значения)` к источнику добавляется `поле IN (…)` с параметрами (пустой список —
+/// `1 = 0`), условия одного объекта — через AND. Первая таблица отбирается в WHERE,
+/// присоединённые — в ON; табличная часть — по шапке своего документа. `Some` с пустым
+/// списком полей — то же, что `None`.
+///
+/// `within` вызывается посреди перевода: оно не должно обращаться к базе (вызывающий уже
+/// держит соединение) и не может вернуть ошибку. Ограничения считайте заранее, до `prepare`.
 pub fn prepare(
     query: &str,
     params: &BTreeMap<String, Param>,
     config: &ostov_model::Config,
     can_read: &dyn Fn(&str) -> bool,
+    within: &dyn Fn(&str) -> Option<Limits>,
     dialect: &dyn ostov_store::Dialect,
 ) -> Result<Prepared, SqlError> {
     if query.len() > MAX_QUERY_LEN {
@@ -100,10 +113,12 @@ pub fn prepare(
         });
     }
     match statements.into_iter().next() {
-        Some(Statement::Query(q)) => translate::run(*q, params, config, can_read, dialect),
+        Some(Statement::Query(q)) => translate::run(*q, params, config, can_read, within, dialect),
         _ => Err(SqlError::OnlySelect),
     }
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod within_tests;

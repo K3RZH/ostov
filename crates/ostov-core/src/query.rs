@@ -44,8 +44,8 @@ pub struct QueryRows {
     pub rows: Vec<Vec<FieldValue>>,
 }
 
-/// Чтение базы из правила документа (`ctx.query`): в той же транзакции и с правами того,
-/// кто проводит.
+/// Чтение базы из правила документа (`ctx.query`): в той же транзакции, всей базы — без прав
+/// и ограничений того, кто проводит (С-10).
 pub trait Reader {
     fn query(
         &mut self,
@@ -58,6 +58,8 @@ pub struct DbReader<'a> {
     pub db: &'a mut dyn Driver,
     pub model: &'a ostov_model::Config,
     pub can_read: &'a dyn Fn(&str) -> bool,
+    /// Ограничения по записям на объект (СТ-52); посчитаны заранее, в базу не ходит.
+    pub within: &'a dyn Fn(&str) -> Option<ostov_sql::Limits>,
     pub trace: Option<&'a Trace>,
 }
 
@@ -67,20 +69,27 @@ impl Reader for DbReader<'_> {
         sql: &str,
         params: &BTreeMap<String, Param>,
     ) -> Result<QueryRows, CoreError> {
-        run(self.db, self.model, self.can_read, sql, params, self.trace)
+        let place = (self.can_read, self.within);
+        run(self.db, self.model, place, sql, params, self.trace)
     }
 }
+
+/// Что видит тот, кто спрашивает: право на объект и ограничения по записям на него.
+pub type Sight<'a> = (
+    &'a dyn Fn(&str) -> bool,
+    &'a dyn Fn(&str) -> Option<ostov_sql::Limits>,
+);
 
 pub fn run(
     db: &mut dyn Driver,
     model: &ostov_model::Config,
-    can_read: &dyn Fn(&str) -> bool,
+    (can_read, within): Sight<'_>,
     sql: &str,
     params: &BTreeMap<String, Param>,
     trace: Option<&Trace>,
 ) -> Result<QueryRows, CoreError> {
-    let prepared =
-        ostov_sql::prepare(sql, params, model, can_read, db.dialect()).map_err(CoreError::Query)?;
+    let prepared = ostov_sql::prepare(sql, params, model, can_read, within, db.dialect())
+        .map_err(CoreError::Query)?;
     let started = Instant::now();
     let raw = db.query(&prepared.sql, &prepared.params)?;
     if let Some(trace) = trace {

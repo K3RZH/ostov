@@ -86,9 +86,9 @@ impl LocalEngine {
         let role = self.role();
         move |object: &str| match &role {
             Ok(None) => true,
-            Ok(Some(r)) => {
-                ostov_sec::rights(&self.config.roles, r, object).read && !self.restricted(object)
-            }
+            // Регистры роли не задаются: читает любой, чужие записи отсекают ограничения.
+            Ok(Some(_)) if self.config.registers.contains_key(object) => true,
+            Ok(Some(r)) => ostov_sec::rights(&self.config.roles, r, object).read,
             Err(_) => false,
         }
     }

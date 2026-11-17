@@ -6,7 +6,13 @@ use std::path::Path;
 use ostov_model::ADMIN_ROLE;
 use serde_saphyr::Spanned;
 
-use crate::{ConfigFiles, Document, Error, Field, FieldType, MenuEntry, Register, Subsystem};
+use crate::error::codes;
+use crate::model::USER_PREFIX;
+
+use crate::{
+    ConfigFiles, Document, Error, Field, FieldType, Located, MenuEntry, Register, RegisterCost,
+    RoleRestriction, Subsystem,
+};
 
 /// Лимит идентификатора PostgreSQL: из имён делаются таблицы и колонки (ADR-025).
 pub const MAX_NAME_LEN: usize = 63;
@@ -98,6 +104,7 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
                 .map(|c| &c.value.name)
                 .chain(config.documents.iter().map(|d| &d.value.name)),
         ),
+        catalogs: name_set(config.catalogs.iter().map(|c| &c.value.name)),
         documents: name_set(config.documents.iter().map(|d| &d.value.name)),
         registers: name_set(config.registers.iter().map(|r| &r.value.name)),
     };
@@ -112,7 +119,11 @@ pub fn check(config: &ConfigFiles) -> Vec<Error> {
     }
     for register in &config.registers {
         scope.check_register(&register.file, &register.value, &mut errors);
+        if let Some(cost) = &register.value.cost {
+            check_cost(&register.file, &register.value, cost, &mut errors);
+        }
     }
+    check_user_fields(config, &scope, &mut errors);
     check_menu(config, &scope, &mut errors);
     check_roles(config, &scope, &mut errors);
 
@@ -135,6 +146,7 @@ fn check_menu(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) 
             errors.push(at(
                 &manifest.file,
                 name,
+                codes::MENU_UNKNOWN_SECTION,
                 format!("нет раздела меню «{}»", name.value),
             ));
         }
@@ -147,7 +159,7 @@ fn check_menu(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) 
                 name.value,
                 manifest.file.display()
             );
-            errors.push(at(&subsystem.file, name, reason));
+            errors.push(at(&subsystem.file, name, codes::MENU_NOT_LISTED, reason));
         }
     }
 }
@@ -161,7 +173,7 @@ fn check_roles(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>)
         check_service_prefix(file, &role.name, errors);
         if role.name.value == ADMIN_ROLE {
             let reason = "роль admin встроенная, со всеми правами: в YAML её не описывают".into();
-            errors.push(at(file, &role.name, reason));
+            errors.push(at(file, &role.name, codes::ROLE_ADMIN, reason));
         }
         for (object, rights) in &role.objects.0 {
             scope.check_role_object(file, object, rights, errors);
@@ -173,7 +185,207 @@ fn check_roles(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>)
             "системное право",
             errors,
         );
+        for restriction in &role.restrictions {
+            check_restriction(config, file, restriction, errors);
+        }
     }
+}
+
+/// `cost:` регистра: два разных ресурса и измерения средней без повторов (ADR-042).
+fn check_cost(
+    file: &Path,
+    register: &Register,
+    cost: &Spanned<RegisterCost>,
+    errors: &mut Vec<Error>,
+) {
+    let value = &cost.value;
+    for (name, what) in [(&value.qty, "количество"), (&value.sum, "сумма")] {
+        if !register
+            .resources
+            .iter()
+            .any(|r| r.name.value == name.value)
+        {
+            let reason = format!(
+                "себестоимость: {what} «{}» — не ресурс регистра «{}»",
+                name.value, register.name.value
+            );
+            errors.push(at(file, name, codes::COST_NOT_RESOURCE, reason));
+        }
+    }
+    if value.qty.value == value.sum.value {
+        let reason = "себестоимость: количество и сумма должны быть разными ресурсами".into();
+        errors.push(at(file, &value.sum, codes::COST_SAME_RESOURCE, reason));
+    }
+    if value.by.is_empty() {
+        let reason = "себестоимость: в by нужно хотя бы одно измерение".into();
+        errors.push(at(file, cost, codes::COST_EMPTY_BY, reason));
+    }
+    let mut seen = Names::new("измерение в by");
+    for dimension in &value.by {
+        seen.add_repeat_only(file, dimension, errors);
+        if !register
+            .dimensions
+            .iter()
+            .any(|d| d.name.value == dimension.value)
+        {
+            let reason = format!(
+                "себестоимость: «{}» — не измерение регистра «{}»",
+                dimension.value, register.name.value
+            );
+            errors.push(at(file, dimension, codes::COST_NOT_DIMENSION, reason));
+        }
+    }
+}
+
+/// Свойства пользователя: имена как у полей, ссылка — только на справочник (ADR-043).
+fn check_user_fields(config: &ConfigFiles, scope: &Scope<'_>, errors: &mut Vec<Error>) {
+    let file = &config.manifest.file;
+    let mut names = Names::new("свойство пользователя");
+    for field in &config.manifest.value.user_fields {
+        names.add(file, &field.name, errors);
+        match &field.kind.value {
+            FieldType::Decimal { scale } if *scale > MAX_SCALE => {
+                let reason = format!("точность decimal({scale}) больше {MAX_SCALE}");
+                errors.push(at(file, &field.kind, codes::DECIMAL_SCALE, reason));
+            }
+            FieldType::Ref(target) if !scope.catalogs.contains(target.as_str()) => {
+                let reason = format!(
+                    "свойство пользователя ссылается только на справочник, а «{target}» — не справочник"
+                );
+                errors.push(at(file, &field.kind, codes::USER_FIELD_REF, reason));
+            }
+            FieldType::Int
+            | FieldType::Text
+            | FieldType::Date
+            | FieldType::Decimal { .. }
+            | FieldType::Ref(_) => {}
+        }
+    }
+}
+
+/// Ограничение роли: объект, поле (у регистра — измерение) и свойство пользователя того же типа.
+fn check_restriction(
+    config: &ConfigFiles,
+    file: &Path,
+    restriction: &RoleRestriction,
+    errors: &mut Vec<Error>,
+) {
+    let object = &restriction.object;
+    let name = object.value.as_str();
+    let catalog = config.catalogs.iter().find(|c| c.value.name.value == name);
+    let document = config.documents.iter().find(|d| d.value.name.value == name);
+    let register = config.registers.iter().find(|r| r.value.name.value == name);
+    let fields: &[Field] = match (catalog, document, register) {
+        (Some(c), _, _) => &c.value.fields,
+        (_, Some(d), _) => &d.value.fields,
+        (_, _, Some(r)) => &r.value.dimensions,
+        _ => {
+            let reason = format!("ограничение: нет справочника, документа или регистра «{name}»");
+            errors.push(at(file, object, codes::RESTRICTION_NO_OBJECT, reason));
+            return;
+        }
+    };
+    if restriction.conditions.is_empty() {
+        let reason = format!("ограничение на «{name}»: в where нет условий");
+        errors.push(at(file, object, codes::RESTRICTION_EMPTY, reason));
+    }
+    for condition in &restriction.conditions {
+        let wanted = condition.field.value.as_str();
+        let Some(field) = fields.iter().find(|f| f.name.value == wanted) else {
+            let (code, reason) = if is_resource(register, wanted) {
+                (
+                    codes::RESTRICTION_RESOURCE,
+                    format!(
+                        "ограничение на регистр «{name}»: «{wanted}» — ресурс, ограничивают по измерениям"
+                    ),
+                )
+            } else {
+                (
+                    codes::RESTRICTION_NO_FIELD,
+                    format!("ограничение: у «{name}» нет поля «{wanted}»"),
+                )
+            };
+            errors.push(at(file, &condition.field, code, reason));
+            continue;
+        };
+        let source = &condition.user_field;
+        let Some(user_name) = source.value.strip_prefix(USER_PREFIX) else {
+            let reason = format!(
+                "ограничение: «{}» — нужно свойство пользователя вида user.<имя>",
+                source.value
+            );
+            errors.push(at(file, source, codes::RESTRICTION_NOT_USER, reason));
+            continue;
+        };
+        let users = &config.manifest.value.user_fields;
+        let Some(user) = users.iter().find(|u| u.name.value == user_name) else {
+            let reason = format!(
+                "ограничение: нет свойства пользователя «{user_name}» в user_fields {}",
+                config.manifest.file.display()
+            );
+            errors.push(at(file, source, codes::RESTRICTION_NO_USER_FIELD, reason));
+            continue;
+        };
+        if user.kind.value != field.kind.value {
+            let reason =
+                format!("ограничение: поле «{wanted}» и свойство «{user_name}» разного типа");
+            errors.push(at(file, source, codes::RESTRICTION_TYPE, reason));
+        }
+    }
+}
+
+fn is_resource(register: Option<&Located<Register>>, field: &str) -> bool {
+    register.is_some_and(|r| r.value.resources.iter().any(|f| f.name.value == field))
+}
+
+/// Предупреждения: конфигурация рабочая, но пользователь упрётся в права.
+///
+/// ADR-044: роль может создать документ, но не читает справочник или документ, на который
+/// ссылается обязательное поле (в шапке или табличной части), — такой документ ей не заполнить.
+pub fn warnings(config: &ConfigFiles) -> Vec<Error> {
+    let mut out = Vec::new();
+    for role in &config.roles {
+        let (file, role) = (&role.file, &role.value);
+        let has = |object: &str, right: &str| {
+            role.objects
+                .0
+                .iter()
+                .filter(|(name, _)| name.value == object)
+                .any(|(_, list)| list.iter().any(|r| r.value == right))
+        };
+        for (object, _) in &role.objects.0 {
+            if !has(&object.value, "create") {
+                continue;
+            }
+            let Some(document) = config
+                .documents
+                .iter()
+                .find(|d| d.value.name.value == object.value)
+            else {
+                continue;
+            };
+            let document = &document.value;
+            let fields = document
+                .fields
+                .iter()
+                .chain(document.tables.iter().flat_map(|t| &t.fields));
+            let mut reported = BTreeSet::new();
+            for field in fields.filter(|f| f.required) {
+                let FieldType::Ref(target) = &field.kind.value else {
+                    continue;
+                };
+                if !has(target, "read") && reported.insert(target.as_str()) {
+                    let reason = format!(
+                        "роль «{}» создаёт «{}», но не читает «{target}» \
+                         (обязательное поле «{}»): пользователь не сможет заполнить документ",
+                        role.name.value, document.name.value, field.name.value
+                    );
+                    out.push(at(file, object, codes::READ_FOR_REQUIRED, reason));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Каждое право из списка `allowed` и не больше одного раза.
@@ -193,7 +405,7 @@ fn check_rights_list(
                 right.value,
                 allowed.join(", ")
             );
-            errors.push(at(file, right, reason));
+            errors.push(at(file, right, codes::UNKNOWN_RIGHT, reason));
         }
     }
 }
@@ -204,7 +416,7 @@ fn check_service_prefix(file: &Path, name: &Spanned<String>, errors: &mut Vec<Er
             "имя «{}» начинается с {SERVICE_PREFIX}: так называются служебные таблицы",
             name.value
         );
-        errors.push(at(file, name, reason));
+        errors.push(at(file, name, codes::SERVICE_PREFIX, reason));
     }
 }
 
@@ -216,13 +428,14 @@ fn check_icon(file: &Path, icon: Option<&Spanned<String>>, errors: &mut Vec<Erro
             "нет значка «{}»: допустимы имена файлов ostov-ui/assets/icons без .svg",
             icon.value
         );
-        errors.push(at(file, icon, reason));
+        errors.push(at(file, icon, codes::UNKNOWN_ICON, reason));
     }
 }
 
 /// Имена объектов, на которые можно сослаться.
 struct Scope<'a> {
     ref_targets: BTreeSet<&'a str>,
+    catalogs: BTreeSet<&'a str>,
     documents: BTreeSet<&'a str>,
     registers: BTreeSet<&'a str>,
 }
@@ -240,11 +453,12 @@ impl Scope<'_> {
         if self.registers.contains(name) {
             let reason =
                 format!("права на регистр «{name}» не задаются: в роли справочники и документы");
-            errors.push(at(file, object, reason));
+            errors.push(at(file, object, codes::ROLE_REGISTER, reason));
         } else if !self.ref_targets.contains(name) {
             errors.push(at(
                 file,
                 object,
+                codes::ROLE_NO_OBJECT,
                 format!("нет справочника или документа «{name}»"),
             ));
         }
@@ -256,7 +470,7 @@ impl Scope<'_> {
                         "право {} только у документов, а «{name}» — справочник",
                         right.value
                     );
-                    errors.push(at(file, right, reason));
+                    errors.push(at(file, right, codes::DOCUMENT_ONLY_RIGHT, reason));
                 }
             }
         }
@@ -276,6 +490,7 @@ impl Scope<'_> {
                 errors.push(at(
                     file,
                     register,
+                    codes::DOCUMENT_NO_REGISTER,
                     format!("нет регистра «{}»", register.value),
                 ));
             }
@@ -287,7 +502,7 @@ impl Scope<'_> {
         check_icon(file, subsystem.icon.as_ref(), errors);
         if subsystem.objects.is_empty() {
             let reason = format!("в разделе «{}» нет объектов", subsystem.name.value);
-            errors.push(at(file, &subsystem.name, reason));
+            errors.push(at(file, &subsystem.name, codes::MENU_EMPTY_SECTION, reason));
         }
         let mut items = Names::new("пункт меню");
         self.check_entries(file, &subsystem.objects, true, &mut items, errors);
@@ -309,17 +524,17 @@ impl Scope<'_> {
                         let reason = format!(
                             "регистр «{name}» нельзя открыть из меню: там справочники и документы"
                         );
-                        errors.push(at(file, entry, reason));
+                        errors.push(at(file, entry, codes::MENU_REGISTER, reason));
                     } else if !self.ref_targets.contains(name.as_str()) {
                         let reason = format!("нет справочника или документа «{name}»");
-                        errors.push(at(file, entry, reason));
+                        errors.push(at(file, entry, codes::MENU_NO_OBJECT, reason));
                     }
                 }
                 MenuEntry::Group(group) if groups_allowed => {
                     check_icon(file, group.icon.as_ref(), errors);
                     if group.objects.is_empty() {
                         let reason = format!("в группе «{}» нет объектов", group.title);
-                        errors.push(at(file, entry, reason));
+                        errors.push(at(file, entry, codes::MENU_EMPTY_GROUP, reason));
                     }
                     self.check_entries(file, &group.objects, false, items, errors);
                 }
@@ -328,7 +543,7 @@ impl Scope<'_> {
                         "группа «{}» внутри группы: в меню допустим один уровень групп",
                         group.title
                     );
-                    errors.push(at(file, entry, reason));
+                    errors.push(at(file, entry, codes::MENU_NESTED_GROUP, reason));
                 }
             }
         }
@@ -340,6 +555,7 @@ impl Scope<'_> {
             errors.push(at(
                 file,
                 name,
+                codes::REGISTER_NO_DIMENSIONS,
                 format!("у регистра «{}» нет измерений", name.value),
             ));
         }
@@ -347,6 +563,7 @@ impl Scope<'_> {
             errors.push(at(
                 file,
                 name,
+                codes::REGISTER_NO_RESOURCES,
                 format!("у регистра «{}» нет ресурсов", name.value),
             ));
         }
@@ -359,13 +576,13 @@ impl Scope<'_> {
                     "измерение «{}» может быть только ref, int или text",
                     dimension.name.value
                 );
-                errors.push(at(file, &dimension.kind, reason));
+                errors.push(at(file, &dimension.kind, codes::DIMENSION_TYPE, reason));
             }
         }
         for resource in &register.resources {
             if !matches!(resource.kind.value, FieldType::Decimal { .. }) {
                 let reason = format!("ресурс «{}» может быть только decimal", resource.name.value);
-                errors.push(at(file, &resource.kind, reason));
+                errors.push(at(file, &resource.kind, codes::RESOURCE_TYPE, reason));
             }
         }
         // Измерения и ресурсы — колонки одной таблицы движений, имена у них общие.
@@ -388,17 +605,17 @@ impl Scope<'_> {
             names.add(file, &field.name, errors);
             if RESERVED_NAMES.contains(&field.name.value.as_str()) {
                 let reason = format!("имя «{}» занято ядром", field.name.value);
-                errors.push(at(file, &field.name, reason));
+                errors.push(at(file, &field.name, codes::RESERVED_NAME, reason));
             }
             match &field.kind.value {
                 FieldType::Decimal { scale } if *scale > MAX_SCALE => {
                     let reason = format!("точность decimal({scale}) больше {MAX_SCALE}");
-                    errors.push(at(file, &field.kind, reason));
+                    errors.push(at(file, &field.kind, codes::DECIMAL_SCALE, reason));
                 }
                 FieldType::Ref(target) if !self.ref_targets.contains(target.as_str()) => {
                     let reason =
                         format!("нет справочника или документа «{target}» для ref({target})");
-                    errors.push(at(file, &field.kind, reason));
+                    errors.push(at(file, &field.kind, codes::REF_UNKNOWN, reason));
                 }
                 FieldType::Int
                 | FieldType::Text
@@ -426,7 +643,7 @@ impl<'a> Names<'a> {
 
     fn add(&mut self, file: &'a Path, name: &Spanned<String>, errors: &mut Vec<Error>) {
         if let Some(problem) = name_problem(&name.value) {
-            errors.push(at(file, name, problem));
+            errors.push(at(file, name, codes::NAME_FORM, problem));
         }
         self.add_repeat_only(file, name, errors);
     }
@@ -443,7 +660,7 @@ impl<'a> Names<'a> {
                 self.what,
                 first_file.display()
             );
-            errors.push(Error::new(file, Some(line), reason));
+            errors.push(Error::new(file, Some(line), codes::DUPLICATE_NAME, reason));
         } else {
             self.first.insert(name.to_owned(), (file, line));
         }
@@ -482,8 +699,8 @@ fn name_set<'a>(names: impl Iterator<Item = &'a Spanned<String>>) -> BTreeSet<&'
     names.map(|name| name.value.as_str()).collect()
 }
 
-fn at<T>(file: &Path, value: &Spanned<T>, reason: String) -> Error {
-    Error::new(file, Some(value.referenced.line()), reason)
+fn at<T>(file: &Path, value: &Spanned<T>, code: &'static str, reason: String) -> Error {
+    Error::new(file, Some(value.referenced.line()), code, reason)
 }
 
 #[cfg(test)]

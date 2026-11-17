@@ -3920,6 +3920,7 @@ dependencies = [
  "ostov-api",
  "ostov-core",
  "ostov-model",
+ "ostov-store",
  "serde",
  "serde-saphyr",
 ]

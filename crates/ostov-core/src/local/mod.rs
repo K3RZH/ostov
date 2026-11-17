@@ -248,18 +248,20 @@ impl LocalEngine {
         }
     }
 
-    /// Движения документа; правило читает базу с правами того, кто проводит.
+    /// Движения документа. Правило — код конфигурации и читает всю базу, без прав и
+    /// ограничений того, кто проводит: документ проводится одинаково, кто бы его ни провёл (С-10).
+    /// Что пользователь может записать, проверено раньше, на входе команды.
     fn movements(
         &self,
         cfg: &DocumentConfig,
         db: &mut dyn Driver,
         doc: &Document,
-        can_read: &dyn Fn(&str) -> bool,
     ) -> Result<crate::Moves, crate::CoreError> {
         let mut reader = crate::DbReader {
             db,
             model: &self.config.model,
-            can_read,
+            can_read: &|_| true,
+            within: &|_| None,
             trace: self.trace.as_ref(),
         };
         let started = std::time::Instant::now();
@@ -859,9 +861,7 @@ impl LocalEngine {
                     None => None,
                 };
                 let registers = self.config.registers_of(cfg);
-                let can_read = self.can_read();
-                let rule =
-                    |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
+                let rule = |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc);
                 let doc = match data.id {
                     None if post == PostAction::Post => {
                         posting::insert_and_post_to(db, &cfg.kind, &registers, fields, parts, rule)?
@@ -988,10 +988,8 @@ impl LocalEngine {
         let cfg = self.document(document)?;
         let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
-        let can_read = self.can_read();
         in_transaction(&mut **db, |db| {
-            let rule =
-                |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
+            let rule = |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc);
             posting::post_to(db, &cfg.kind, &registers, id, rule)?;
             self.journal(db, Action::Post, document, Some(id), &[], "")
         })
@@ -1185,18 +1183,19 @@ impl Engine for LocalEngine {
     fn query(&self, sql: &str, params: &ostov_api::Fields) -> EngineResult<ostov_api::QueryResult> {
         self.guarded("Query", || {
             self.need_system(|_| true, "запросы")?;
-            self.need_query(sql)?;
             let params = params
                 .iter()
                 .map(|(k, v)| (k.clone(), param_from_api(v)))
                 .collect();
             let can_read = self.can_read();
             let mut db = self.db()?;
+            let limits = self.limits(&mut **db).map_err(error)?;
+            let within = |object: &str| limits.get(object).cloned();
             let trace = self.trace.as_ref();
             let found = crate::query::run(
                 &mut **db,
                 &self.config.model,
-                &can_read,
+                (&can_read, &within),
                 sql,
                 &params,
                 trace,

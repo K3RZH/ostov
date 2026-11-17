@@ -33,12 +33,16 @@ fn all(_: &str) -> bool {
     true
 }
 
+fn none(_: &str) -> Option<Vec<(String, Vec<Param>)>> {
+    None
+}
+
 fn sqlite(query: &str, p: &[(&str, Value)]) -> Result<Prepared, SqlError> {
-    prepare(query, &params(p), &config(), &all, &SqliteDialect)
+    prepare(query, &params(p), &config(), &all, &none, &SqliteDialect)
 }
 
 fn pg(query: &str, p: &[(&str, Value)]) -> Result<Prepared, SqlError> {
-    prepare(query, &params(p), &config(), &all, &PostgresDialect)
+    prepare(query, &params(p), &config(), &all, &none, &PostgresDialect)
 }
 
 fn err(query: &str) -> SqlError {
@@ -301,7 +305,16 @@ fn parameters_missing_extra_repeated() {
 fn rights_are_checked() {
     let config = config();
     let no_receipt = |name: &str| name != "receipt";
-    let run = |q: &str| prepare(q, &BTreeMap::new(), &config, &no_receipt, &SqliteDialect);
+    let run = |q: &str| {
+        prepare(
+            q,
+            &BTreeMap::new(),
+            &config,
+            &no_receipt,
+            &none,
+            &SqliteDialect,
+        )
+    };
     let want = SqlError::NoRight {
         title: "Поступление".into(),
     };
@@ -312,8 +325,23 @@ fn rights_are_checked() {
         run("SELECT g.name FROM goods g JOIN receipt r ON r.id = g.id").unwrap_err(),
         want
     );
-    // Регистры прав на чтение пока не имеют.
+    // Регистры проверяются так же: «stock» читать можно, а без права — нельзя.
     assert!(run("SELECT qty FROM stock").is_ok());
+    let no_stock = |name: &str| name != "stock";
+    assert_eq!(
+        prepare(
+            "SELECT qty FROM stock",
+            &BTreeMap::new(),
+            &config,
+            &no_stock,
+            &none,
+            &SqliteDialect,
+        )
+        .unwrap_err(),
+        SqlError::NoRight {
+            title: "Остатки товаров".into()
+        }
+    );
     assert!(run("SELECT name FROM goods").is_ok());
     assert_eq!(
         run("SELECT number FROM receipt").unwrap_err().to_string(),
@@ -555,7 +583,7 @@ fn with(query: &str, p: &[(&str, Param)]) -> Result<Prepared, SqlError> {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect();
-    prepare(query, &p, &config(), &all, &SqliteDialect)
+    prepare(query, &p, &config(), &all, &none, &SqliteDialect)
 }
 
 fn dec(units: i64, scale: u8) -> Param {

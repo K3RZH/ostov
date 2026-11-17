@@ -113,6 +113,22 @@ jobs:
           export PYTHONHOME="$pythonLocation"
           cargo test -p ostov-py -p ostov-cli --features ostov-py/python
 
+  python-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo test --features python
+        shell: bash
+        run: |
+          export PYTHONHOME="$pythonLocation"
+          export LD_LIBRARY_PATH="$pythonLocation/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cargo test -p ostov-py -p ostov-cli --features ostov-py/python
+
   deny:
     runs-on: ubuntu-24.04
     steps:

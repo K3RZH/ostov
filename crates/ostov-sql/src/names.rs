@@ -13,8 +13,11 @@ pub(crate) struct Table {
     pub columns: Vec<(String, FieldKind)>,
     /// Поле-ссылка → на что ссылается.
     pub targets: Vec<(String, String)>,
-    /// Объект, право на чтение которого нужно; у регистров права нет.
+    /// Объект, право на чтение которого нужно: справочник, документ (и для его табличной
+    /// части), регистр.
     pub right: Option<(String, String)>,
+    /// Табличная часть: таблица документа и поля шапки — ограничение документа идёт через неё.
+    pub parent: Option<(String, Vec<(String, FieldKind)>)>,
 }
 
 /// Отметки объектов: в базе 0 и 1.
@@ -37,7 +40,7 @@ impl Table {
 
     /// `posted` и `deleted` справочников и документов; у регистров таких колонок нет.
     pub fn is_flag(&self, name: &str) -> bool {
-        self.right.is_some() && FLAGS.contains(&name) && self.column(name).is_some()
+        FLAGS.contains(&name) && self.column(name).is_some()
     }
 }
 
@@ -76,6 +79,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                         .collect(),
                     targets: targets(&c.fields),
                     right: Some((c.name.clone(), c.title.clone())),
+                    parent: None,
                 });
             }
             if let Some(d) = config.documents.iter().find(|d| &d.name == name) {
@@ -93,6 +97,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                         .collect(),
                     targets: targets(&d.fields),
                     right: Some((d.name.clone(), d.title.clone())),
+                    parent: None,
                 });
             }
             if let Some(r) = config.registers.iter().find(|r| &r.name == name) {
@@ -111,7 +116,8 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                         ]))
                         .collect(),
                     targets: targets(r.dimensions.iter().chain(&r.resources)),
-                    right: None,
+                    right: Some((r.name.clone(), r.title.clone())),
+                    parent: None,
                 });
             }
             Err(not_found())
@@ -139,6 +145,7 @@ pub(crate) fn resolve(config: &Config, parts: &[String]) -> Result<Table, SqlErr
                     .collect(),
                 targets: targets(&p.fields),
                 right: Some((d.name.clone(), d.title.clone())),
+                parent: Some((d.name.clone(), user(&d.fields).collect())),
             })
         }
         _ => Err(not_found()),

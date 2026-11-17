@@ -265,6 +265,7 @@ fn only_document_registers_can_move() {
             "qty",
             ostov_model::FieldKind::Decimal { scale: 3 },
         )],
+        cost: None,
     });
     let scripts = Scripts::new("foreign-register");
     scripts

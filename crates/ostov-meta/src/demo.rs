@@ -1,6 +1,6 @@
 //! Конфигурация «Склад» из `config/`, встроенная в программу: для демо-базы, где папки рядом нет.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::Error;
 use crate::load::{
@@ -72,5 +72,6 @@ pub fn demo() -> Result<ostov_model::Config, Vec<Error>> {
         subsystems: embedded(SUBSYSTEMS_DIR, &SUBSYSTEMS),
         roles: embedded(ROLES_DIR, &ROLES),
     };
-    checked(parse_sources(&sources, Vec::new())?).map(crate::convert::into_model)
+    checked(parse_sources(&sources, Vec::new())?)
+        .map(|files| crate::convert::into_model(files, Path::new("config")))
 }

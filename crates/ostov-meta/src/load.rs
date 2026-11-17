@@ -13,6 +13,7 @@ use serde_saphyr::{
     Spanned, UserMessageFormatter,
 };
 
+use crate::error::codes;
 use crate::{ConfigFiles, Error, Located};
 
 /// Версия формата файлов, которую читает эта сборка. Другая версия отвергается (СТ-07).
@@ -37,7 +38,18 @@ const MAX_DEPTH: usize = 16;
 /// Сначала ошибки разбора: пока файл не разобран, ссылки на его объекты проверять нельзя.
 /// Если разбор прошёл — все ошибки [`crate::check`]. У каждой ошибки файл, строка и причина.
 pub fn load(dir: &Path) -> Result<ostov_model::Config, Vec<Error>> {
-    checked(parse(dir)?).map(crate::convert::into_model)
+    checked(parse(dir)?).map(|files| crate::convert::into_model(files, dir))
+}
+
+/// Как [`load`], плюс предупреждения [`crate::warnings`]: с ними конфигурация работает.
+/// Предупреждения считаются только у конфигурации без ошибок.
+///
+/// # Errors
+/// Те же, что у [`load`].
+pub fn load_with_warnings(dir: &Path) -> Result<(ostov_model::Config, Vec<Error>), Vec<Error>> {
+    let files = checked(parse(dir)?)?;
+    let warnings = crate::warnings(&files);
+    Ok((crate::convert::into_model(files, dir), warnings))
 }
 
 /// Читает папку `dir` как есть, с номерами строк, без проверки ссылок и имён.
@@ -123,13 +135,19 @@ struct FormatVersion {
 fn parse_manifest(source: &Source) -> Result<Located<crate::Manifest>, Error> {
     let path = &source.path;
     if source.text.is_none() && !path.is_file() {
-        return Err(Error::new(path, None, "нет манифеста конфигурации"));
+        return Err(Error::new(
+            path,
+            None,
+            codes::NO_MANIFEST,
+            "нет манифеста конфигурации",
+        ));
     }
     let version: FormatVersion = parse_source(source)?;
     if version.format.value != FORMAT_VERSION {
         return Err(Error::new(
             path,
             Some(version.format.referenced.line()),
+            codes::FORMAT_VERSION,
             format!(
                 "формат конфигурации {} не поддерживается: эта версия ostov читает формат {FORMAT_VERSION}",
                 version.format.value
@@ -167,6 +185,7 @@ fn folder_sources(dir: &Path, errors: &mut Vec<Error>) -> Vec<Source> {
             errors.push(Error::new(
                 dir,
                 None,
+                codes::READ_DIR,
                 format!("не удалось прочитать папку: {error}"),
             ));
             Vec::new()
@@ -193,7 +212,12 @@ fn parse_source<T: DeserializeOwned>(source: &Source) -> Result<T, Error> {
         Some(text) => serde_saphyr::from_str_with_options(text, strict_options()),
         None => {
             let file = File::open(path).map_err(|error| {
-                Error::new(path, None, format!("не удалось открыть файл: {error}"))
+                Error::new(
+                    path,
+                    None,
+                    codes::OPEN_FILE,
+                    format!("не удалось открыть файл: {error}"),
+                )
             })?;
             serde_saphyr::from_reader_with_options(file, strict_options())
         }
@@ -218,49 +242,65 @@ fn yaml_error(path: &Path, error: &serde_saphyr::Error) -> Error {
         .location()
         .filter(|location| *location != Location::UNKNOWN)
         .map(|location| location.line());
-    Error::new(path, line, reason(error.without_snippet()))
+    let (code, reason) = reason(error.without_snippet());
+    Error::new(path, line, code, reason)
 }
 
 /// Нарушения строгих правил формата объясняем по-русски, остальное — текстом serde-saphyr.
-fn reason(error: &serde_saphyr::Error) -> String {
+fn reason(error: &serde_saphyr::Error) -> (&'static str, String) {
     match error {
         serde_saphyr::Error::Budget {
             breach: BudgetBreach::Anchors { .. } | BudgetBreach::Aliases { .. },
             ..
-        } => "якоря и алиасы (&имя, *имя) запрещены: напиши значение явно".into(),
+        } => (
+            codes::YAML_ANCHORS,
+            "якоря и алиасы (&имя, *имя) запрещены: напиши значение явно".into(),
+        ),
         serde_saphyr::Error::Budget {
             breach: BudgetBreach::Depth { .. },
             ..
-        } => format!("вложенность глубже {MAX_DEPTH} уровней"),
-        serde_saphyr::Error::IOError { cause } if cause.kind() == ErrorKind::FileTooLarge => {
-            format!("файл больше {} МБ", MAX_FILE_BYTES / (1024 * 1024))
-        }
+        } => (
+            codes::YAML_DEPTH,
+            format!("вложенность глубже {MAX_DEPTH} уровней"),
+        ),
+        serde_saphyr::Error::IOError { cause } if cause.kind() == ErrorKind::FileTooLarge => (
+            codes::FILE_TOO_LARGE,
+            format!("файл больше {} МБ", MAX_FILE_BYTES / (1024 * 1024)),
+        ),
         serde_saphyr::Error::SerdeUnknownField {
             field, expected, ..
-        } => format!(
-            "неизвестный ключ «{field}»: допустимы {}",
-            expected.join(", ")
+        } => (
+            codes::UNKNOWN_KEY,
+            format!(
+                "неизвестный ключ «{field}»: допустимы {}",
+                expected.join(", ")
+            ),
         ),
-        serde_saphyr::Error::SerdeMissingField { field, .. } => {
-            format!("нет обязательного ключа «{field}»")
-        }
+        serde_saphyr::Error::SerdeMissingField { field, .. } => (
+            codes::MISSING_KEY,
+            format!("нет обязательного ключа «{field}»"),
+        ),
         serde_saphyr::Error::SerdeUnknownVariant {
             variant, expected, ..
-        } => format!(
-            "неизвестное значение «{variant}»: допустимо {}",
-            expected.join(", ")
+        } => (
+            codes::UNKNOWN_VALUE,
+            format!(
+                "неизвестное значение «{variant}»: допустимо {}",
+                expected.join(", ")
+            ),
         ),
         serde_saphyr::Error::DuplicateMappingKey { key: Some(key), .. } => {
-            format!("ключ «{key}» повторяется")
+            (codes::DUPLICATE_KEY, format!("ключ «{key}» повторяется"))
         }
-        serde_saphyr::Error::UnknownAnchor { .. } => {
-            "алиас ссылается на неизвестный якорь; якоря и алиасы запрещены".into()
-        }
+        serde_saphyr::Error::UnknownAnchor { .. } => (
+            codes::YAML_ANCHORS,
+            "алиас ссылается на неизвестный якорь; якоря и алиасы запрещены".into(),
+        ),
         _ => {
             let mut options = RenderOptions::default();
             options.formatter = &BareMessage;
             options.snippets = SnippetMode::Off;
-            error.render_with_options(options)
+            (codes::YAML_SYNTAX, error.render_with_options(options))
         }
     }
 }

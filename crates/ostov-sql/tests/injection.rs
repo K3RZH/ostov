@@ -134,7 +134,7 @@ fn rejected_on_both(query: &str) {
         &SqliteDialect as &dyn ostov_store::Dialect,
         &PostgresDialect,
     ] {
-        if let Ok(p) = ostov_sql::prepare(query, &none, &config, &|_| true, dialect) {
+        if let Ok(p) = ostov_sql::prepare(query, &none, &config, &|_| true, &|_| None, dialect) {
             panic!("пропущен запрос: {query}\n→ {}", p.sql);
         }
     }
@@ -167,6 +167,7 @@ fn comments_do_not_reach_output() {
         &common::params(&[("n", text("x"))]),
         &common::model(),
         &|_| true,
+        &|_| None,
         &SqliteDialect,
     )
     .unwrap();

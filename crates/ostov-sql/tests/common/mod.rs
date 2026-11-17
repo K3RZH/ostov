@@ -212,7 +212,14 @@ pub fn try_prepare(
     query: &str,
     p: &[(&str, Value)],
 ) -> Result<Prepared, SqlError> {
-    prepare(query, &params(p), &model(), &|_| true, db.dialect())
+    prepare(
+        query,
+        &params(p),
+        &model(),
+        &|_| true,
+        &|_| None,
+        db.dialect(),
+    )
 }
 
 /// Проверить запрос и выполнить его через драйвер.

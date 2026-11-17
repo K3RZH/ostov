@@ -236,15 +236,27 @@ fn all_broken_files_are_reported_at_once() {
 }
 
 #[test]
-fn error_display_is_file_line_reason() {
-    let error = Error::new("config/catalogs/goods.yaml", Some(3), "неизвестный ключ");
+fn error_display_is_file_line_code_reason() {
+    let error = Error::new(
+        "config/catalogs/goods.yaml",
+        Some(3),
+        "E009",
+        "неизвестный ключ",
+    );
     assert_eq!(
         error.to_string(),
-        format!("{} — неизвестный ключ", "config/catalogs/goods.yaml:3")
+        "config/catalogs/goods.yaml:3: E009 неизвестный ключ"
     );
-    let error = Error::new("config/ostov.yaml", None, "нет манифеста конфигурации");
+    let error = Error::new(
+        "config/ostov.yaml",
+        None,
+        "E001",
+        "нет манифеста конфигурации",
+    );
     assert_eq!(
         error.to_string(),
-        "config/ostov.yaml — нет манифеста конфигурации"
+        "config/ostov.yaml: E001 нет манифеста конфигурации"
     );
+    assert!(!error.is_warning());
+    assert!(Error::new("x", None, "W001", "…").is_warning());
 }

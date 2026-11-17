@@ -45,11 +45,12 @@ fn errors_are_printed_as_file_line_reason() {
     let lines: Vec<&str> = stderr.lines().collect();
     assert_eq!(lines.len(), 3, "{stderr}");
     assert!(
-        lines[0].ends_with("goods.yaml:4 — имя «id» занято ядром"),
+        lines[0].ends_with("goods.yaml:4: E023 имя «id» занято ядром"),
         "{stderr}"
     );
     assert!(
-        lines[1].ends_with("goods.yaml:6 — нет справочника или документа «makers» для ref(makers)"),
+        lines[1]
+            .ends_with("goods.yaml:6: E031 нет справочника или документа «makers» для ref(makers)"),
         "{stderr}"
     );
     assert_eq!(lines[2], "Ошибок: 2.");
