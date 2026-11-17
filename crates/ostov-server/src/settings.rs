@@ -176,6 +176,16 @@ mod tests {
 
     use super::*;
 
+    /// Файл настроек, который читает только владелец: другой сервер на Linux не примет.
+    fn private(path: &std::path::Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     fn temp(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("ostov-settings-{}-{name}", std::process::id()));
@@ -214,13 +224,12 @@ mod tests {
     fn values_and_relative_paths() {
         let dir = temp("values");
         let path = dir.join("server.yaml");
-        fs::write(
+        private(
             &path,
             "config: cfg\nlisten: 127.0.0.1:7801\ntls: certs\nhosts: [server.local]\n\
              database: \"host=db user=ostov password=x dbname=ostov\"\nquery_timeout: 90\n\
              db_connections: 40\n",
-        )
-        .unwrap();
+        );
         let s = load(&path, &dir).unwrap();
         assert_eq!(s.config, Some(dir.join("cfg")));
         assert_eq!(s.listen, SocketAddr::from(([127, 0, 0, 1], 7801)));
@@ -230,7 +239,7 @@ mod tests {
         assert_eq!(s.query_timeout, Duration::from_secs(90));
         assert_eq!(s.connections, 40);
 
-        fs::write(&path, "database: sqlite:base/ostov.db\n").unwrap();
+        private(&path, "database: sqlite:base/ostov.db\n");
         let s = load(&path, &dir).unwrap();
         let expected = format!("sqlite:{}", dir.join("base/ostov.db").display());
         assert_eq!(s.database, expected);
@@ -247,7 +256,7 @@ mod tests {
             ("query_timeout: 0\n", "больше нуля"),
             ("db_connections: 0\n", "больше нуля"),
         ] {
-            fs::write(&path, text).unwrap();
+            private(&path, text);
             let err = load(&path, &dir).unwrap_err();
             assert!(err.contains(says), "{text}: {err}");
         }

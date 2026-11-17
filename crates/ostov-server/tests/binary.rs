@@ -129,7 +129,7 @@ fn server_program_explains_bad_start() {
     // запускаем, чтобы не трогать настройки компьютера.
     assert!(run(&["--config", "config"], None).contains("OSTOV_DB_URL"));
     let bad = std::env::temp_dir().join(format!("ostov-bad-settings-{}.yaml", std::process::id()));
-    std::fs::write(&bad, "port: 7700\n").unwrap();
+    private(&bad, "port: 7700\n");
     assert!(run(&["--settings", bad.to_str().unwrap()], None).contains("port"));
     let _ = std::fs::remove_file(bad);
     let missing = std::env::temp_dir().join("ostov-нет-такой-папки");
@@ -186,4 +186,14 @@ async fn server_program_starts_from_settings_file_alone() {
         .unwrap()
         .into_inner();
     assert!(hello.first_run);
+}
+
+/// Файл настроек, который читает только владелец: другой сервер на Linux не примет.
+fn private(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }

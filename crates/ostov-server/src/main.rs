@@ -309,6 +309,16 @@ mod tests {
 
     use super::*;
 
+    /// Файл настроек, который читает только владелец: другой сервер на Linux не примет.
+    fn private(path: &std::path::Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     fn parse(args: &[&str]) -> Result<Args, String> {
         Args::parse(args.iter().map(|a| (*a).to_owned()))
     }
@@ -365,12 +375,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("server.yaml");
-        std::fs::write(
+        private(
             &file,
             "listen: 127.0.0.1:7801\nhosts: [server.local]\ndatabase: sqlite:base.db\n\
              db_connections: 20\n",
-        )
-        .unwrap();
+        );
         let path = file.display().to_string();
 
         let s = parse(&["--settings", &path])
