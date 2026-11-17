@@ -228,6 +228,14 @@ impl Remote for Service {
         .await
     }
 
+    async fn my_user_fields(&self, req: Request<pb::Empty>) -> Reply<pb::UserFields> {
+        // Логин клиенту не нужен: это свойства того, кто спрашивает.
+        self.with(req, |e, _| {
+            Ok(ostov_proto::user_fields_to_pb("", e.my_user_fields()?))
+        })
+        .await
+    }
+
     async fn admin_set_user_fields(&self, req: Request<pb::UserFields>) -> Reply<pb::Empty> {
         self.with(req, |e, u| {
             let fields = ostov_proto::user_fields_from_pb(u.fields)?;

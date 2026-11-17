@@ -32,6 +32,7 @@ service Engine {
   rpc AdminSetUserActive(UserActive) returns (Empty);
   rpc AdminSetUserPassword(UserPassword) returns (Empty);
   rpc AdminUserFields(UserLogin) returns (UserFields);
+  rpc MyUserFields(Empty) returns (UserFields);
   rpc AdminSetUserFields(UserFields) returns (Empty);
   rpc AdminJournal(JournalRequest) returns (JournalList);
   rpc AdminBackup(BackupRequest) returns (JobId);

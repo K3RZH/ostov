@@ -171,6 +171,7 @@ fn warehouse_over_network(connect: Option<Connect>, name: &str) {
             title: Some("Основной".into())
         }]
     );
+    assert_eq!(engine.my_user_fields().unwrap(), got);
     let wrong = ostov_api::UserFields::from([("shoe".to_owned(), vec![])]);
     let refused = engine.admin_set_user_fields("boss", &wrong).unwrap_err();
     assert_eq!(refused.code, ErrorCode::Validation);

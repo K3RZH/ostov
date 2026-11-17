@@ -1073,6 +1073,10 @@ impl Engine for LocalEngine {
         self.guarded("AdminUserFields", || self.run_admin_user_fields(login))
     }
 
+    fn my_user_fields(&self) -> EngineResult<ostov_api::UserFields> {
+        self.guarded("MyUserFields", || self.run_my_user_fields())
+    }
+
     fn admin_set_user_fields(
         &self,
         login: &str,

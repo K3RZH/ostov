@@ -147,15 +147,39 @@ impl LocalEngine {
         self.need_system(|s| s.admin, "администрирование")?;
         let mut db = self.db()?;
         let (_, login) = user(&mut **db, login)?;
+        self.read_fields(&mut **db, &login)
+    }
+
+    /// Свои свойства того, кто вошёл: например, его склады для выбора ссылки. Права
+    /// администратора не нужны; база без пользователей — все свойства пустые.
+    pub(super) fn run_my_user_fields(&self) -> EngineResult<UserFields> {
+        let login = self.access().user.as_ref().map(|u| u.login.clone());
+        let mut db = self.db()?;
+        match login {
+            Some(login) => self.read_fields(&mut **db, &login),
+            None => {
+                self.need_system(|_| true, "свойства")?;
+                Ok(self
+                    .config
+                    .meta
+                    .user_fields
+                    .iter()
+                    .map(|f| (f.field.name.clone(), Vec::new()))
+                    .collect())
+            }
+        }
+    }
+
+    fn read_fields(&self, db: &mut dyn Driver, login: &str) -> EngineResult<UserFields> {
         let mut out = UserFields::new();
         for def in &self.config.meta.user_fields {
             let def = &def.field;
-            let mut list: Vec<ostov_api::Value> = values(&mut **db, &login, def)
+            let mut list: Vec<ostov_api::Value> = values(db, login, def)
                 .map_err(error)?
                 .iter()
                 .map(value_to_api)
                 .collect();
-            self.titles(&mut **db, def, &mut list)?;
+            self.titles(db, def, &mut list)?;
             out.insert(def.name.clone(), list);
         }
         Ok(out)

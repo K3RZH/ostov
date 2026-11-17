@@ -114,6 +114,11 @@ pub trait Engine: Send + Sync {
     fn admin_user_fields(&self, _login: &str) -> EngineResult<UserFields> {
         Err(EngineError::not_implemented("AdminUserFields"))
     }
+    /// Свои свойства того, кто вошёл (без права администратора): по ним интерфейс показывает
+    /// в выборе ссылки только его значения, например его склады.
+    fn my_user_fields(&self) -> EngineResult<UserFields> {
+        Err(EngineError::not_implemented("MyUserFields"))
+    }
     /// Записывает переданные свойства, остальные не трогает; пустой список очищает свойство.
     fn admin_set_user_fields(&self, _login: &str, _fields: &UserFields) -> EngineResult<()> {
         Err(EngineError::not_implemented("AdminSetUserFields"))

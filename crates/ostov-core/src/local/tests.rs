@@ -2950,6 +2950,11 @@ fn user_fields_are_set_by_admin_and_read_with_titles() {
     );
 
     engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    // Свои свойства кладовщик видит и без права администратора — для выбора ссылки.
+    let mine = engine.my_user_fields().unwrap();
+    let titles: Vec<Option<String>> = mine["warehouses"].iter().map(title).collect();
+    assert_eq!(titles, [Some("Основной".into()), Some("Холодный".into())]);
+    assert!(mine["badge"].is_empty());
     assert_eq!(
         engine.admin_user_fields("keeper").unwrap_err().code,
         ErrorCode::Forbidden

@@ -353,6 +353,14 @@ impl Engine for RemoteEngine {
         ostov_proto::user_fields_from_pb(reply.fields)
     }
 
+    fn my_user_fields(&self) -> EngineResult<UserFields> {
+        let reply = self.call(
+            pb::Empty {},
+            |mut c, r| async move { c.my_user_fields(r).await },
+        )?;
+        ostov_proto::user_fields_from_pb(reply.fields)
+    }
+
     fn admin_set_user_fields(&self, login: &str, fields: &UserFields) -> EngineResult<()> {
         let u = ostov_proto::user_fields_to_pb(login, fields.clone());
         self.call(
