@@ -125,8 +125,13 @@ fn server_program_explains_bad_start() {
         assert!(!out.status.success());
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
-    assert!(run(&[], None).contains("папка конфигурации"));
+    // Без аргументов сервер берёт файл настроек по умолчанию и стартует: здесь его не
+    // запускаем, чтобы не трогать настройки компьютера.
     assert!(run(&["--config", "config"], None).contains("OSTOV_DB_URL"));
+    let bad = std::env::temp_dir().join(format!("ostov-bad-settings-{}.yaml", std::process::id()));
+    std::fs::write(&bad, "port: 7700\n").unwrap();
+    assert!(run(&["--settings", bad.to_str().unwrap()], None).contains("port"));
+    let _ = std::fs::remove_file(bad);
     let missing = std::env::temp_dir().join("ostov-нет-такой-папки");
     assert!(
         run(
@@ -135,4 +140,50 @@ fn server_program_explains_bad_start() {
         )
         .contains("конфигурации")
     );
+}
+
+/// Первый запуск службы: одного `--settings` на несуществующий файл хватает — сервер
+/// создаёт файл, базу и сертификаты рядом и работает со встроенным «Складом».
+#[tokio::test]
+async fn server_program_starts_from_settings_file_alone() {
+    let dir = std::env::temp_dir().join(format!("ostov-bin-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = dir.join("etc").join("server.yaml");
+    let port = free_port();
+    let child = Command::new(env!("CARGO_BIN_EXE_ostov-server"))
+        .args(["--settings", settings.to_str().unwrap()])
+        .args(["--listen", &format!("127.0.0.1:{port}")])
+        .env_remove("OSTOV_DB_URL")
+        .stdout(std::fs::File::create(dir.join("out.txt")).unwrap())
+        .stderr(std::fs::File::create(dir.join("err.txt")).unwrap())
+        .spawn()
+        .unwrap();
+    let _server = Process(child, dir.clone());
+    let cert = dir.join("etc").join("tls").join(ostov_server::CA_FILE);
+    let check = cert.clone();
+    tokio::task::spawn_blocking(move || wait_for(&check, port))
+        .await
+        .unwrap();
+    assert!(settings.exists());
+    assert!(dir.join("etc").join("base.db").exists());
+    let out = std::fs::read_to_string(dir.join("out.txt")).unwrap();
+    assert!(out.contains("создан файл настроек"), "{out}");
+
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(std::fs::read(&cert).unwrap()))
+        .domain_name("localhost");
+    let channel = Endpoint::from_shared(format!("https://localhost:{port}"))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let hello = EngineClient::new(channel)
+        .hello(pb::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(hello.first_run);
 }

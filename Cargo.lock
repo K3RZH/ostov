@@ -3978,6 +3978,8 @@ dependencies = [
  "ostov-sec",
  "ostov-store",
  "rcgen",
+ "serde",
+ "serde-saphyr",
  "tokio",
  "tokio-stream",
  "tonic",

@@ -23,6 +23,8 @@ ostov-py = { path = "../ostov-py" }
 ostov-sec = { path = "../ostov-sec" }
 ostov-store = { path = "../ostov-store", features = ["postgres", "sqlite"] }
 rcgen = "=0.14.10"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
 tokio-stream = { version = "=0.1.19", features = ["net"] }
 tonic = { version = "=0.14.9", features = ["tls-ring"] }
