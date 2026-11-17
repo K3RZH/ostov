@@ -3179,7 +3179,7 @@ fn role_reads_register_without_rights_on_it() {
         )
         .unwrap();
     assert_eq!(found.rows.len(), 1);
-    // Расход кладовщика проводится: правило читает остатки с его правами.
+    // Расход кладовщика проводится: правило читает остатки.
     let issue = stock_doc(main, None, flour);
     engine.save("issue", &issue, PostAction::Post).unwrap();
     // А на чужой документ права по-прежнему нет.
@@ -3203,4 +3203,123 @@ fn restriction_is_checked_with_configuration() {
     assert!(broken(|r| r.field = "shelf".into()));
     assert!(broken(|r| r.user_field = "shops".into()));
     assert!(broken(|r| r.field = "number".into()));
+}
+
+/// Правило расхода, которое смотрит на чужие данные: поступления (кладовщику их не видно)
+/// и остатки всех складов (ему видно только свои).
+struct Peeking {
+    inner: Box<dyn crate::PostingRule>,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl crate::PostingRule for Peeking {
+    fn movements(&self, doc: &crate::Document) -> Result<crate::Moves, crate::CoreError> {
+        self.inner.movements(doc)
+    }
+
+    fn movements_reading(
+        &self,
+        doc: &crate::Document,
+        read: &mut dyn crate::Reader,
+    ) -> Result<crate::Moves, crate::CoreError> {
+        let none = std::collections::BTreeMap::new();
+        let receipts = read.query("SELECT COUNT(id) AS n FROM receipt", &none)?;
+        let stock = read.query("SELECT SUM(qty * kind) AS qty FROM stock", &none)?;
+        let seen = format!("{:?} {:?}", receipts.rows, stock.rows);
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(seen);
+        self.inner.movements_reading(doc, read)
+    }
+
+    fn prepare(
+        &self,
+        header: &mut crate::Fields,
+        parts: &mut crate::Parts,
+    ) -> Result<(), crate::CoreError> {
+        self.inner.prepare(header, parts)
+    }
+}
+
+struct PeekingRules(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl super::Rules for PeekingRules {
+    fn rule(&self, document: &ostov_model::DocumentDef) -> Option<Box<dyn crate::PostingRule>> {
+        let inner = super::Rules::rule(&super::BuiltinRules, document)?;
+        if document.name != "issue" {
+            return Some(inner);
+        }
+        Some(Box::new(Peeking {
+            inner,
+            seen: Arc::clone(&self.0),
+        }))
+    }
+}
+
+/// С-10: правило проведения читает всю базу, без прав и ограничений того, кто проводит, —
+/// документ проводится одинаково, кто бы его ни провёл. Записать чужое по-прежнему нельзя.
+#[test]
+fn posting_rule_reads_whole_base_whoever_posts() {
+    use ostov_api::UserFields;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base = Base::new("rule-reads-all");
+    let engine = LocalConnector::new(restricted_model())
+        .with_rules(Arc::new(PeekingRules(Arc::clone(&seen))))
+        .create_local(&base.path, None, None)
+        .unwrap();
+    engine.create_first_admin("boss", ADMIN_PASSWORD).unwrap();
+    engine
+        .admin_add_user(&ostov_api::NewUser {
+            login: "keeper".into(),
+            display_name: "Кладовщик".into(),
+            role: "storekeeper".into(),
+            password: KEEPER_PASSWORD.into(),
+        })
+        .unwrap();
+    let main = add(&*engine, "warehouses", "Основной");
+    let cold = add(&*engine, "warehouses", "Холодный");
+    let mill = add(&*engine, "suppliers", "Мельница");
+    let flour = add(&*engine, "goods", "Мука");
+    for w in [main, cold, main] {
+        let receipt = stock_doc(w, Some(mill), flour);
+        engine.save("receipt", &receipt, PostAction::Post).unwrap();
+    }
+    let only_main = UserFields::from([("warehouses".to_owned(), vec![refer(main)])]);
+    engine.admin_set_user_fields("keeper", &only_main).unwrap();
+
+    let by_boss = engine
+        .save("issue", &stock_doc(main, None, flour), PostAction::Post)
+        .unwrap();
+    engine.login("keeper", KEEPER_PASSWORD).unwrap();
+    let by_keeper = engine
+        .save("issue", &stock_doc(main, None, flour), PostAction::Post)
+        .unwrap();
+    assert_ne!(by_boss.id, by_keeper.id);
+
+    // Оба раза правило видело все три поступления и остаток всех складов, а не своих.
+    let seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen[0].contains("Int(3)"), "{seen:?}");
+    assert!(seen[1].contains("Int(3)"), "{seen:?}");
+    // Остаток всех складов: 3 кг до первого расхода, 2 кг до второго; своего у кладовщика — 1 кг.
+    assert!(
+        seen[0].contains("units: 3000") && seen[1].contains("units: 2000"),
+        "{seen:?}"
+    );
+
+    // Сам кладовщик запросом видит только свой склад, и чужой расход провести не может.
+    let mine = engine
+        .query("SELECT SUM(qty * kind) AS qty FROM stock", &Fields::new())
+        .unwrap();
+    assert!(
+        format!("{:?}", mine.rows[0][0]).contains("units: 0,"),
+        "{mine:?}"
+    );
+    let foreign = engine.save("issue", &stock_doc(cold, None, flour), PostAction::Post);
+    assert_eq!(foreign.unwrap_err().code, ErrorCode::Forbidden);
 }

@@ -248,21 +248,20 @@ impl LocalEngine {
         }
     }
 
-    /// Движения документа; правило читает базу с правами того, кто проводит.
+    /// Движения документа. Правило — код конфигурации и читает всю базу, без прав и
+    /// ограничений того, кто проводит: документ проводится одинаково, кто бы его ни провёл (С-10).
+    /// Что пользователь может записать, проверено раньше, на входе команды.
     fn movements(
         &self,
         cfg: &DocumentConfig,
         db: &mut dyn Driver,
         doc: &Document,
-        can_read: &dyn Fn(&str) -> bool,
     ) -> Result<crate::Moves, crate::CoreError> {
-        let limits = self.limits(db)?;
-        let within = |object: &str| limits.get(object).cloned();
         let mut reader = crate::DbReader {
             db,
             model: &self.config.model,
-            can_read,
-            within: &within,
+            can_read: &|_| true,
+            within: &|_| None,
             trace: self.trace.as_ref(),
         };
         let started = std::time::Instant::now();
@@ -862,9 +861,7 @@ impl LocalEngine {
                     None => None,
                 };
                 let registers = self.config.registers_of(cfg);
-                let can_read = self.can_read();
-                let rule =
-                    |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
+                let rule = |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc);
                 let doc = match data.id {
                     None if post == PostAction::Post => {
                         posting::insert_and_post_to(db, &cfg.kind, &registers, fields, parts, rule)?
@@ -991,10 +988,8 @@ impl LocalEngine {
         let cfg = self.document(document)?;
         let mut db = self.db()?;
         let registers = self.config.registers_of(cfg);
-        let can_read = self.can_read();
         in_transaction(&mut **db, |db| {
-            let rule =
-                |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc, &can_read);
+            let rule = |db: &mut dyn Driver, doc: &Document| self.movements(cfg, db, doc);
             posting::post_to(db, &cfg.kind, &registers, id, rule)?;
             self.journal(db, Action::Post, document, Some(id), &[], "")
         })
