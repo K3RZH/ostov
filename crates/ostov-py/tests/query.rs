@@ -204,7 +204,7 @@ fn bad_query_is_script_error() {
 }
 
 #[test]
-fn query_in_rule_has_rights_of_who_posts() {
+fn query_in_rule_reads_whole_base_whoever_posts() {
     let mut model = model();
     let read = ostov_model::Rights {
         read: true,
@@ -228,7 +228,9 @@ fn query_in_rule_has_rights_of_who_posts() {
         system: ostov_model::SystemRights::default(),
         restrictions: Vec::new(),
     });
-    let script = "def on_post(doc, ctx):\n    ctx.query(\"SELECT number FROM receipt\")\n";
+    // Права на поступления у сборщика нет, но правило — код конфигурации и читает всю базу (С-10).
+    let script = "def on_post(doc, ctx):\n    \
+                  assert len(ctx.query(\"SELECT number FROM receipt\")) == 1\n";
     let base = Base::new("ctx-query-rights", script);
     let admin = NewAdmin {
         login: "boss".into(),
@@ -246,10 +248,13 @@ fn query_in_rule_has_rights_of_who_posts() {
         .unwrap();
     engine.logout().unwrap();
     engine.login("keeper", "keeper-password-1").unwrap();
-    let err = engine
+    engine
         .save("issue", &issue(main, flour, 1_000), PostAction::Post)
+        .unwrap();
+    // А сам он запросом поступления не видит.
+    let err = engine
+        .query("SELECT number FROM receipt", &Fields::new())
         .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Validation);
     assert_eq!(err.message, "Нет права на просмотр «Поступление»");
 }
 
